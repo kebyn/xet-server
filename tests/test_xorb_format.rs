@@ -82,3 +82,75 @@ fn test_xorb_chunk_header_byte_layout() {
     assert_eq!(buf[4], 1); // LZ4
     assert_eq!(&buf[5..8], &[0xEF, 0xCD, 0xAB]); // uncompressed_length LE
 }
+
+use xet_server::format::xorb::XorbObjectInfoV1;
+use xet_server::types::MerkleHash;
+
+#[test]
+fn test_xorb_footer_idents() {
+    assert_eq!(&XorbObjectInfoV1::IDENT_MAIN, b"XETBLOB");
+    assert_eq!(&XorbObjectInfoV1::IDENT_HASHES, b"XBLBHSH");
+    assert_eq!(&XorbObjectInfoV1::IDENT_BOUNDARIES, b"XBLBBND");
+}
+
+#[test]
+fn test_xorb_footer_roundtrip() {
+    let footer = XorbObjectInfoV1 {
+        xorb_hash: MerkleHash::from([0xAB; 32]),
+        chunk_hashes: vec![
+            MerkleHash::from([0x11; 32]),
+            MerkleHash::from([0x22; 32]),
+        ],
+        chunk_boundary_offsets: vec![1000, 2000],
+        unpacked_chunk_offsets: vec![65536, 131072],
+    };
+
+    let mut buf = Vec::new();
+    footer.serialize(&mut buf).unwrap();
+
+    let mut cursor = std::io::Cursor::new(&buf);
+    let parsed = XorbObjectInfoV1::deserialize(&mut cursor).unwrap();
+
+    assert_eq!(parsed.xorb_hash, footer.xorb_hash);
+    assert_eq!(parsed.chunk_hashes, footer.chunk_hashes);
+    assert_eq!(parsed.chunk_boundary_offsets, footer.chunk_boundary_offsets);
+    assert_eq!(parsed.unpacked_chunk_offsets, footer.unpacked_chunk_offsets);
+}
+
+#[test]
+fn test_xorb_footer_empty_chunks() {
+    let footer = XorbObjectInfoV1 {
+        xorb_hash: MerkleHash::default(),
+        chunk_hashes: vec![],
+        chunk_boundary_offsets: vec![],
+        unpacked_chunk_offsets: vec![],
+    };
+
+    let mut buf = Vec::new();
+    footer.serialize(&mut buf).unwrap();
+
+    let mut cursor = std::io::Cursor::new(&buf);
+    let parsed = XorbObjectInfoV1::deserialize(&mut cursor).unwrap();
+
+    assert_eq!(parsed.chunk_hashes.len(), 0);
+}
+
+#[test]
+fn test_xorb_footer_many_chunks() {
+    let num_chunks = 100;
+    let footer = XorbObjectInfoV1 {
+        xorb_hash: MerkleHash::from([0xFF; 32]),
+        chunk_hashes: (0..num_chunks).map(|i| MerkleHash::from([i as u8; 32])).collect(),
+        chunk_boundary_offsets: (1..=num_chunks).map(|i| i * 1000).collect(),
+        unpacked_chunk_offsets: (1..=num_chunks).map(|i| i * 65536).collect(),
+    };
+
+    let mut buf = Vec::new();
+    footer.serialize(&mut buf).unwrap();
+
+    let mut cursor = std::io::Cursor::new(&buf);
+    let parsed = XorbObjectInfoV1::deserialize(&mut cursor).unwrap();
+
+    assert_eq!(parsed.chunk_hashes.len(), num_chunks as usize);
+    assert_eq!(parsed.chunk_boundary_offsets.len(), num_chunks as usize);
+}
