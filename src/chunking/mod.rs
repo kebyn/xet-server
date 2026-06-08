@@ -1,1 +1,3 @@
-// Chunking module - placeholder for chunking implementations
+mod cdc;
+
+pub use cdc::{Chunker, ChunkConfig, Chunk};
