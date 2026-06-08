@@ -1,0 +1,1 @@
+// Hash module - placeholder for hash implementations

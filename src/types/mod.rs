@@ -1,0 +1,1 @@
+// Types module - placeholder for type definitions
