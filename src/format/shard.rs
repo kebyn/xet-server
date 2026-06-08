@@ -316,3 +316,84 @@ impl XorbChunkSequenceEntry {
         })
     }
 }
+
+use std::io::Cursor;
+
+/// High-level shard file representation
+///
+/// Contains parsed metadata from a shard file for indexing and querying.
+#[derive(Debug, Clone)]
+pub struct MDBShardFile {
+    pub header: MDBShardFileHeader,
+    pub footer: MDBShardFileFooter,
+    pub file_entries: Vec<FileDataSequenceHeader>,
+    pub xorb_entries: Vec<XorbChunkSequenceHeader>,
+    pub file_hashes: Vec<MerkleHash>,
+    pub chunk_mappings: Vec<(MerkleHash, MerkleHash, u32)>, // (chunk_hash, xorb_hash, chunk_index)
+    raw_data: Vec<u8>,
+}
+
+impl MDBShardFile {
+    /// Parse a shard file from binary data
+    pub fn parse(data: &[u8]) -> XetResult<Self> {
+        let mut cursor = Cursor::new(data);
+
+        // Parse header
+        let header = MDBShardFileHeader::deserialize(&mut cursor)?;
+
+        // Verify magic tag
+        let expected_tag = MDBShardFileHeader::default().tag;
+        if header.tag != expected_tag {
+            return Err(crate::error::XetError::ParseError(
+                "Invalid shard magic tag".to_string(),
+            ));
+        }
+
+        // Verify footer offset
+        if header.footer_size != 208 {
+            return Err(crate::error::XetError::ParseError(
+                format!("Invalid footer size: expected 208, got {}", header.footer_size),
+            ));
+        }
+
+        // Parse footer (at end of file)
+        let footer_start = data.len() - 208;
+        let mut footer_cursor = Cursor::new(&data[footer_start..]);
+        let footer = MDBShardFileFooter::deserialize(&mut footer_cursor)?;
+
+        // For now, we'll do a simplified parse - just extract what we need for indexing
+        // In a full implementation, we would parse all sections using the offsets
+
+        let file_hashes = Vec::new();
+        let chunk_mappings = Vec::new();
+        let file_entries = Vec::new();
+        let xorb_entries = Vec::new();
+
+        Ok(Self {
+            header,
+            footer,
+            file_entries,
+            xorb_entries,
+            file_hashes,
+            chunk_mappings,
+            raw_data: data.to_vec(),
+        })
+    }
+
+    /// Compute hash of the shard (using the raw data)
+    pub fn compute_hash(&self) -> String {
+        use crate::hash::compute_data_hash;
+        let hash = compute_data_hash(&self.raw_data);
+        hash.to_hex()
+    }
+
+    /// Get file hashes contained in this shard
+    pub fn file_hashes(&self) -> &[MerkleHash] {
+        &self.file_hashes
+    }
+
+    /// Get chunk-to-xorb mappings
+    pub fn chunk_mappings(&self) -> &[(MerkleHash, MerkleHash, u32)] {
+        &self.chunk_mappings
+    }
+}
