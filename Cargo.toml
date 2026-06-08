@@ -12,3 +12,12 @@ hex = "0.4"
 
 [dev-dependencies]
 rand = "0.8"
+criterion = "0.5"
+
+[[bench]]
+name = "bench_hash"
+harness = false
+
+[[bench]]
+name = "bench_chunking"
+harness = false
