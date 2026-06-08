@@ -1,1 +1,3 @@
-// Types module - placeholder for type definitions
+mod merkle_hash;
+
+pub use merkle_hash::MerkleHash;
