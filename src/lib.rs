@@ -40,5 +40,9 @@ pub mod types;
 pub mod hash;
 pub mod chunking;
 pub mod format;
+pub mod config;
+pub mod storage;
+pub mod api;
+pub mod server;
 
 pub use error::{XetError, Result};
