@@ -1,0 +1,1 @@
+// Merkle tree implementation - placeholder for future implementation

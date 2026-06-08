@@ -1,0 +1,1 @@
+// Merkle hash type - placeholder for future implementation
