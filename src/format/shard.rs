@@ -144,3 +144,175 @@ fn read_u64<R: Read>(reader: &mut R) -> XetResult<u64> {
     reader.read_exact(&mut buf)?;
     Ok(u64::from_le_bytes(buf))
 }
+
+fn read_u32<R: Read>(reader: &mut R) -> XetResult<u32> {
+    let mut buf = [0u8; 4];
+    reader.read_exact(&mut buf)?;
+    Ok(u32::from_le_bytes(buf))
+}
+
+use crate::types::MerkleHash;
+
+/// File data sequence header (48 bytes)
+///
+/// Introduces a file's reconstruction info, followed by num_entries FileDataSequenceEntry structs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FileDataSequenceHeader {
+    pub file_hash: MerkleHash,
+    pub file_flags: u32,
+    pub num_entries: u32,
+}
+
+impl FileDataSequenceHeader {
+    pub fn serialize<W: Write>(&self, writer: &mut W) -> Result<()> {
+        writer.write_all(self.file_hash.as_bytes())?; // 32 bytes
+        writer.write_all(&self.file_flags.to_le_bytes())?; // 4 bytes
+        writer.write_all(&self.num_entries.to_le_bytes())?; // 4 bytes
+        writer.write_all(&[0u8; 8])?; // _unused: 8 bytes
+        // Total: 48 bytes
+        Ok(())
+    }
+
+    pub fn deserialize<R: Read>(reader: &mut R) -> XetResult<Self> {
+        let mut hash_bytes = [0u8; 32];
+        reader.read_exact(&mut hash_bytes)?;
+        let file_hash = MerkleHash::from(hash_bytes);
+
+        let file_flags = read_u32(reader)?;
+        let num_entries = read_u32(reader)?;
+
+        let mut unused = [0u8; 8];
+        reader.read_exact(&mut unused)?;
+
+        Ok(Self { file_hash, file_flags, num_entries })
+    }
+}
+
+/// File data sequence entry (48 bytes)
+///
+/// Maps a range of chunks in a xorb to a portion of a file.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FileDataSequenceEntry {
+    pub xorb_hash: MerkleHash,
+    pub xorb_flags: u32,
+    pub unpacked_segment_bytes: u32,
+    pub chunk_index_start: u32,
+    pub chunk_index_end: u32,
+}
+
+impl FileDataSequenceEntry {
+    pub fn serialize<W: Write>(&self, writer: &mut W) -> Result<()> {
+        writer.write_all(self.xorb_hash.as_bytes())?; // 32 bytes
+        writer.write_all(&self.xorb_flags.to_le_bytes())?; // 4 bytes
+        writer.write_all(&self.unpacked_segment_bytes.to_le_bytes())?; // 4 bytes
+        writer.write_all(&self.chunk_index_start.to_le_bytes())?; // 4 bytes
+        writer.write_all(&self.chunk_index_end.to_le_bytes())?; // 4 bytes
+        // Total: 48 bytes
+        Ok(())
+    }
+
+    pub fn deserialize<R: Read>(reader: &mut R) -> XetResult<Self> {
+        let mut hash_bytes = [0u8; 32];
+        reader.read_exact(&mut hash_bytes)?;
+        let xorb_hash = MerkleHash::from(hash_bytes);
+
+        let xorb_flags = read_u32(reader)?;
+        let unpacked_segment_bytes = read_u32(reader)?;
+        let chunk_index_start = read_u32(reader)?;
+        let chunk_index_end = read_u32(reader)?;
+
+        Ok(Self {
+            xorb_hash,
+            xorb_flags,
+            unpacked_segment_bytes,
+            chunk_index_start,
+            chunk_index_end,
+        })
+    }
+}
+
+/// Xorb chunk sequence header (48 bytes)
+///
+/// Introduces a xorb's chunk info, followed by num_entries XorbChunkSequenceEntry structs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct XorbChunkSequenceHeader {
+    pub xorb_hash: MerkleHash,
+    pub xorb_flags: u32,
+    pub num_entries: u32,
+    pub num_bytes_in_xorb: u32,
+    pub num_bytes_on_disk: u32,
+}
+
+impl XorbChunkSequenceHeader {
+    pub fn serialize<W: Write>(&self, writer: &mut W) -> Result<()> {
+        writer.write_all(self.xorb_hash.as_bytes())?; // 32 bytes
+        writer.write_all(&self.xorb_flags.to_le_bytes())?; // 4 bytes
+        writer.write_all(&self.num_entries.to_le_bytes())?; // 4 bytes
+        writer.write_all(&self.num_bytes_in_xorb.to_le_bytes())?; // 4 bytes
+        writer.write_all(&self.num_bytes_on_disk.to_le_bytes())?; // 4 bytes
+        // Total: 48 bytes
+        Ok(())
+    }
+
+    pub fn deserialize<R: Read>(reader: &mut R) -> XetResult<Self> {
+        let mut hash_bytes = [0u8; 32];
+        reader.read_exact(&mut hash_bytes)?;
+        let xorb_hash = MerkleHash::from(hash_bytes);
+
+        let xorb_flags = read_u32(reader)?;
+        let num_entries = read_u32(reader)?;
+        let num_bytes_in_xorb = read_u32(reader)?;
+        let num_bytes_on_disk = read_u32(reader)?;
+
+        Ok(Self {
+            xorb_hash,
+            xorb_flags,
+            num_entries,
+            num_bytes_in_xorb,
+            num_bytes_on_disk,
+        })
+    }
+}
+
+/// Xorb chunk sequence entry (48 bytes)
+///
+/// Describes a single chunk within a xorb.
+#[derive(Debug, Clone, PartialEq)]
+pub struct XorbChunkSequenceEntry {
+    pub chunk_hash: MerkleHash,
+    pub chunk_byte_range_start: u32,
+    pub unpacked_segment_bytes: u32,
+    pub flags: u32,
+}
+
+impl XorbChunkSequenceEntry {
+    pub fn serialize<W: Write>(&self, writer: &mut W) -> Result<()> {
+        writer.write_all(self.chunk_hash.as_bytes())?; // 32 bytes
+        writer.write_all(&self.chunk_byte_range_start.to_le_bytes())?; // 4 bytes
+        writer.write_all(&self.unpacked_segment_bytes.to_le_bytes())?; // 4 bytes
+        writer.write_all(&self.flags.to_le_bytes())?; // 4 bytes
+        writer.write_all(&[0u8; 4])?; // _unused: 4 bytes
+        // Total: 48 bytes
+        Ok(())
+    }
+
+    pub fn deserialize<R: Read>(reader: &mut R) -> XetResult<Self> {
+        let mut hash_bytes = [0u8; 32];
+        reader.read_exact(&mut hash_bytes)?;
+        let chunk_hash = MerkleHash::from(hash_bytes);
+
+        let chunk_byte_range_start = read_u32(reader)?;
+        let unpacked_segment_bytes = read_u32(reader)?;
+        let flags = read_u32(reader)?;
+
+        let mut unused = [0u8; 4];
+        reader.read_exact(&mut unused)?;
+
+        Ok(Self {
+            chunk_hash,
+            chunk_byte_range_start,
+            unpacked_segment_bytes,
+            flags,
+        })
+    }
+}
