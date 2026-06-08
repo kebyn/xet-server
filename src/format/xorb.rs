@@ -1,6 +1,8 @@
 use std::io::{Read, Write, Result};
 use crate::format::compression::CompressionScheme;
 use crate::error::Result as XetResult;
+use crate::error::XetError;
+use crate::types::MerkleHash;
 
 /// Xorb chunk header (8 bytes, packed)
 ///
@@ -59,6 +61,128 @@ impl XorbChunkHeader {
             compressed_length,
             compression_scheme,
             uncompressed_length,
+        })
+    }
+}
+
+/// Xorb object footer (XorbObjectInfoV1)
+///
+/// Contains chunk hashes and boundary information for range queries.
+/// Stored at the end of each Xorb object.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct XorbObjectInfoV1 {
+    pub xorb_hash: MerkleHash,
+    pub chunk_hashes: Vec<MerkleHash>,
+    pub chunk_boundary_offsets: Vec<u32>,
+    pub unpacked_chunk_offsets: Vec<u32>,
+}
+
+impl XorbObjectInfoV1 {
+    pub const IDENT_MAIN: [u8; 7] = *b"XETBLOB";
+    pub const IDENT_HASHES: [u8; 7] = *b"XBLBHSH";
+    pub const IDENT_BOUNDARIES: [u8; 7] = *b"XBLBBND";
+
+    /// Serialize to bytes
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        self.serialize(&mut buf).unwrap();
+        buf
+    }
+
+    /// Deserialize from bytes
+    pub fn from_bytes(data: &[u8]) -> XetResult<Self> {
+        let mut cursor = std::io::Cursor::new(data);
+        Self::deserialize(&mut cursor)
+    }
+
+    pub fn serialize<W: Write>(&self, writer: &mut W) -> Result<()> {
+        let num_chunks = self.chunk_hashes.len() as u32;
+
+        // Hashes section
+        writer.write_all(&Self::IDENT_HASHES)?;
+        writer.write_all(&[0u8])?; // hashes_version
+        writer.write_all(&num_chunks.to_le_bytes())?; // Store num_chunks here for easier parsing
+        for hash in &self.chunk_hashes {
+            writer.write_all(hash.as_bytes())?;
+        }
+
+        // Boundaries section
+        writer.write_all(&Self::IDENT_BOUNDARIES)?;
+        writer.write_all(&[1u8])?; // boundaries_version
+        for offset in &self.chunk_boundary_offsets {
+            writer.write_all(&offset.to_le_bytes())?;
+        }
+        for offset in &self.unpacked_chunk_offsets {
+            writer.write_all(&offset.to_le_bytes())?;
+        }
+
+        // Header
+        writer.write_all(&Self::IDENT_MAIN)?;
+        writer.write_all(&[1u8])?; // version
+        writer.write_all(self.xorb_hash.as_bytes())?;
+
+        Ok(())
+    }
+
+    pub fn deserialize<R: Read>(reader: &mut R) -> XetResult<Self> {
+        // Read hashes section
+        let mut ident = [0u8; 7];
+        reader.read_exact(&mut ident)?;
+        if ident != Self::IDENT_HASHES {
+            return Err(XetError::ParseError("Expected hashes section".into()));
+        }
+
+        let mut version = [0u8; 1];
+        reader.read_exact(&mut version)?;
+
+        let mut num_buf = [0u8; 4];
+        reader.read_exact(&mut num_buf)?;
+        let num_chunks = u32::from_le_bytes(num_buf);
+
+        let mut chunk_hashes = Vec::with_capacity(num_chunks as usize);
+        for _ in 0..num_chunks {
+            let mut hash_bytes = [0u8; 32];
+            reader.read_exact(&mut hash_bytes)?;
+            chunk_hashes.push(MerkleHash::from(hash_bytes));
+        }
+
+        // Read boundaries section
+        reader.read_exact(&mut ident)?;
+        if ident != Self::IDENT_BOUNDARIES {
+            return Err(XetError::ParseError("Expected boundaries section".into()));
+        }
+
+        reader.read_exact(&mut version)?;
+
+        let mut chunk_boundary_offsets = Vec::with_capacity(num_chunks as usize);
+        for _ in 0..num_chunks {
+            reader.read_exact(&mut num_buf)?;
+            chunk_boundary_offsets.push(u32::from_le_bytes(num_buf));
+        }
+
+        let mut unpacked_chunk_offsets = Vec::with_capacity(num_chunks as usize);
+        for _ in 0..num_chunks {
+            reader.read_exact(&mut num_buf)?;
+            unpacked_chunk_offsets.push(u32::from_le_bytes(num_buf));
+        }
+
+        // Read header
+        reader.read_exact(&mut ident)?;
+        if ident != Self::IDENT_MAIN {
+            return Err(XetError::ParseError("Expected main ident".into()));
+        }
+
+        reader.read_exact(&mut version)?;
+
+        let mut hash_bytes = [0u8; 32];
+        reader.read_exact(&mut hash_bytes)?;
+        let xorb_hash = MerkleHash::from(hash_bytes);
+
+        Ok(Self {
+            xorb_hash,
+            chunk_hashes,
+            chunk_boundary_offsets,
+            unpacked_chunk_offsets,
         })
     }
 }
