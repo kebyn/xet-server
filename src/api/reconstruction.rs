@@ -69,6 +69,7 @@ pub async fn get_reconstruction_v1(
     // Validate file_id format (should be a hex hash)
     if file_id.len() != 64 || !file_id.chars().all(|c| c.is_ascii_hexdigit()) {
         GLOBAL_METRICS.record_request(400);
+        GLOBAL_METRICS.record_latency(start);
         return HttpResponse::BadRequest().json(serde_json::json!({
             "error": "Invalid file_id format, expected 64-character hex string"
         }));
@@ -79,6 +80,7 @@ pub async fn get_reconstruction_v1(
         Some(ids) => ids,
         None => {
             GLOBAL_METRICS.record_request(404);
+            GLOBAL_METRICS.record_latency(start);
             return HttpResponse::NotFound().json(serde_json::json!({
                 "error": "File not found"
             }));
@@ -101,6 +103,7 @@ pub async fn get_reconstruction_v1(
             Err(e) => {
                 GLOBAL_METRICS.record_request(500);
                 GLOBAL_METRICS.record_error();
+                GLOBAL_METRICS.record_latency(start);
                 return HttpResponse::InternalServerError().json(serde_json::json!({
                     "error": format!("Failed to fetch shard: {}", e)
                 }));
@@ -113,6 +116,7 @@ pub async fn get_reconstruction_v1(
             Err(e) => {
                 GLOBAL_METRICS.record_request(500);
                 GLOBAL_METRICS.record_error();
+                GLOBAL_METRICS.record_latency(start);
                 return HttpResponse::InternalServerError().json(serde_json::json!({
                     "error": format!("Failed to parse shard: {}", e)
                 }));
@@ -166,6 +170,7 @@ pub async fn get_reconstruction(
     // Validate file_id format (should be a hex hash)
     if file_id.len() != 64 || !file_id.chars().all(|c| c.is_ascii_hexdigit()) {
         GLOBAL_METRICS.record_request(400);
+        GLOBAL_METRICS.record_latency(start);
         return HttpResponse::BadRequest().json(serde_json::json!({
             "error": "Invalid file_id format, expected 64-character hex string"
         }));
@@ -176,6 +181,7 @@ pub async fn get_reconstruction(
         Some(ids) => ids,
         None => {
             GLOBAL_METRICS.record_request(404);
+            GLOBAL_METRICS.record_latency(start);
             return HttpResponse::NotFound().json(serde_json::json!({
                 "error": "File not found"
             }));
@@ -199,6 +205,7 @@ pub async fn get_reconstruction(
             Err(e) => {
                 GLOBAL_METRICS.record_request(500);
                 GLOBAL_METRICS.record_error();
+                GLOBAL_METRICS.record_latency(start);
                 return HttpResponse::InternalServerError().json(serde_json::json!({
                     "error": format!("Failed to fetch shard: {}", e)
                 }));
@@ -211,6 +218,7 @@ pub async fn get_reconstruction(
             Err(e) => {
                 GLOBAL_METRICS.record_request(500);
                 GLOBAL_METRICS.record_error();
+                GLOBAL_METRICS.record_latency(start);
                 return HttpResponse::InternalServerError().json(serde_json::json!({
                     "error": format!("Failed to parse shard: {}", e)
                 }));
