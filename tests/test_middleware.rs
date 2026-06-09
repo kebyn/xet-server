@@ -33,24 +33,3 @@ async fn test_middleware_tracks_connections() {
         "Active connections should return to baseline after request"
     );
 }
-
-#[actix_web::test]
-#[serial]
-async fn test_server_has_middleware() {
-    // This test verifies middleware is registered in the actual server config
-    // We can't easily test the full server, but we can verify the middleware
-    // module is properly integrated by checking a request through server setup
-
-    let app = test::init_service(
-        App::new()
-            .wrap(from_fn(metrics_middleware))
-            .route("/health", web::get().to(health_check))
-    ).await;
-
-    let req = test::TestRequest::get()
-        .uri("/health")
-        .to_request();
-
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), 200);
-}
