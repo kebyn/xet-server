@@ -131,6 +131,11 @@ pub async fn get_reconstruction_v1(
         }
     }
 
+    // Calculate total download bytes (sum of all xorb sizes)
+    let total_download_bytes: u64 = xorbs.iter()
+        .map(|x| x.size)
+        .sum();
+
     let response = ReconstructionResponseV1 {
         file_id,
         xorbs,
@@ -138,6 +143,7 @@ pub async fn get_reconstruction_v1(
 
     GLOBAL_METRICS.record_request(200);
     GLOBAL_METRICS.record_storage_operation();
+    GLOBAL_METRICS.record_download_bytes(total_download_bytes);
     GLOBAL_METRICS.record_latency(start);
 
     HttpResponse::Ok().json(response)
