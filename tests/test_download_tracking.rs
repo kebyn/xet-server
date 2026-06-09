@@ -48,39 +48,6 @@ async fn test_v2_reconstruction_tracks_download_bytes() {
 
 #[actix_web::test]
 #[serial]
-async fn test_v1_response_includes_size() {
-    use xet_server::api::reconstruction::get_reconstruction_v1;
-
-    let dir = tempdir().unwrap();
-    let storage: Box<dyn xet_server::storage::StorageBackend> = Box::new(
-        LocalStorage::new(dir.path().to_str().unwrap()).unwrap()
-    );
-
-    let index = MetadataIndex::new();
-    let config = ServerConfig::default();
-
-    let app = test::init_service(
-        App::new()
-            .app_data(web::Data::new(index))
-            .app_data(web::Data::new(storage))
-            .app_data(web::Data::new(config))
-            .route("/v1/reconstructions/{file_id}", web::get().to(get_reconstruction_v1))
-    ).await;
-
-    // Request non-existent file
-    let file_id = "a".repeat(64);
-    let req = test::TestRequest::get()
-        .uri(&format!("/v1/reconstructions/{}", file_id))
-        .to_request();
-
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), 404);
-
-    // This test just verifies the endpoint works after we add the size field
-}
-
-#[actix_web::test]
-#[serial]
 async fn test_v1_reconstruction_tracks_download_bytes() {
     use xet_server::api::reconstruction::get_reconstruction_v1;
 
