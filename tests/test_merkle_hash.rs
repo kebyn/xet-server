@@ -3,14 +3,14 @@ use xet_server::types::MerkleHash;
 #[test]
 fn test_default_hash() {
     let hash = MerkleHash::default();
-    assert_eq!(hash.as_bytes(), &[0u8; 32]);
+    assert_eq!(hash.as_bytes(), [0u8; 32]);
 }
 
 #[test]
 fn test_from_bytes() {
     let bytes = [1u8; 32];
     let hash = MerkleHash::from(bytes);
-    assert_eq!(hash.as_bytes(), &bytes);
+    assert_eq!(hash.as_bytes(), bytes);
 }
 
 #[test]
