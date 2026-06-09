@@ -23,6 +23,7 @@ struct ReconstructionResponseV1 {
 #[derive(Serialize)]
 struct XorbInfoV1 {
     xorb_hash: String,
+    size: u64,
     chunks: Vec<ChunkInfoV1>,
 }
 
@@ -118,9 +119,11 @@ pub async fn get_reconstruction_v1(
         // Extract xorb information (deduplicated)
         for xorb_entry in &shard.xorb_entries {
             let xorb_hash = xorb_entry.xorb_hash.to_hex();
+            let xorb_size = xorb_entry.num_bytes_in_xorb as u64;
             if seen_xorbs.insert(xorb_hash.clone()) {
                 let xorb_info = XorbInfoV1 {
                     xorb_hash,
+                    size: xorb_size,
                     chunks: Vec::new(), // TODO: Populate with actual chunk info
                 };
                 xorbs.push(xorb_info);
