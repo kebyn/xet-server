@@ -80,9 +80,13 @@ fn bg4_split(data: &[u8]) -> Vec<u8> {
 /// Reverse BG4 byte rearrangement
 ///
 /// Restores the original byte order from BG4-grouped data.
-fn bg4_regroup(data: &[u8], original_len: usize) -> Vec<u8> {
+/// Returns an error if the data length doesn't match the expected size.
+fn bg4_regroup(data: &[u8], original_len: usize) -> Result<Vec<u8>> {
     if original_len == 0 {
-        return Vec::new();
+        if !data.is_empty() {
+            return Err(XetError::ParseError("BG4 regroup: expected empty data".into()));
+        }
+        return Ok(Vec::new());
     }
 
     let mut result = vec![0u8; original_len];
@@ -96,12 +100,22 @@ fn bg4_regroup(data: &[u8], original_len: usize) -> Vec<u8> {
     let group2_size = base_size + if remainder > 2 { 1 } else { 0 };
     let group3_size = base_size;
 
+    // Validate data length upfront - BG4 is a permutation, so sizes must match
+    let expected_len = group0_size + group1_size + group2_size + group3_size;
+    if data.len() != expected_len {
+        return Err(XetError::ParseError(format!(
+            "BG4 regroup: data length mismatch - expected {} bytes, got {}",
+            expected_len,
+            data.len()
+        )));
+    }
+
     let mut offset = 0;
 
     // Restore Group 0: positions 0, 4, 8, ...
     for i in 0..group0_size {
         let pos = i * 4;
-        if pos < original_len && offset < data.len() {
+        if pos < original_len {
             result[pos] = data[offset];
             offset += 1;
         }
@@ -110,7 +124,7 @@ fn bg4_regroup(data: &[u8], original_len: usize) -> Vec<u8> {
     // Restore Group 1: positions 1, 5, 9, ...
     for i in 0..group1_size {
         let pos = i * 4 + 1;
-        if pos < original_len && offset < data.len() {
+        if pos < original_len {
             result[pos] = data[offset];
             offset += 1;
         }
@@ -119,7 +133,7 @@ fn bg4_regroup(data: &[u8], original_len: usize) -> Vec<u8> {
     // Restore Group 2: positions 2, 6, 10, ...
     for i in 0..group2_size {
         let pos = i * 4 + 2;
-        if pos < original_len && offset < data.len() {
+        if pos < original_len {
             result[pos] = data[offset];
             offset += 1;
         }
@@ -128,13 +142,22 @@ fn bg4_regroup(data: &[u8], original_len: usize) -> Vec<u8> {
     // Restore Group 3: positions 3, 7, 11, ...
     for i in 0..group3_size {
         let pos = i * 4 + 3;
-        if pos < original_len && offset < data.len() {
+        if pos < original_len {
             result[pos] = data[offset];
             offset += 1;
         }
     }
 
-    result
+    // Final validation - all data should be consumed
+    if offset != data.len() {
+        return Err(XetError::ParseError(format!(
+            "BG4 regroup: data consumption error - processed {} of {} bytes",
+            offset,
+            data.len()
+        )));
+    }
+
+    Ok(result)
 }
 
 pub fn compress(scheme: CompressionScheme, data: &[u8]) -> Result<Vec<u8>> {
@@ -160,7 +183,7 @@ pub fn decompress(scheme: CompressionScheme, data: &[u8], original_size: usize) 
             // LZ4 decompression, then BG4 regrouping
             let decompressed = decompress_size_prepended(data)
                 .map_err(|e| XetError::ParseError(format!("BG4-LZ4 decompression failed: {}", e)))?;
-            Ok(bg4_regroup(&decompressed, original_size))
+            bg4_regroup(&decompressed, original_size)
         }
     }
 }
@@ -208,7 +231,7 @@ mod tests {
     #[test]
     fn test_bg4_regroup_empty() {
         let data = b"";
-        let result = bg4_regroup(data, 0);
+        let result = bg4_regroup(data, 0).unwrap();
         assert_eq!(result, Vec::<u8>::new());
     }
 
@@ -216,7 +239,7 @@ mod tests {
     fn test_bg4_roundtrip_8bytes() {
         let original = b"ABCDEFGH";
         let grouped = bg4_split(original);
-        let restored = bg4_regroup(&grouped, original.len());
+        let restored = bg4_regroup(&grouped, original.len()).unwrap();
         assert_eq!(restored, original);
     }
 
@@ -224,7 +247,7 @@ mod tests {
     fn test_bg4_roundtrip_9bytes() {
         let original = b"ABCDEFGHI";
         let grouped = bg4_split(original);
-        let restored = bg4_regroup(&grouped, original.len());
+        let restored = bg4_regroup(&grouped, original.len()).unwrap();
         assert_eq!(restored, original);
     }
 
@@ -232,8 +255,18 @@ mod tests {
     fn test_bg4_roundtrip_large() {
         let original: Vec<u8> = (0..1000).map(|i| (i % 256) as u8).collect();
         let grouped = bg4_split(&original);
-        let restored = bg4_regroup(&grouped, original.len());
+        let restored = bg4_regroup(&grouped, original.len()).unwrap();
         assert_eq!(restored, original);
+    }
+
+    #[test]
+    fn test_bg4_regroup_truncated_data() {
+        // Test that truncated data returns an error instead of silently producing wrong output
+        let original = b"ABCDEFGH";
+        let grouped = bg4_split(original);
+        let truncated = &grouped[..grouped.len() - 2]; // Remove last 2 bytes
+        let result = bg4_regroup(truncated, original.len());
+        assert!(result.is_err());
     }
 
     #[test]

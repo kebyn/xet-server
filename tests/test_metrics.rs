@@ -1,12 +1,12 @@
 //! 测试性能监控和指标 API
 
 use actix_web::{test, web, App};
-use xet_server::server::{upload_xorb, health_check, metrics_endpoint};
+use xet_server::api::xorb::upload_xorb;
+use xet_server::server::{health_check, metrics_endpoint};
 use xet_server::config::ServerConfig;
 use xet_server::storage::local::LocalStorage;
 use xet_server::metrics::GLOBAL_METRICS;
 use tempfile::tempdir;
-use std::sync::Arc;
 
 #[actix_web::test]
 async fn test_metrics_endpoint() {

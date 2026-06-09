@@ -5,7 +5,7 @@
 
 use actix_web::{web, HttpResponse};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::config::ServerConfig;
 use crate::index::MetadataIndex;
@@ -82,6 +82,7 @@ pub async fn get_reconstruction_v1(
 
     // Collect xorb information from all shards
     let mut xorbs = Vec::new();
+    let mut seen_xorbs = HashSet::new();
 
     for shard_id in shard_ids {
         let shard_key = format!("shards/{}", shard_id);
@@ -106,13 +107,16 @@ pub async fn get_reconstruction_v1(
             }
         };
 
-        // Extract xorb information
+        // Extract xorb information (deduplicated)
         for xorb_entry in &shard.xorb_entries {
-            let xorb_info = XorbInfoV1 {
-                xorb_hash: xorb_entry.xorb_hash.to_hex(),
-                chunks: Vec::new(), // TODO: Populate with actual chunk info
-            };
-            xorbs.push(xorb_info);
+            let xorb_hash = xorb_entry.xorb_hash.to_hex();
+            if seen_xorbs.insert(xorb_hash.clone()) {
+                let xorb_info = XorbInfoV1 {
+                    xorb_hash,
+                    chunks: Vec::new(), // TODO: Populate with actual chunk info
+                };
+                xorbs.push(xorb_info);
+            }
         }
     }
 
@@ -152,9 +156,10 @@ pub async fn get_reconstruction(
         }
     };
 
-    // Collect xorb information from all shards
+    // Collect xorb information from all shards (deduplicated)
     let mut xorbs = Vec::new();
     let mut fetch_info = HashMap::new();
+    let mut seen_xorbs = HashSet::new();
 
     for shard_id in shard_ids {
         let shard_key = format!("shards/{}", shard_id);
@@ -179,21 +184,24 @@ pub async fn get_reconstruction(
             }
         };
 
-        // Extract xorb information
+        // Extract xorb information (deduplicated)
         for xorb_entry in &shard.xorb_entries {
             let xorb_hash = xorb_entry.xorb_hash.to_hex();
             let xorb_size = xorb_entry.num_bytes_in_xorb as u64;
             let storage_path = format!("xorbs/default/{}", xorb_hash);
 
-            xorbs.push(XorbInfoV2 {
-                xorb_hash: xorb_hash.clone(),
-                size: xorb_size,
-            });
+            // Only add to xorbs vec if not seen before
+            if seen_xorbs.insert(xorb_hash.clone()) {
+                xorbs.push(XorbInfoV2 {
+                    xorb_hash: xorb_hash.clone(),
+                    size: xorb_size,
+                });
 
-            fetch_info.insert(xorb_hash, XorbFetchInfo {
-                storage_path,
-                size: xorb_size,
-            });
+                fetch_info.insert(xorb_hash, XorbFetchInfo {
+                    storage_path,
+                    size: xorb_size,
+                });
+            }
         }
     }
 
