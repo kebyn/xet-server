@@ -46,5 +46,6 @@ pub mod api;
 pub mod server;
 pub mod index;
 pub mod metrics;
+pub mod middleware;
 
 pub use error::{XetError, Result};

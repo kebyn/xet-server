@@ -165,7 +165,7 @@ pub struct FileDataSequenceHeader {
 
 impl FileDataSequenceHeader {
     pub fn serialize<W: Write>(&self, writer: &mut W) -> Result<()> {
-        writer.write_all(self.file_hash.as_bytes())?; // 32 bytes
+        writer.write_all(&self.file_hash.as_bytes())?; // 32 bytes
         writer.write_all(&self.file_flags.to_le_bytes())?; // 4 bytes
         writer.write_all(&self.num_entries.to_le_bytes())?; // 4 bytes
         writer.write_all(&[0u8; 8])?; // _unused: 8 bytes
@@ -202,7 +202,7 @@ pub struct FileDataSequenceEntry {
 
 impl FileDataSequenceEntry {
     pub fn serialize<W: Write>(&self, writer: &mut W) -> Result<()> {
-        writer.write_all(self.xorb_hash.as_bytes())?; // 32 bytes
+        writer.write_all(&self.xorb_hash.as_bytes())?; // 32 bytes
         writer.write_all(&self.xorb_flags.to_le_bytes())?; // 4 bytes
         writer.write_all(&self.unpacked_segment_bytes.to_le_bytes())?; // 4 bytes
         writer.write_all(&self.chunk_index_start.to_le_bytes())?; // 4 bytes
@@ -245,7 +245,7 @@ pub struct XorbChunkSequenceHeader {
 
 impl XorbChunkSequenceHeader {
     pub fn serialize<W: Write>(&self, writer: &mut W) -> Result<()> {
-        writer.write_all(self.xorb_hash.as_bytes())?; // 32 bytes
+        writer.write_all(&self.xorb_hash.as_bytes())?; // 32 bytes
         writer.write_all(&self.xorb_flags.to_le_bytes())?; // 4 bytes
         writer.write_all(&self.num_entries.to_le_bytes())?; // 4 bytes
         writer.write_all(&self.num_bytes_in_xorb.to_le_bytes())?; // 4 bytes
@@ -287,7 +287,7 @@ pub struct XorbChunkSequenceEntry {
 
 impl XorbChunkSequenceEntry {
     pub fn serialize<W: Write>(&self, writer: &mut W) -> Result<()> {
-        writer.write_all(self.chunk_hash.as_bytes())?; // 32 bytes
+        writer.write_all(&self.chunk_hash.as_bytes())?; // 32 bytes
         writer.write_all(&self.chunk_byte_range_start.to_le_bytes())?; // 4 bytes
         writer.write_all(&self.unpacked_segment_bytes.to_le_bytes())?; // 4 bytes
         writer.write_all(&self.flags.to_le_bytes())?; // 4 bytes
@@ -357,6 +357,12 @@ impl MDBShardFile {
         }
 
         // Parse footer (at end of file)
+        // Validate minimum size before subtraction to prevent panic
+        if data.len() < 208 {
+            return Err(crate::error::XetError::ParseError(
+                format!("Shard data too small: {} bytes, minimum 208 bytes required", data.len())
+            ));
+        }
         let footer_start = data.len() - 208;
         let mut footer_cursor = Cursor::new(&data[footer_start..]);
         let footer = MDBShardFileFooter::deserialize(&mut footer_cursor)?;

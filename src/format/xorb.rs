@@ -103,7 +103,7 @@ impl XorbObjectInfoV1 {
         writer.write_all(&[0u8])?; // hashes_version
         writer.write_all(&num_chunks.to_le_bytes())?; // Store num_chunks here for easier parsing
         for hash in &self.chunk_hashes {
-            writer.write_all(hash.as_bytes())?;
+            writer.write_all(&hash.as_bytes())?;
         }
 
         // Boundaries section
@@ -119,7 +119,7 @@ impl XorbObjectInfoV1 {
         // Header
         writer.write_all(&Self::IDENT_MAIN)?;
         writer.write_all(&[1u8])?; // version
-        writer.write_all(self.xorb_hash.as_bytes())?;
+        writer.write_all(&self.xorb_hash.as_bytes())?;
 
         Ok(())
     }
@@ -138,6 +138,16 @@ impl XorbObjectInfoV1 {
         let mut num_buf = [0u8; 4];
         reader.read_exact(&mut num_buf)?;
         let num_chunks = u32::from_le_bytes(num_buf);
+
+        // Validate num_chunks to prevent unbounded allocation (DoS protection)
+        // A 16MB xorb with 8KB min chunks gives max ~2048 chunks
+        const MAX_CHUNKS_PER_XORB: u32 = 1_000_000;
+        if num_chunks > MAX_CHUNKS_PER_XORB {
+            return Err(XetError::ParseError(format!(
+                "Too many chunks: {} exceeds maximum {}",
+                num_chunks, MAX_CHUNKS_PER_XORB
+            )));
+        }
 
         let mut chunk_hashes = Vec::with_capacity(num_chunks as usize);
         for _ in 0..num_chunks {
