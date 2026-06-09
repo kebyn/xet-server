@@ -94,7 +94,10 @@ pub async fn get_reconstruction_v1(
 
         // Fetch shard from storage
         let shard_data = match storage.get(&shard_key).await {
-            Ok(data) => data,
+            Ok(data) => {
+                GLOBAL_METRICS.record_storage_operation();
+                data
+            }
             Err(e) => {
                 GLOBAL_METRICS.record_request(500);
                 GLOBAL_METRICS.record_error();
@@ -142,7 +145,6 @@ pub async fn get_reconstruction_v1(
     };
 
     GLOBAL_METRICS.record_request(200);
-    GLOBAL_METRICS.record_storage_operation();
     GLOBAL_METRICS.record_download_bytes(total_download_bytes);
     GLOBAL_METRICS.record_latency(start);
 
@@ -190,7 +192,10 @@ pub async fn get_reconstruction(
 
         // Fetch shard from storage
         let shard_data = match storage.get(&shard_key).await {
-            Ok(data) => data,
+            Ok(data) => {
+                GLOBAL_METRICS.record_storage_operation();
+                data
+            }
             Err(e) => {
                 GLOBAL_METRICS.record_request(500);
                 GLOBAL_METRICS.record_error();
@@ -245,7 +250,6 @@ pub async fn get_reconstruction(
     };
 
     GLOBAL_METRICS.record_request(200);
-    GLOBAL_METRICS.record_storage_operation();
     GLOBAL_METRICS.record_download_bytes(total_download_bytes);
     GLOBAL_METRICS.record_latency(start);
 
