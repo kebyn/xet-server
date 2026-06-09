@@ -196,14 +196,7 @@ impl XorbObjectInfoV1 {
 ///
 /// Returns Ok(()) if verification passes, or an error if any check fails.
 pub fn verify_xorb(data: &[u8]) -> XetResult<()> {
-    // Find the footer by searching for the main ident
-    // The footer structure is: [hashes_section][boundaries_section][main_header]
-    // We need to find where the footer starts
-
-    // For simplicity, we'll try to deserialize from different offsets
-    // In a production system, the footer offset would be stored in a header
-
-    // Try to find the footer by looking for the hashes section ident
+    // Find the footer by searching for the hashes section ident
     let hashes_ident = XorbObjectInfoV1::IDENT_HASHES;
     let mut footer_start = None;
 
@@ -221,18 +214,52 @@ pub fn verify_xorb(data: &[u8]) -> XetResult<()> {
     // Parse the footer
     let footer = XorbObjectInfoV1::from_bytes(&data[footer_start..])?;
 
-    // Verify chunk hashes
-    // We need to extract each chunk and verify its hash
-    // For now, we'll just verify the xorb hash matches the footer
+    // Verify chunk hashes and collect chunk info for xorb hash computation
+    let mut chunk_info: Vec<(MerkleHash, u64)> = Vec::with_capacity(footer.chunk_hashes.len());
+    let mut current_offset = 0;
 
-    // Compute the expected xorb hash from chunk hashes
-    // Note: This requires knowing the chunk sizes, which we don't have in the footer
-    // In a full implementation, we would extract each chunk and verify individually
+    for (i, expected_hash) in footer.chunk_hashes.iter().enumerate() {
+        // Get chunk end offset from boundary offsets
+        let chunk_end = if i < footer.chunk_boundary_offsets.len() {
+            footer.chunk_boundary_offsets[i] as usize
+        } else {
+            // Last chunk ends at footer start
+            footer_start
+        };
 
-    // For now, just verify that the footer's xorb_hash is not zero
-    // A proper implementation would compute the hash from chunk data
-    if footer.xorb_hash == MerkleHash::from([0u8; 32]) {
-        return Err(XetError::ParseError("Xorb hash is zero".into()));
+        if chunk_end > data.len() || chunk_end < current_offset {
+            return Err(XetError::ParseError(format!(
+                "Invalid chunk boundary: chunk {} at {}-{} exceeds data bounds",
+                i, current_offset, chunk_end
+            )));
+        }
+
+        let chunk_data = &data[current_offset..chunk_end];
+        let chunk_size = chunk_data.len() as u64;
+
+        // Verify chunk hash
+        let actual_hash = crate::hash::compute_data_hash(chunk_data);
+        if actual_hash != *expected_hash {
+            return Err(XetError::ParseError(format!(
+                "Chunk {} hash mismatch: expected {}, got {}",
+                i,
+                expected_hash.to_hex(),
+                actual_hash.to_hex()
+            )));
+        }
+
+        chunk_info.push((actual_hash, chunk_size));
+        current_offset = chunk_end;
+    }
+
+    // Verify xorb hash (computed from chunk hashes and sizes)
+    let computed_xorb_hash = crate::hash::xorb_hash(&chunk_info);
+    if computed_xorb_hash != footer.xorb_hash {
+        return Err(XetError::ParseError(format!(
+            "Xorb hash mismatch: expected {}, got {}",
+            footer.xorb_hash.to_hex(),
+            computed_xorb_hash.to_hex()
+        )));
     }
 
     Ok(())

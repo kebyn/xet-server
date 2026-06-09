@@ -13,7 +13,7 @@ pub struct Metrics {
     pub http_requests_total: AtomicU64,
 
     /// 按状态码分类的请求计数
-    pub http_requests_by_status: [AtomicU64; 6], // 2xx, 3xx, 4xx, 5xx, other
+    pub http_requests_by_status: [AtomicU64; 5], // 2xx, 3xx, 4xx, 5xx, other
 
     /// 存储操作计数
     pub storage_operations: AtomicU64,
@@ -43,7 +43,6 @@ impl Metrics {
         Self {
             http_requests_total: AtomicU64::new(0),
             http_requests_by_status: [
-                AtomicU64::new(0),
                 AtomicU64::new(0),
                 AtomicU64::new(0),
                 AtomicU64::new(0),
@@ -206,7 +205,7 @@ impl Default for Metrics {
     }
 }
 
-/// 全局指标实例（使用 lazy_static 或 once_cell）
+// 全局指标实例（使用 lazy_static）
 lazy_static::lazy_static! {
     pub static ref GLOBAL_METRICS: Arc<Metrics> = Arc::new(Metrics::new());
 }

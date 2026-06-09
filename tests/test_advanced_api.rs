@@ -12,6 +12,7 @@ use tempfile::tempdir;
 
 use xet_server::api::auth::{create_jwt, JwtClaims};
 use xet_server::config::{ServerConfig, StorageConfig, AuthConfig, ServerSettings};
+use xet_server::format::xorb::XorbObjectInfoV1;
 use xet_server::index::MetadataIndex;
 use xet_server::storage::local::LocalStorage;
 use xet_server::storage::StorageBackend;
@@ -33,6 +34,26 @@ fn create_test_config() -> ServerConfig {
             port: 8080,
         },
     }
+}
+
+/// Helper to create a valid xorb with proper structure and hash
+fn create_valid_xorb(content: &[u8]) -> (Vec<u8>, String) {
+    let chunk_hash = xet_server::hash::compute_data_hash(content);
+
+    let footer = XorbObjectInfoV1 {
+        xorb_hash: chunk_hash,
+        chunk_hashes: vec![chunk_hash],
+        chunk_boundary_offsets: vec![content.len() as u32],
+        unpacked_chunk_offsets: vec![content.len() as u32],
+    };
+
+    let footer_bytes = footer.to_bytes();
+    let mut xorb_data = Vec::new();
+    xorb_data.extend_from_slice(content);
+    xorb_data.extend_from_slice(&footer_bytes);
+
+    let xorb_hash = xet_server::hash::compute_data_hash(&xorb_data);
+    (xorb_data, xorb_hash.to_hex())
 }
 
 #[actix_web::test]
@@ -60,20 +81,19 @@ async fn test_full_upload_workflow() {
             .app_data(web::Data::new(storage))
             .app_data(web::Data::new(index))
             .app_data(web::Data::new(config))
-            .route("/v1/xorbs/{prefix}/{hash}", web::post().to(xet_server::server::upload_xorb))
+            .route("/v1/xorbs/{prefix}/{hash}", web::post().to(xet_server::api::xorb::upload_xorb))
             .route("/v1/shards", web::post().to(xet_server::api::shard::upload_shard))
             .route("/v2/reconstructions/{file_id}", web::get().to(xet_server::api::reconstruction::get_reconstruction))
             .route("/v1/chunks/{prefix}/{hash}", web::get().to(xet_server::api::global_dedup::query_chunk_dedup))
     ).await;
 
     // Step 1: Upload a xorb
-    let xorb_hash = "a".repeat(64);
-    let xorb_data = Bytes::from("test xorb data with some content");
+    let (xorb_data, xorb_hash) = create_valid_xorb(b"test xorb data with some content");
 
     let req = test::TestRequest::post()
         .uri(&format!("/v1/xorbs/default/{}", xorb_hash))
         .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_payload(xorb_data)
+        .set_payload(Bytes::from(xorb_data.clone()))
         .to_request();
 
     let resp = test::call_service(&app, req).await;
@@ -83,7 +103,7 @@ async fn test_full_upload_workflow() {
     let req = test::TestRequest::post()
         .uri(&format!("/v1/xorbs/default/{}", xorb_hash))
         .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_payload(Bytes::from("test xorb data with some content"))
+        .set_payload(Bytes::from(xorb_data))
         .to_request();
 
     let resp = test::call_service(&app, req).await;
@@ -141,7 +161,7 @@ async fn test_auth_workflow() {
             .app_data(web::Data::new(storage))
             .app_data(web::Data::new(index))
             .app_data(web::Data::new(config))
-            .route("/v1/xorbs/{prefix}/{hash}", web::post().to(xet_server::server::upload_xorb))
+            .route("/v1/xorbs/{prefix}/{hash}", web::post().to(xet_server::api::xorb::upload_xorb))
     ).await;
 
     let xorb_hash = "a".repeat(64);
@@ -219,7 +239,7 @@ async fn test_hash_validation() {
             .app_data(web::Data::new(storage))
             .app_data(web::Data::new(index))
             .app_data(web::Data::new(config))
-            .route("/v1/xorbs/{prefix}/{hash}", web::post().to(xet_server::server::upload_xorb))
+            .route("/v1/xorbs/{prefix}/{hash}", web::post().to(xet_server::api::xorb::upload_xorb))
             .route("/v2/reconstructions/{file_id}", web::get().to(xet_server::api::reconstruction::get_reconstruction))
             .route("/v1/chunks/{prefix}/{hash}", web::get().to(xet_server::api::global_dedup::query_chunk_dedup))
     ).await;
@@ -245,12 +265,12 @@ async fn test_hash_validation() {
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), 400);
 
-    // Test 3: Valid hash format
-    let valid_hash = "a".repeat(64);
+    // Test 3: Valid hash format (with valid xorb data)
+    let (xorb_data, valid_hash) = create_valid_xorb(b"test data");
     let req = test::TestRequest::post()
         .uri(&format!("/v1/xorbs/default/{}", valid_hash))
         .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_payload(Bytes::from("test data"))
+        .set_payload(Bytes::from(xorb_data))
         .to_request();
 
     let resp = test::call_service(&app, req).await;
@@ -297,17 +317,16 @@ async fn test_idempotency() {
             .app_data(web::Data::new(storage))
             .app_data(web::Data::new(index))
             .app_data(web::Data::new(config))
-            .route("/v1/xorbs/{prefix}/{hash}", web::post().to(xet_server::server::upload_xorb))
+            .route("/v1/xorbs/{prefix}/{hash}", web::post().to(xet_server::api::xorb::upload_xorb))
     ).await;
 
-    let xorb_hash = "a".repeat(64);
-    let xorb_data = Bytes::from("test xorb data");
+    let (xorb_data, xorb_hash) = create_valid_xorb(b"test xorb data");
 
     // Upload first time
     let req = test::TestRequest::post()
         .uri(&format!("/v1/xorbs/default/{}", xorb_hash))
         .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_payload(xorb_data.clone())
+        .set_payload(Bytes::from(xorb_data.clone()))
         .to_request();
 
     let resp = test::call_service(&app, req).await;
@@ -319,7 +338,7 @@ async fn test_idempotency() {
     let req = test::TestRequest::post()
         .uri(&format!("/v1/xorbs/default/{}", xorb_hash))
         .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_payload(xorb_data.clone())
+        .set_payload(Bytes::from(xorb_data))
         .to_request();
 
     let resp = test::call_service(&app, req).await;
@@ -327,7 +346,7 @@ async fn test_idempotency() {
     let body: serde_json::Value = test::read_body_json(resp).await;
     assert_eq!(body["was_inserted"], false);
 
-    // Upload third time with different data (should still succeed but not insert)
+    // Upload third time with different data (should fail hash validation)
     let req = test::TestRequest::post()
         .uri(&format!("/v1/xorbs/default/{}", xorb_hash))
         .insert_header(("Authorization", format!("Bearer {}", token)))
@@ -335,7 +354,5 @@ async fn test_idempotency() {
         .to_request();
 
     let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), 200);
-    let body: serde_json::Value = test::read_body_json(resp).await;
-    assert_eq!(body["was_inserted"], false);
+    assert_eq!(resp.status(), 400); // Hash mismatch
 }
