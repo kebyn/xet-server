@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::config::ServerConfig;
 use crate::index::MetadataIndex;
+use crate::metrics::GLOBAL_METRICS;
 use crate::storage::StorageBackend;
 use crate::format::shard::MDBShardFile;
 
@@ -61,10 +62,12 @@ pub async fn get_reconstruction_v1(
     _config: web::Data<ServerConfig>,
     _req: actix_web::HttpRequest,
 ) -> HttpResponse {
+    let start = std::time::Instant::now();
     let file_id = path.into_inner();
 
     // Validate file_id format (should be a hex hash)
     if file_id.len() != 64 || !file_id.chars().all(|c| c.is_ascii_hexdigit()) {
+        GLOBAL_METRICS.record_request(400);
         return HttpResponse::BadRequest().json(serde_json::json!({
             "error": "Invalid file_id format, expected 64-character hex string"
         }));
@@ -74,6 +77,7 @@ pub async fn get_reconstruction_v1(
     let shard_ids = match index.get_shards_for_file(&file_id) {
         Some(ids) => ids,
         None => {
+            GLOBAL_METRICS.record_request(404);
             return HttpResponse::NotFound().json(serde_json::json!({
                 "error": "File not found"
             }));
@@ -91,6 +95,8 @@ pub async fn get_reconstruction_v1(
         let shard_data = match storage.get(&shard_key).await {
             Ok(data) => data,
             Err(e) => {
+                GLOBAL_METRICS.record_request(500);
+                GLOBAL_METRICS.record_error();
                 return HttpResponse::InternalServerError().json(serde_json::json!({
                     "error": format!("Failed to fetch shard: {}", e)
                 }));
@@ -101,6 +107,8 @@ pub async fn get_reconstruction_v1(
         let shard = match MDBShardFile::parse(&shard_data) {
             Ok(s) => s,
             Err(e) => {
+                GLOBAL_METRICS.record_request(500);
+                GLOBAL_METRICS.record_error();
                 return HttpResponse::InternalServerError().json(serde_json::json!({
                     "error": format!("Failed to parse shard: {}", e)
                 }));
@@ -125,6 +133,10 @@ pub async fn get_reconstruction_v1(
         xorbs,
     };
 
+    GLOBAL_METRICS.record_request(200);
+    GLOBAL_METRICS.record_storage_operation();
+    GLOBAL_METRICS.record_latency(start);
+
     HttpResponse::Ok().json(response)
 }
 
@@ -137,10 +149,12 @@ pub async fn get_reconstruction(
     _config: web::Data<ServerConfig>,
     _req: actix_web::HttpRequest,
 ) -> HttpResponse {
+    let start = std::time::Instant::now();
     let file_id = path.into_inner();
 
     // Validate file_id format (should be a hex hash)
     if file_id.len() != 64 || !file_id.chars().all(|c| c.is_ascii_hexdigit()) {
+        GLOBAL_METRICS.record_request(400);
         return HttpResponse::BadRequest().json(serde_json::json!({
             "error": "Invalid file_id format, expected 64-character hex string"
         }));
@@ -150,6 +164,7 @@ pub async fn get_reconstruction(
     let shard_ids = match index.get_shards_for_file(&file_id) {
         Some(ids) => ids,
         None => {
+            GLOBAL_METRICS.record_request(404);
             return HttpResponse::NotFound().json(serde_json::json!({
                 "error": "File not found"
             }));
@@ -168,6 +183,8 @@ pub async fn get_reconstruction(
         let shard_data = match storage.get(&shard_key).await {
             Ok(data) => data,
             Err(e) => {
+                GLOBAL_METRICS.record_request(500);
+                GLOBAL_METRICS.record_error();
                 return HttpResponse::InternalServerError().json(serde_json::json!({
                     "error": format!("Failed to fetch shard: {}", e)
                 }));
@@ -178,6 +195,8 @@ pub async fn get_reconstruction(
         let shard = match MDBShardFile::parse(&shard_data) {
             Ok(s) => s,
             Err(e) => {
+                GLOBAL_METRICS.record_request(500);
+                GLOBAL_METRICS.record_error();
                 return HttpResponse::InternalServerError().json(serde_json::json!({
                     "error": format!("Failed to parse shard: {}", e)
                 }));
@@ -205,11 +224,21 @@ pub async fn get_reconstruction(
         }
     }
 
+    // Calculate total download bytes (sum of all xorb sizes)
+    let total_download_bytes: u64 = xorbs.iter()
+        .map(|x| x.size)
+        .sum();
+
     let response = ReconstructionResponseV2 {
         file_id,
         xorbs,
         fetch_info,
     };
+
+    GLOBAL_METRICS.record_request(200);
+    GLOBAL_METRICS.record_storage_operation();
+    GLOBAL_METRICS.record_download_bytes(total_download_bytes);
+    GLOBAL_METRICS.record_latency(start);
 
     HttpResponse::Ok().json(response)
 }
