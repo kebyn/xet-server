@@ -112,6 +112,10 @@ Add `size: u64` field to `XorbInfoV1` struct, populated from `xorb_entry.num_byt
 4. New tests verify both features work correctly
 5. No performance degradation from middleware overhead
 
+## Known Limitations
+
+**Positive test coverage for download bytes:** The implementation includes negative tests (verifying no increment on 404 errors) but lacks positive tests that verify the metric increments correctly on successful requests. This is because `MDBShardFile::parse()` currently returns an empty `xorb_entries` vector (stub implementation), so the download byte calculation always sums to 0. A positive test would require first implementing proper xorb entry extraction from shard binary data, which is outside the scope of this metrics activation task. The metric recording logic is correct and will work once the shard parsing is fully implemented.
+
 ## Non-Goals
 
 - Rate limiting on /metrics endpoint (separate concern)
