@@ -45,5 +45,6 @@ pub mod storage;
 pub mod api;
 pub mod server;
 pub mod index;
+pub mod metrics;
 
 pub use error::{XetError, Result};
