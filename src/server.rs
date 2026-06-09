@@ -1,10 +1,15 @@
 //! HTTP server implementation
 
-use actix_web::{web, App, HttpServer, HttpResponse, middleware::Logger};
+use actix_web::{web, App, HttpServer, HttpResponse, middleware::{Logger, from_fn}};
 use std::sync::Arc;
 
 use crate::config::ServerConfig;
 use crate::storage::create_storage;
+use crate::middleware::metrics_middleware;
+
+/// Maximum request body size: 64MB
+/// This allows for large xorb uploads while preventing memory exhaustion
+const MAX_BODY_SIZE: usize = 64 * 1024 * 1024;
 
 pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
     let storage = Arc::new(create_storage(&config.storage).await
@@ -20,6 +25,9 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
     HttpServer::new(move || {
         App::new()
             .wrap(Logger::default())
+            .wrap(from_fn(metrics_middleware))
+            // Configure payload size limit to prevent memory exhaustion
+            .app_data(web::PayloadConfig::new(MAX_BODY_SIZE))
             .app_data(web::Data::from(storage.clone()))
             .app_data(web::Data::from(index.clone()))
             .app_data(web::Data::new(config.clone()))
@@ -42,6 +50,14 @@ pub async fn health_check() -> HttpResponse {
     }))
 }
 
+/// Prometheus metrics endpoint
+///
+/// # Security Note
+/// This endpoint exposes operational metrics (request counts, latency, error rates)
+/// without authentication. In production environments, consider:
+/// - Restricting access via network policies/firewall rules
+/// - Adding authentication if metrics contain sensitive information
+/// - Using a dedicated metrics port that's not publicly accessible
 pub async fn metrics_endpoint() -> HttpResponse {
     let metrics = crate::metrics::GLOBAL_METRICS.export_metrics();
     HttpResponse::Ok()
