@@ -26,6 +26,7 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
             .app_data(web::Data::new(config.clone()))
             .route("/v1/xorbs/{prefix}/{hash}", web::post().to(upload_xorb))
             .route("/v1/shards", web::post().to(crate::api::shard::upload_shard))
+            .route("/v1/reconstructions/{file_id}", web::get().to(crate::api::reconstruction::get_reconstruction_v1))
             .route("/v2/reconstructions/{file_id}", web::get().to(crate::api::reconstruction::get_reconstruction))
             .route("/v1/chunks/{prefix}/{hash}", web::get().to(crate::api::global_dedup::query_chunk_dedup))
             .route("/health", web::get().to(health_check))
