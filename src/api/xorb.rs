@@ -93,6 +93,13 @@ pub async fn upload_xorb(
         }));
     }
 
+    // Verify xorb structure and chunk hashes
+    if let Err(e) = crate::format::xorb::verify_xorb(&body) {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": format!("Xorb verification failed: {}", e)
+        }));
+    }
+
     // Check if xorb already exists
     let xorb_key = format!("xorbs/{}/{}", prefix, hash_str);
     let already_exists = match storage.exists(&xorb_key).await {
