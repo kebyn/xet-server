@@ -539,6 +539,93 @@ impl MetadataStore for SqliteMetadataStore {
             Err(e) => Err(MetadataError::DatabaseError(e.to_string())),
         }
     }
+
+    async fn commit_atomic(
+        &self,
+        rev: &Revision,
+        entries: &[FileEntry],
+        expected_parent: Option<&str>,
+    ) -> Result<(), MetadataError> {
+        let conn = self.conn.lock().map_err(|e| {
+            MetadataError::DatabaseError(format!("Failed to acquire lock: {}", e))
+        })?;
+
+        // Use IMMEDIATE to acquire write lock upfront (SQLite only supports one writer)
+        conn.execute("BEGIN IMMEDIATE", [])
+            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+
+        let result = (|| -> Result<(), MetadataError> {
+            // Check HEAD matches expected parent
+            let current_head: Option<String> = conn
+                .query_row(
+                    "SELECT commit_id FROM heads WHERE repo_id = ?1",
+                    params![rev.repo_id],
+                    |row| row.get(0),
+                )
+                .ok();
+
+            if current_head.as_deref() != expected_parent {
+                return Err(MetadataError::Conflict(
+                    current_head.unwrap_or_default(),
+                ));
+            }
+
+            // Insert revision
+            conn.execute(
+                "INSERT INTO revisions (commit_id, repo_id, parent, message, author, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    rev.commit_id,
+                    rev.repo_id,
+                    rev.parent,
+                    rev.message,
+                    rev.author,
+                    rev.created_at,
+                ],
+            )
+            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+
+            // Insert file entries
+            if !entries.is_empty() {
+                let mut stmt = conn
+                    .prepare(
+                        "INSERT OR REPLACE INTO file_tree (path, repo_id, commit_id, size, cas_hash, is_lfs) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    )
+                    .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+                for entry in entries {
+                    let is_lfs_int = if entry.is_lfs { 1 } else { 0 };
+                    stmt.execute(params![
+                        entry.path,
+                        entry.repo_id,
+                        entry.commit_id,
+                        entry.size as i64,
+                        entry.cas_hash,
+                        is_lfs_int
+                    ])
+                    .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+                }
+            }
+
+            // Set HEAD
+            conn.execute(
+                "INSERT OR REPLACE INTO heads (repo_id, commit_id) VALUES (?1, ?2)",
+                params![rev.repo_id, rev.commit_id],
+            )
+            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => {
+                conn.execute("COMMIT", []).ok();
+                Ok(())
+            }
+            Err(e) => {
+                conn.execute("ROLLBACK", []).ok();
+                Err(e)
+            }
+        }
+    }
 }
 
 /// Get current Unix timestamp in seconds
