@@ -12,7 +12,7 @@ use actix_web::{test, web, App};
 use bytes::Bytes;
 use tempfile::tempdir;
 
-use common::{test_config_with_new_key, test_token_for_keypair};
+use common::{test_config_with_new_key, test_token_for_keypair, TestContext};
 use xet_server::format::xorb::XorbObjectInfoV1;
 use xet_server::index::MetadataIndex;
 use xet_server::storage::local::LocalStorage;
@@ -47,14 +47,15 @@ async fn test_full_upload_workflow() {
     );
 
     let index = MetadataIndex::new();
-    let (kp, config) = test_config_with_new_key();
-    let token = test_token_for_keypair(&kp, "read write");
+    let ctx: TestContext = test_config_with_new_key();
+    let token = test_token_for_keypair(&ctx.keypair, "read write");
 
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(storage))
             .app_data(web::Data::new(index))
-            .app_data(web::Data::new(config))
+            .app_data(web::Data::new(ctx.auth_verifier))
+            .app_data(web::Data::new(ctx.config))
             .route("/v1/xorbs/{prefix}/{hash}", web::post().to(xet_server::api::xorb::upload_xorb))
             .route("/v1/shards", web::post().to(xet_server::api::shard::upload_shard))
             .route("/v2/reconstructions/{file_id}", web::get().to(xet_server::api::reconstruction::get_reconstruction))
@@ -128,13 +129,14 @@ async fn test_auth_workflow() {
     );
 
     let index = MetadataIndex::new();
-    let (kp, config) = test_config_with_new_key();
+    let ctx: TestContext = test_config_with_new_key();
 
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(storage))
             .app_data(web::Data::new(index))
-            .app_data(web::Data::new(config))
+            .app_data(web::Data::new(ctx.auth_verifier))
+            .app_data(web::Data::new(ctx.config))
             .route("/v1/xorbs/{prefix}/{hash}", web::post().to(xet_server::api::xorb::upload_xorb))
     ).await;
 
@@ -170,7 +172,7 @@ async fn test_auth_workflow() {
     assert_eq!(resp.status(), 401);
 
     // Test 4: Valid token but insufficient scope
-    let token = test_token_for_keypair(&kp, "read"); // Only read scope
+    let token = test_token_for_keypair(&ctx.keypair, "read"); // Only read scope
 
     let req = test::TestRequest::post()
         .uri(&format!("/v1/xorbs/default/{}", xorb_hash))
@@ -190,14 +192,15 @@ async fn test_hash_validation() {
     );
 
     let index = MetadataIndex::new();
-    let (kp, config) = test_config_with_new_key();
-    let token = test_token_for_keypair(&kp, "read write");
+    let ctx: TestContext = test_config_with_new_key();
+    let token = test_token_for_keypair(&ctx.keypair, "read write");
 
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(storage))
             .app_data(web::Data::new(index))
-            .app_data(web::Data::new(config))
+            .app_data(web::Data::new(ctx.auth_verifier))
+            .app_data(web::Data::new(ctx.config))
             .route("/v1/xorbs/{prefix}/{hash}", web::post().to(xet_server::api::xorb::upload_xorb))
             .route("/v2/reconstructions/{file_id}", web::get().to(xet_server::api::reconstruction::get_reconstruction))
             .route("/v1/chunks/{prefix}/{hash}", web::get().to(xet_server::api::global_dedup::query_chunk_dedup))
@@ -260,14 +263,15 @@ async fn test_idempotency() {
     );
 
     let index = MetadataIndex::new();
-    let (kp, config) = test_config_with_new_key();
-    let token = test_token_for_keypair(&kp, "read write");
+    let ctx: TestContext = test_config_with_new_key();
+    let token = test_token_for_keypair(&ctx.keypair, "read write");
 
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(storage))
             .app_data(web::Data::new(index))
-            .app_data(web::Data::new(config))
+            .app_data(web::Data::new(ctx.auth_verifier))
+            .app_data(web::Data::new(ctx.config))
             .route("/v1/xorbs/{prefix}/{hash}", web::post().to(xet_server::api::xorb::upload_xorb))
     ).await;
 

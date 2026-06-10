@@ -59,9 +59,9 @@ pub struct XetClaims {
     /// Git revision being accessed
     pub revision: String,
     /// Expiration timestamp (Unix seconds)
-    pub exp: usize,
+    pub exp: u64,
     /// Issued-at timestamp (Unix seconds)
-    pub iat: usize,
+    pub iat: u64,
     /// Key ID identifying the signing key
     pub kid: String,
 }
@@ -207,7 +207,7 @@ pub fn verify_xet_token(
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| AuthError::InvalidToken)?
-        .as_secs() as usize;
+        .as_secs();
     if claims.exp < now {
         return Err(AuthError::Expired);
     }
@@ -215,27 +215,60 @@ pub fn verify_xet_token(
     Ok(claims)
 }
 
-/// Verify a token against auth config by trying each trusted kid
-///
-/// Reads the public key from the configured path and tries to verify
-/// with each trusted kid until one succeeds.
-pub fn verify_token(token: &str, auth_config: &crate::config::AuthConfig) -> Result<XetClaims, AuthError> {
-    // Load public key from PEM file
-    let pem_content = std::fs::read_to_string(&auth_config.public_key_path)
-        .map_err(|_| AuthError::InvalidKey)?;
-    let public_key = KeyPair::public_key_from_pem(&pem_content)?;
+/// Check if claims contain a required scope.
+/// The "internal" scope supersedes all other scope checks.
+pub fn check_scope(claims: &XetClaims, required_scope: &str) -> bool {
+    // "internal" scope grants all permissions
+    if claims.scope.split_whitespace().any(|s| s == "internal") {
+        return true;
+    }
+    // Check for the specific required scope
+    claims.scope.split_whitespace().any(|s| s == required_scope)
+}
 
-    // Try each trusted kid
-    for trusted_kid in &auth_config.trusted_kids {
-        if let Ok(claims) = verify_xet_token(token, &public_key, trusted_kid) {
-            // Also verify the token's kid matches what we expect
-            if claims.kid == *trusted_kid {
-                return Ok(claims);
-            }
-        }
+/// Pre-loaded verification keys for authentication.
+///
+/// Created at server startup from AuthConfig to avoid per-request file I/O.
+/// Holds the public key and trusted key IDs (kids) for token verification.
+#[derive(Clone)]
+pub struct AuthVerifier {
+    public_key: VerifyingKey,
+    trusted_kids: Vec<String>,
+}
+
+impl AuthVerifier {
+    /// Load verification keys from AuthConfig at server startup.
+    ///
+    /// Reads the public key PEM file once and caches the VerifyingKey.
+    /// Returns an error if the key file cannot be read or parsed.
+    pub fn from_config(auth_config: &crate::config::AuthConfig) -> Result<Self, AuthError> {
+        let pem_content = std::fs::read_to_string(&auth_config.public_key_path)
+            .map_err(|_| AuthError::InvalidKey)?;
+        let public_key = KeyPair::public_key_from_pem(&pem_content)?;
+
+        Ok(AuthVerifier {
+            public_key,
+            trusted_kids: auth_config.trusted_kids.clone(),
+        })
     }
 
-    Err(AuthError::UnknownKid)
+    /// Verify a xet token against the cached public key and trusted kids.
+    ///
+    /// Tries each trusted kid until one succeeds, ensuring the token's kid
+    /// matches an expected trusted kid.
+    pub fn verify_token(&self, token: &str) -> Result<XetClaims, AuthError> {
+        // Try each trusted kid
+        for trusted_kid in &self.trusted_kids {
+            if let Ok(claims) = verify_xet_token(token, &self.public_key, trusted_kid) {
+                // Also verify the token's kid matches what we expect
+                if claims.kid == *trusted_kid {
+                    return Ok(claims);
+                }
+            }
+        }
+
+        Err(AuthError::UnknownKid)
+    }
 }
 
 /// Extract a bearer token from an Authorization header value.
@@ -272,15 +305,4 @@ pub fn extract_token_from_request(req: &actix_web::HttpRequest) -> Option<String
     }
 
     None
-}
-
-/// Check if claims contain a required scope.
-/// The "internal" scope supersedes all other scope checks.
-pub fn check_scope(claims: &XetClaims, required_scope: &str) -> bool {
-    // "internal" scope grants all permissions
-    if claims.scope.split_whitespace().any(|s| s == "internal") {
-        return true;
-    }
-    // Check for the specific required scope
-    claims.scope.split_whitespace().any(|s| s == required_scope)
 }

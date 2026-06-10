@@ -38,14 +38,12 @@ fn test_config_auth_settings() {
         auth: AuthConfig {
             public_key_path: "/path/to/key.pem".to_string(),
             trusted_kids: vec!["kid1".to_string(), "kid2".to_string()],
-            token_prefix: "xet_".to_string(),
         },
         ..Default::default()
     };
 
     assert_eq!(config.auth.public_key_path, "/path/to/key.pem");
     assert_eq!(config.auth.trusted_kids.len(), 2);
-    assert_eq!(config.auth.token_prefix, "xet_");
 }
 
 #[test]

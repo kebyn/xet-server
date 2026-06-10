@@ -6,7 +6,7 @@ use actix_web::{test, web, App};
 use bytes::Bytes;
 use tempfile::tempdir;
 
-use common::{test_config_with_new_key, test_token_for_keypair};
+use common::{test_config_with_new_key, test_token_for_keypair, TestContext};
 use xet_server::format::xorb::XorbObjectInfoV1;
 use xet_server::storage::local::LocalStorage;
 use xet_server::storage::StorageBackend;
@@ -38,13 +38,14 @@ async fn test_upload_xorb() {
         LocalStorage::new(dir.path().to_str().unwrap()).unwrap()
     );
 
-    let (kp, config) = test_config_with_new_key();
-    let token = test_token_for_keypair(&kp, "read write");
+    let ctx: TestContext = test_config_with_new_key();
+    let token = test_token_for_keypair(&ctx.keypair, "read write");
 
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(storage))
-            .app_data(web::Data::new(config))
+            .app_data(web::Data::new(ctx.auth_verifier))
+            .app_data(web::Data::new(ctx.config))
             .route("/v1/xorbs/{prefix}/{hash}", web::post().to(xet_server::api::xorb::upload_xorb))
     ).await;
 
@@ -69,13 +70,14 @@ async fn test_upload_xorb_duplicate() {
         LocalStorage::new(dir.path().to_str().unwrap()).unwrap()
     );
 
-    let (kp, config) = test_config_with_new_key();
-    let token = test_token_for_keypair(&kp, "read write");
+    let ctx: TestContext = test_config_with_new_key();
+    let token = test_token_for_keypair(&ctx.keypair, "read write");
 
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(storage))
-            .app_data(web::Data::new(config))
+            .app_data(web::Data::new(ctx.auth_verifier))
+            .app_data(web::Data::new(ctx.config))
             .route("/v1/xorbs/{prefix}/{hash}", web::post().to(xet_server::api::xorb::upload_xorb))
     ).await;
 
@@ -112,13 +114,14 @@ async fn test_upload_xorb_invalid_hash() {
         LocalStorage::new(dir.path().to_str().unwrap()).unwrap()
     );
 
-    let (kp, config) = test_config_with_new_key();
-    let token = test_token_for_keypair(&kp, "read write");
+    let ctx: TestContext = test_config_with_new_key();
+    let token = test_token_for_keypair(&ctx.keypair, "read write");
 
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(storage))
-            .app_data(web::Data::new(config))
+            .app_data(web::Data::new(ctx.auth_verifier))
+            .app_data(web::Data::new(ctx.config))
             .route("/v1/xorbs/{prefix}/{hash}", web::post().to(xet_server::api::xorb::upload_xorb))
     ).await;
 
@@ -140,12 +143,13 @@ async fn test_upload_xorb_no_auth() {
         LocalStorage::new(dir.path().to_str().unwrap()).unwrap()
     );
 
-    let (_, config) = test_config_with_new_key();
+    let ctx: TestContext = test_config_with_new_key();
 
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(storage))
-            .app_data(web::Data::new(config))
+            .app_data(web::Data::new(ctx.auth_verifier))
+            .app_data(web::Data::new(ctx.config))
             .route("/v1/xorbs/{prefix}/{hash}", web::post().to(xet_server::api::xorb::upload_xorb))
     ).await;
 

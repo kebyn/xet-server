@@ -1,9 +1,10 @@
-//! 测试性能监控和指标 API
+//! Tests for metrics monitoring and API
 
 use actix_web::{test, web, App};
 use xet_server::api::xorb::upload_xorb;
+use xet_server::api::auth::{AuthVerifier, KeyPair};
 use xet_server::server::{health_check, metrics_endpoint};
-use xet_server::config::ServerConfig;
+use xet_server::config::{AuthConfig, ServerConfig};
 use xet_server::storage::local::LocalStorage;
 use xet_server::metrics::GLOBAL_METRICS;
 use tempfile::tempdir;
@@ -14,7 +15,7 @@ use serial_test::serial;
 #[actix_web::test]
 #[serial]
 async fn test_metrics_endpoint() {
-    // 先记录一些指标
+    // Record some metrics first
     GLOBAL_METRICS.record_request(200);
     GLOBAL_METRICS.record_request(404);
     GLOBAL_METRICS.record_storage_operation();
@@ -35,11 +36,11 @@ async fn test_metrics_endpoint() {
     let body = test::read_body(resp).await;
     let body_str = std::str::from_utf8(&body).unwrap();
 
-    // 验证 Prometheus 格式的指标输出
+    // Verify Prometheus format metrics output
     assert!(body_str.contains("http_requests_total"));
     assert!(body_str.contains("storage_operations_total"));
     assert!(body_str.contains("upload_bytes_total"));
-    // 验证新的延迟指标格式（总计和计数分离）
+    // Verify new latency metrics format (total and count separated)
     assert!(body_str.contains("request_latency_us_total"));
     assert!(body_str.contains("request_latency_count"));
     assert!(body_str.contains("# HELP"));
@@ -54,19 +55,39 @@ async fn test_upload_records_metrics() {
         LocalStorage::new(dir.path().to_str().unwrap()).unwrap()
     );
 
-    let config = ServerConfig::default();
+    // Create a key and auth verifier for the test
+    let kp = KeyPair::generate();
+    let key_temp_dir = tempdir().unwrap();
+    let public_key_pem = KeyPair::public_key_to_pem(&kp.verifying_key()).unwrap();
+    let pub_key_path = key_temp_dir.path().join(format!("pubkey-{}.pem", kp.kid()));
+    std::fs::write(&pub_key_path, &public_key_pem).unwrap();
+
+    let auth_config = AuthConfig {
+        public_key_path: pub_key_path.to_str().unwrap().to_string(),
+        trusted_kids: vec![kp.kid()],
+    };
+
+    let auth_verifier = AuthVerifier::from_config(&auth_config).unwrap();
+    let config = ServerConfig {
+        auth: auth_config,
+        ..Default::default()
+    };
+
+    // Keep key_temp_dir alive by forgetting it (test scope is short)
+    std::mem::forget(key_temp_dir);
 
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(storage))
+            .app_data(web::Data::new(auth_verifier))
             .app_data(web::Data::new(config))
             .route("/v1/xorbs/{prefix}/{hash}", web::post().to(upload_xorb))
     ).await;
 
-    // 记录初始指标
+    // Record initial metrics
     let initial_requests = GLOBAL_METRICS.http_requests_total.load(std::sync::atomic::Ordering::Relaxed);
 
-    // 发送一个请求（会失败因为没有认证，但会记录指标）
+    // Send a request (will fail because no auth, but will record metrics)
     let hash = "0".repeat(64);
     let req = test::TestRequest::post()
         .uri(&format!("/v1/xorbs/default/{}", hash))
@@ -74,9 +95,9 @@ async fn test_upload_records_metrics() {
         .to_request();
 
     let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), 401); // 未授权
+    assert_eq!(resp.status(), 401); // Unauthorized
 
-    // 验证指标已增加
+    // Verify metrics increased
     let final_requests = GLOBAL_METRICS.http_requests_total.load(std::sync::atomic::Ordering::Relaxed);
     assert!(final_requests > initial_requests, "Request count should have increased");
 }

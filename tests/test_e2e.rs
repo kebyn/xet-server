@@ -27,7 +27,7 @@ async fn test_e2e_complete_file_upload() {
     let storage: Box<dyn StorageBackend> = Box::new(
         LocalStorage::new(dir.path().to_str().unwrap()).unwrap(),
     );
-    let (_kp, _config) = common::test_config_with_new_key();
+    let _ctx = common::test_config_with_new_key();
 
     // Step 1: Create test data and chunk it
     let test_data = b"Hello, this is a test file for end-to-end testing. \
