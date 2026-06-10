@@ -25,6 +25,7 @@ fn create_test_config() -> ServerConfig {
             s3_region: None,
             s3_endpoint: None,
             local_path: None,
+            upload_temp_dir: None,
         },
         auth: AuthConfig {
             jwt_secret: "test-secret-key".to_string(),
@@ -32,6 +33,8 @@ fn create_test_config() -> ServerConfig {
         server: ServerSettings {
             host: "127.0.0.1".to_string(),
             port: 8080,
+            public_base_url: None,
+            max_body_size_mb: 2048,
         },
     }
 }

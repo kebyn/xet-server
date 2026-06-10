@@ -1,4 +1,6 @@
-use std::io::{Read, Write, Result};
+use std::io::{Read, Write, Result, Seek, SeekFrom};
+use std::fs::File;
+use std::path::Path;
 use crate::format::compression::CompressionScheme;
 use crate::error::Result as XetResult;
 use crate::error::XetError;
@@ -249,6 +251,154 @@ pub fn verify_xorb(data: &[u8]) -> XetResult<()> {
 
         // Verify chunk hash
         let actual_hash = crate::hash::compute_data_hash(chunk_data);
+        if actual_hash != *expected_hash {
+            return Err(XetError::ParseError(format!(
+                "Chunk {} hash mismatch: expected {}, got {}",
+                i,
+                expected_hash.to_hex(),
+                actual_hash.to_hex()
+            )));
+        }
+
+        chunk_info.push((actual_hash, chunk_size));
+        current_offset = chunk_end;
+    }
+
+    // Verify xorb hash (computed from chunk hashes and sizes)
+    let computed_xorb_hash = crate::hash::xorb_hash(&chunk_info);
+    if computed_xorb_hash != footer.xorb_hash {
+        return Err(XetError::ParseError(format!(
+            "Xorb hash mismatch: expected {}, got {}",
+            footer.xorb_hash.to_hex(),
+            computed_xorb_hash.to_hex()
+        )));
+    }
+
+    Ok(())
+}
+
+/// Verify xorb integrity from a file on disk without loading the entire file into RAM.
+///
+/// Peak memory usage: O(64KB) regardless of xorb or chunk size.
+///
+/// This function:
+/// 1. Reads the tail of the file to locate and parse the footer
+/// 2. For each chunk: seeks to offset, reads incrementally, hashes, verifies
+/// 3. Computes the aggregated xorb hash and verifies it matches
+pub fn verify_xorb_from_file(path: &Path) -> XetResult<()> {
+    let mut file = File::open(path).map_err(|e| {
+        XetError::IoError(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("Failed to open xorb file {}: {}", path.display(), e),
+        ))
+    })?;
+    let file_len = file.metadata().map_err(|e| {
+        XetError::IoError(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("Failed to get file metadata: {}", e),
+        ))
+    })?.len();
+
+    if file_len < 8 {
+        return Err(XetError::ParseError(format!(
+            "Xorb file too small: {} bytes", file_len
+        )));
+    }
+
+    // Read last 64KB (or entire file if smaller) to find the footer
+    let scan_size = std::cmp::min(file_len, 64 * 1024) as usize;
+    let mut tail_buf = vec![0u8; scan_size];
+    file.seek(SeekFrom::End(-(scan_size as i64))).map_err(|e| {
+        XetError::IoError(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("Failed to seek to file tail: {}", e),
+        ))
+    })?;
+    file.read_exact(&mut tail_buf).map_err(|e| {
+        XetError::IoError(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("Failed to read file tail: {}", e),
+        ))
+    })?;
+
+    // The tail was read from offset (file_len - scan_size) in the file.
+    // Search for IDENT_HASHES in tail_buf, scanning from the END backwards.
+    // The footer is at the very end of the xorb, so the LAST occurrence of
+    // IDENT_HASHES in the tail buffer is the real footer. Searching from the
+    // end also prevents false positives if chunk data happens to contain the
+    // IDENT_HASHES magic bytes — those would appear before the real footer.
+    let tail_file_offset = file_len - scan_size as u64;
+    let hashes_ident = XorbObjectInfoV1::IDENT_HASHES;
+    let mut footer_start_in_file: Option<u64> = None;
+
+    // Iterate backwards from the last possible start position
+    let max_start = tail_buf.len().saturating_sub(7);
+    for i in (0..=max_start).rev() {
+        if &tail_buf[i..i + 7] == &hashes_ident {
+            footer_start_in_file = Some(tail_file_offset + i as u64);
+            break;
+        }
+    }
+
+    let footer_start = footer_start_in_file.ok_or_else(|| {
+        XetError::ParseError("Could not find xorb footer in file".into())
+    })?;
+
+    // Parse footer from tail_buf at the position where IDENT_HASHES was found
+    let footer_offset_in_tail = (footer_start - tail_file_offset) as usize;
+    let footer = XorbObjectInfoV1::from_bytes(&tail_buf[footer_offset_in_tail..])?;
+
+    // Verify chunk hashes by reading each chunk from the file incrementally
+    let mut chunk_info: Vec<(MerkleHash, u64)> = Vec::with_capacity(footer.chunk_hashes.len());
+    let mut current_offset: u64 = 0;
+    let mut read_buf = [0u8; 64 * 1024]; // 64KB read buffer
+
+    for (i, expected_hash) in footer.chunk_hashes.iter().enumerate() {
+        let chunk_end = if i < footer.chunk_boundary_offsets.len() {
+            footer.chunk_boundary_offsets[i] as u64
+        } else {
+            // Last chunk ends at footer start
+            footer_start
+        };
+
+        if chunk_end > file_len || chunk_end < current_offset {
+            return Err(XetError::ParseError(format!(
+                "Invalid chunk boundary: chunk {} at {}-{} exceeds file bounds (len={})",
+                i, current_offset, chunk_end, file_len
+            )));
+        }
+
+        let chunk_size = chunk_end - current_offset;
+
+        // Seek to chunk start and hash incrementally
+        file.seek(SeekFrom::Start(current_offset)).map_err(|e| {
+            XetError::IoError(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to seek to chunk {}: {}", i, e),
+            ))
+        })?;
+
+        let mut hasher = blake3::Hasher::new_keyed(&crate::hash::DATA_KEY);
+        let mut remaining = chunk_size;
+        while remaining > 0 {
+            let to_read = std::cmp::min(remaining, read_buf.len() as u64) as usize;
+            let n = file.read(&mut read_buf[..to_read]).map_err(|e| {
+                XetError::IoError(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("Failed to read chunk {} data: {}", i, e),
+                ))
+            })?;
+            if n == 0 {
+                return Err(XetError::ParseError(format!(
+                    "Unexpected EOF reading chunk {} (remaining={})",
+                    i, remaining
+                )));
+            }
+            hasher.update(&read_buf[..n]);
+            remaining -= n as u64;
+        }
+
+        let actual_hash = MerkleHash::from(*hasher.finalize().as_bytes());
         if actual_hash != *expected_hash {
             return Err(XetError::ParseError(format!(
                 "Chunk {} hash mismatch: expected {}, got {}",

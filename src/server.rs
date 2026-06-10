@@ -7,10 +7,6 @@ use crate::config::ServerConfig;
 use crate::storage::create_storage;
 use crate::middleware::metrics_middleware;
 
-/// Maximum request body size: 64MB
-/// This allows for large xorb uploads while preventing memory exhaustion
-const MAX_BODY_SIZE: usize = 64 * 1024 * 1024;
-
 pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
     let storage = Arc::new(create_storage(&config.storage).await
         .expect("Failed to create storage backend"));
@@ -21,21 +17,30 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
 
     println!("Starting Xet Storage server on {}", bind_addr);
     println!("Storage backend: {}", config.storage.backend);
+    println!("Max upload size: {} MB", config.server.max_body_size_mb);
 
     HttpServer::new(move || {
         App::new()
             .wrap(Logger::default())
             .wrap(from_fn(metrics_middleware))
-            // Configure payload size limit to prevent memory exhaustion
-            .app_data(web::PayloadConfig::new(MAX_BODY_SIZE))
+            // PayloadConfig bounds non-upload routes (web::Bytes, web::Json).
+            // Upload handlers use web::Payload which bypasses this limit and
+            // enforce max_body_size_bytes manually via streaming byte counting.
+            .app_data(web::PayloadConfig::new(10 * 1024 * 1024))
             .app_data(web::Data::from(storage.clone()))
             .app_data(web::Data::from(index.clone()))
             .app_data(web::Data::new(config.clone()))
             .route("/v1/xorbs/{prefix}/{hash}", web::post().to(crate::api::xorb::upload_xorb))
+            .route("/v1/xorbs/{prefix}/{hash}", web::put().to(crate::api::xorb::upload_xorb))
+            .route("/v1/xorbs/{prefix}/{hash}/download", web::get().to(crate::api::xorb::download_xorb))
+            .route("/lfs/objects/{oid}", web::put().to(crate::api::lfs::upload_lfs_object))
+            .route("/lfs/objects/{oid}", web::get().to(crate::api::lfs::download_lfs_object))
             .route("/v1/shards", web::post().to(crate::api::shard::upload_shard))
             .route("/v1/reconstructions/{file_id}", web::get().to(crate::api::reconstruction::get_reconstruction_v1))
             .route("/v2/reconstructions/{file_id}", web::get().to(crate::api::reconstruction::get_reconstruction))
             .route("/v1/chunks/{prefix}/{hash}", web::get().to(crate::api::global_dedup::query_chunk_dedup))
+            .route("/objects/batch", web::post().to(crate::api::batch::batch_operation))
+            .route("/lfs/objects/batch", web::post().to(crate::api::batch::batch_operation))
             .route("/health", web::get().to(health_check))
             .route("/metrics", web::get().to(metrics_endpoint))
     })

@@ -6,6 +6,7 @@ use actix_web::{web, HttpResponse};
 use serde::{Serialize, Deserialize};
 
 use crate::index::MetadataIndex;
+use crate::metrics::GLOBAL_METRICS;
 use crate::storage::StorageBackend;
 
 #[derive(Serialize, Deserialize)]
@@ -22,10 +23,13 @@ pub async fn query_chunk_dedup(
     index: web::Data<MetadataIndex>,
     _storage: web::Data<Box<dyn StorageBackend>>,
 ) -> HttpResponse {
+    let start = std::time::Instant::now();
     let (prefix, hash) = path.into_inner();
 
     // Validate prefix
     if prefix != "default" {
+        GLOBAL_METRICS.record_request(400);
+        GLOBAL_METRICS.record_latency(start);
         return HttpResponse::BadRequest().json(serde_json::json!({
             "error": "Invalid prefix, expected 'default'"
         }));
@@ -33,32 +37,37 @@ pub async fn query_chunk_dedup(
 
     // Validate hash format (should be a hex hash)
     if hash.len() != 64 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+        GLOBAL_METRICS.record_request(400);
+        GLOBAL_METRICS.record_latency(start);
         return HttpResponse::BadRequest().json(serde_json::json!({
             "error": "Invalid hash format, expected 64-character hex string"
         }));
     }
 
     // Look up chunk in metadata index
-    match index.get_xorb_for_chunk(&hash) {
+    let response = match index.get_xorb_for_chunk(&hash) {
         Some((xorb_hash, chunk_index)) => {
-            let response = ChunkDedupResponse {
+            ChunkDedupResponse {
                 hash,
                 found: true,
                 xorb_hash: Some(xorb_hash),
                 chunk_index: Some(chunk_index),
-            };
-            HttpResponse::Ok().json(response)
+            }
         }
         None => {
-            let response = ChunkDedupResponse {
+            ChunkDedupResponse {
                 hash,
                 found: false,
                 xorb_hash: None,
                 chunk_index: None,
-            };
-            HttpResponse::Ok().json(response)
+            }
         }
-    }
+    };
+
+    GLOBAL_METRICS.record_request(200);
+    GLOBAL_METRICS.record_latency(start);
+
+    HttpResponse::Ok().json(response)
 }
 
 #[cfg(test)]

@@ -1,7 +1,7 @@
 use crate::types::MerkleHash;
 
 // Fixed keys from xet-core (data_hash.rs lines 288-297)
-const DATA_KEY: [u8; 32] = [
+pub(crate) const DATA_KEY: [u8; 32] = [
     102, 151, 245, 119, 91, 149, 80, 222, 49, 53, 203, 172, 165, 151, 24, 28,
     157, 228, 33, 16, 155, 235, 43, 88, 180, 208, 176, 75, 147, 173, 242, 41,
 ];

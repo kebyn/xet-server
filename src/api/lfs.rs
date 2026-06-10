@@ -1,58 +1,47 @@
-//! Xorb Upload API
+//! Simple LFS Object Storage API
 //!
-//! POST /v1/xorbs/{prefix}/{hash} - Upload xorb objects (streaming)
+//! PUT /lfs/objects/{oid} - Upload LFS objects (raw files) — streaming
+//! GET /lfs/objects/{oid} - Download LFS objects
+//!
+//! This provides simple raw file storage compatible with Git LFS,
+//! bypassing the Xorb format requirement for basic testing.
+//!
+//! Uploads stream data from the HTTP payload to a temp file with incremental
+//! BLAKE3 hashing, bounding memory to O(chunk_size) regardless of file size.
 
 use actix_web::{web, HttpResponse};
 use futures_util::StreamExt;
-use serde::Serialize;
 use tracing::{error, info};
 
 use crate::api::auth::{check_scope, extract_token_from_request, validate_jwt};
 use crate::config::ServerConfig;
-use crate::storage::{StorageBackend, StorageError};
-use crate::types::MerkleHash;
 use crate::metrics::GLOBAL_METRICS;
+use crate::storage::{StorageBackend, StorageError};
 use crate::util::{StreamingHasher, TempFile};
 
-#[derive(Serialize)]
-struct XorbUploadResponse {
-    was_inserted: bool,
-}
-
-/// Upload a xorb object via streaming.
+/// Upload an LFS object (raw file) via streaming.
 ///
-/// Data is streamed to a temp file with incremental BLAKE3 hashing,
-/// then verified from disk and moved to final storage via rename.
-pub async fn upload_xorb(
-    path: web::Path<(String, String)>,
+/// Data is streamed from the HTTP payload to a temp file with incremental
+/// BLAKE3 hashing. After the stream completes, the hash is verified against
+/// the OID and the temp file is moved to final storage via rename.
+pub async fn upload_lfs_object(
+    path: web::Path<String>,
     mut payload: web::Payload,
     storage: web::Data<Box<dyn StorageBackend>>,
     config: web::Data<ServerConfig>,
     req: actix_web::HttpRequest,
 ) -> HttpResponse {
     let start = std::time::Instant::now();
-    let (prefix, hash_str) = path.into_inner();
+    let oid = path.into_inner();
 
-    // Validate prefix
-    if prefix != "default" {
+    // Validate oid format (should be a hex hash)
+    if oid.len() != 64 || !oid.chars().all(|c| c.is_ascii_hexdigit()) {
         GLOBAL_METRICS.record_request(400);
         GLOBAL_METRICS.record_latency(start);
         return HttpResponse::BadRequest().json(serde_json::json!({
-            "error": "Invalid prefix, expected 'default'"
+            "error": "Invalid oid format, expected 64-character hex string"
         }));
     }
-
-    // Parse hash
-    let expected_hash = match MerkleHash::from_hex(&hash_str) {
-        Ok(h) => h,
-        Err(e) => {
-            GLOBAL_METRICS.record_request(400);
-            GLOBAL_METRICS.record_latency(start);
-            return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": format!("Invalid hash format: {}", e)
-            }));
-        }
-    };
 
     // Extract and validate auth token
     let token = match extract_token_from_request(&req) {
@@ -73,7 +62,7 @@ pub async fn upload_xorb(
             GLOBAL_METRICS.record_latency(start);
             return HttpResponse::Unauthorized().json(serde_json::json!({
                 "error": "Invalid token"
-            }))
+            }));
         }
     };
 
@@ -85,7 +74,8 @@ pub async fn upload_xorb(
         }));
     }
 
-    // Stream payload to temp file with incremental BLAKE3 hashing
+    // Stream payload to temp file with incremental BLAKE3 hashing.
+    // Memory usage is bounded to O(chunk_size) regardless of file size.
     let temp_dir = config.storage.resolve_upload_temp_dir();
     let mut temp_file = match TempFile::create(&temp_dir).await {
         Ok(tf) => tf,
@@ -111,6 +101,7 @@ pub async fn upload_xorb(
                 error!("Payload stream error: {}", e);
                 GLOBAL_METRICS.record_request(400);
                 GLOBAL_METRICS.record_latency(start);
+                // temp_file auto-cleaned by Drop
                 return HttpResponse::BadRequest().json(serde_json::json!({
                     "error": format!("Upload stream error: {}", e)
                 }));
@@ -138,6 +129,7 @@ pub async fn upload_xorb(
         }
     }
 
+    // Ensure all data is on disk before hashing/storage
     if let Err(e) = temp_file.sync_all().await {
         error!("Failed to sync temp file: {}", e);
         GLOBAL_METRICS.record_request(500);
@@ -148,39 +140,25 @@ pub async fn upload_xorb(
         }));
     }
 
-    // Verify xorb hash
-    let actual_hash = hasher.finalize();
-    if actual_hash != expected_hash {
+    // Verify content integrity: the oid must match the BLAKE3 hash of the body.
+    // This prevents clients from storing arbitrary content under a known hash.
+    let actual_hash = hasher.finalize().to_hex();
+    if actual_hash != oid {
         GLOBAL_METRICS.record_request(400);
         GLOBAL_METRICS.record_latency(start);
+        // temp_file auto-cleaned by Drop
         return HttpResponse::BadRequest().json(serde_json::json!({
-            "error": format!("Hash mismatch: expected {}, got {}", expected_hash.to_hex(), actual_hash.to_hex())
+            "error": format!("Hash mismatch: oid {} does not match content hash {}", oid, actual_hash)
         }));
     }
 
-    // Verify xorb structure and chunk hashes from temp file on disk
-    let temp_path = temp_file.path().to_path_buf();
-    if let Err(e) = crate::format::xorb::verify_xorb_from_file(&temp_path) {
-        GLOBAL_METRICS.record_request(400);
-        GLOBAL_METRICS.record_latency(start);
-        return HttpResponse::BadRequest().json(serde_json::json!({
-            "error": format!("Xorb verification failed: {}", e)
-        }));
-    }
+    let object_key = format!("lfs/objects/{}", oid);
 
-    // Check if xorb already exists.
-    // Note: There is a TOCTOU race between exists() and put_from_path() below.
-    // For content-addressed storage this is acceptable because:
-    // 1. Same hash = same content, so concurrent uploads are idempotent
-    // 2. The was_inserted field is best-effort under concurrency — it may not
-    //    reflect which concurrent writer actually won the race, but this only
-    //    affects metrics/dedup accounting, not data integrity.
-    // For strict dedup accounting, storage backends should implement put_if_absent.
-    let xorb_key = format!("xorbs/{}/{}", prefix, hash_str);
-    let already_exists = match storage.exists(&xorb_key).await {
+    // Check if object already exists
+    let already_exists = match storage.exists(&object_key).await {
         Ok(exists) => exists,
         Err(e) => {
-            error!("Failed to check xorb existence: {}", e);
+            error!("Failed to check object existence: {}", e);
             GLOBAL_METRICS.record_request(500);
             GLOBAL_METRICS.record_error();
             GLOBAL_METRICS.record_latency(start);
@@ -194,16 +172,17 @@ pub async fn upload_xorb(
         GLOBAL_METRICS.record_request(200);
         GLOBAL_METRICS.record_storage_operation();
         GLOBAL_METRICS.record_latency(start);
-        // temp_file auto-cleaned by Drop
-        return HttpResponse::Ok().json(XorbUploadResponse {
-            was_inserted: false,
-        });
+        // temp_file auto-cleaned by Drop (object already in storage)
+        return HttpResponse::Ok().json(serde_json::json!({
+            "message": "Object already exists"
+        }));
     }
 
-    // Move temp file to final storage (zero-copy rename for local storage)
+    // Move temp file to final storage location (zero-copy rename for local storage)
     let temp_path = temp_file.into_path();
-    if let Err(e) = storage.put_from_path(&xorb_key, &temp_path).await {
-        error!("Failed to store xorb: {}", e);
+    if let Err(e) = storage.put_from_path(&object_key, &temp_path).await {
+        error!("Failed to store object: {}", e);
+        // Clean up temp file on failure
         let _ = std::fs::remove_file(&temp_path);
         GLOBAL_METRICS.record_request(500);
         GLOBAL_METRICS.record_error();
@@ -213,43 +192,34 @@ pub async fn upload_xorb(
         }));
     }
 
-    info!("Uploaded xorb {} ({} bytes)", hash_str, total_bytes);
+    info!("Uploaded LFS object {} ({} bytes)", oid, total_bytes);
 
     GLOBAL_METRICS.record_request(200);
     GLOBAL_METRICS.record_storage_operation();
     GLOBAL_METRICS.record_upload_bytes(total_bytes);
     GLOBAL_METRICS.record_latency(start);
 
-    HttpResponse::Ok().json(XorbUploadResponse {
-        was_inserted: true,
-    })
+    HttpResponse::Ok().json(serde_json::json!({
+        "message": "Object uploaded successfully"
+    }))
 }
 
-/// Download a xorb object
-pub async fn download_xorb(
-    path: web::Path<(String, String)>,
+/// Download an LFS object
+pub async fn download_lfs_object(
+    path: web::Path<String>,
     storage: web::Data<Box<dyn StorageBackend>>,
     config: web::Data<ServerConfig>,
     req: actix_web::HttpRequest,
 ) -> HttpResponse {
     let start = std::time::Instant::now();
-    let (prefix, hash_str) = path.into_inner();
+    let oid = path.into_inner();
 
-    // Validate prefix
-    if prefix != "default" {
+    // Validate oid format
+    if oid.len() != 64 || !oid.chars().all(|c| c.is_ascii_hexdigit()) {
         GLOBAL_METRICS.record_request(400);
         GLOBAL_METRICS.record_latency(start);
         return HttpResponse::BadRequest().json(serde_json::json!({
-            "error": "Invalid prefix, expected 'default'"
-        }));
-    }
-
-    // Validate hash format
-    if hash_str.len() != 64 || !hash_str.chars().all(|c| c.is_ascii_hexdigit()) {
-        GLOBAL_METRICS.record_request(400);
-        GLOBAL_METRICS.record_latency(start);
-        return HttpResponse::BadRequest().json(serde_json::json!({
-            "error": "Invalid hash format, expected 64-character hex string"
+            "error": "Invalid oid format, expected 64-character hex string"
         }));
     }
 
@@ -284,9 +254,9 @@ pub async fn download_xorb(
         }));
     }
 
-    // Fetch xorb from storage
-    let xorb_key = format!("xorbs/{}/{}", prefix, hash_str);
-    let xorb_data = match storage.get(&xorb_key).await {
+    // Fetch object from storage
+    let object_key = format!("lfs/objects/{}", oid);
+    let object_data = match storage.get(&object_key).await {
         Ok(data) => {
             GLOBAL_METRICS.record_storage_operation();
             data
@@ -295,11 +265,11 @@ pub async fn download_xorb(
             GLOBAL_METRICS.record_request(404);
             GLOBAL_METRICS.record_latency(start);
             return HttpResponse::NotFound().json(serde_json::json!({
-                "error": format!("Xorb not found: {}", hash_str)
+                "error": format!("Object not found: {}", oid)
             }));
         }
         Err(e) => {
-            error!("Failed to fetch xorb: {}", e);
+            error!("Failed to fetch object: {}", e);
             GLOBAL_METRICS.record_request(500);
             GLOBAL_METRICS.record_error();
             GLOBAL_METRICS.record_latency(start);
@@ -309,95 +279,13 @@ pub async fn download_xorb(
         }
     };
 
-    info!("Downloaded xorb {} ({} bytes)", hash_str, xorb_data.len());
+    info!("Downloaded LFS object {} ({} bytes)", oid, object_data.len());
 
     GLOBAL_METRICS.record_request(200);
-    GLOBAL_METRICS.record_download_bytes(xorb_data.len() as u64);
+    GLOBAL_METRICS.record_download_bytes(object_data.len() as u64);
     GLOBAL_METRICS.record_latency(start);
 
     HttpResponse::Ok()
         .content_type("application/octet-stream")
-        .body(xorb_data)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::api::auth::{JwtClaims, create_jwt};
-    use crate::config::AuthConfig;
-    use crate::storage::local::LocalStorage;
-    use actix_web::{test, web, App};
-    use tempfile::tempdir;
-
-    #[actix_web::test]
-    async fn test_upload_xorb_unauthorized() {
-        let dir = tempdir().unwrap();
-        let storage: Box<dyn StorageBackend> = Box::new(
-            LocalStorage::new(dir.path().to_str().unwrap()).unwrap()
-        );
-
-        let config = ServerConfig {
-            auth: AuthConfig {
-                jwt_secret: "test-secret".to_string(),
-            },
-            ..Default::default()
-        };
-
-        let app = test::init_service(
-            App::new()
-                .app_data(web::Data::new(storage))
-                .app_data(web::Data::new(config))
-                .route("/v1/xorbs/{prefix}/{hash}", web::post().to(upload_xorb))
-        ).await;
-
-        let hash = "a".repeat(64);
-        let req = test::TestRequest::post()
-            .uri(&format!("/v1/xorbs/default/{}", hash))
-            .set_payload(vec![0u8; 100])
-            .to_request();
-
-        let resp = test::call_service(&app, req).await;
-        assert_eq!(resp.status(), 401);
-    }
-
-    #[actix_web::test]
-    async fn test_upload_xorb_invalid_prefix() {
-        let dir = tempdir().unwrap();
-        let storage: Box<dyn StorageBackend> = Box::new(
-            LocalStorage::new(dir.path().to_str().unwrap()).unwrap()
-        );
-
-        let config = ServerConfig {
-            auth: AuthConfig {
-                jwt_secret: "test-secret".to_string(),
-            },
-            ..Default::default()
-        };
-
-        let token = create_jwt(
-            &JwtClaims {
-                sub: "test".to_string(),
-                scope: "read write".to_string(),
-                exp: 9999999999,
-            },
-            &config.auth.jwt_secret,
-        ).unwrap();
-
-        let app = test::init_service(
-            App::new()
-                .app_data(web::Data::new(storage))
-                .app_data(web::Data::new(config))
-                .route("/v1/xorbs/{prefix}/{hash}", web::post().to(upload_xorb))
-        ).await;
-
-        let hash = "a".repeat(64);
-        let req = test::TestRequest::post()
-            .uri(&format!("/v1/xorbs/invalid/{}", hash))
-            .insert_header(("Authorization", format!("Bearer {}", token)))
-            .set_payload(vec![0u8; 100])
-            .to_request();
-
-        let resp = test::call_service(&app, req).await;
-        assert_eq!(resp.status(), 400);
-    }
+        .body(object_data)
 }

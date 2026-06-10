@@ -19,6 +19,7 @@ fn test_config_s3_settings() {
             s3_region: Some("us-east-1".to_string()),
             s3_endpoint: Some("http://localhost:9000".to_string()),
             local_path: None,
+            upload_temp_dir: None,
         },
         ..Default::default()
     };
