@@ -90,6 +90,12 @@ impl XetSigner {
         (format!("xet_{}.{}", signing_input, sig_b64), exp)
     }
 
+    /// Sign and create an internal token for Hub-to-CAS communication
+    /// Returns (token, expiration_timestamp)
+    pub fn sign_internal(&self) -> (String, u64) {
+        self.sign("hub-service", "internal", "", "", "")
+    }
+
     /// Get the key ID
     pub fn kid(&self) -> &str {
         &self.kid
