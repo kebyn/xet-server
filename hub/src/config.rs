@@ -19,15 +19,17 @@ impl Default for ServerSettings {
 /// Authentication settings
 #[derive(Debug, Clone)]
 pub struct AuthSettings {
-    pub jwt_secret: String,
-    pub token_expiry_hours: u64,
+    pub private_key_path: String,
+    pub kid: String,
+    pub token_ttl_seconds: u64,
 }
 
 impl Default for AuthSettings {
     fn default() -> Self {
         AuthSettings {
-            jwt_secret: "dev-secret-change-in-production".to_string(),
-            token_expiry_hours: 24,
+            private_key_path: "private_key.pem".to_string(),
+            kid: "hub-key-1".to_string(),
+            token_ttl_seconds: 3600,
         }
     }
 }
@@ -35,13 +37,13 @@ impl Default for AuthSettings {
 /// Metadata store settings
 #[derive(Debug, Clone)]
 pub struct MetadataSettings {
-    pub database_url: String,
+    pub sqlite_path: String,
 }
 
 impl Default for MetadataSettings {
     fn default() -> Self {
         MetadataSettings {
-            database_url: "hub.db".to_string(),
+            sqlite_path: "hub.db".to_string(),
         }
     }
 }
@@ -110,15 +112,17 @@ impl HubConfig {
                     .unwrap_or(8080),
             },
             auth: AuthSettings {
-                jwt_secret: env::var("HUB_JWT_SECRET")
-                    .unwrap_or_else(|_| "dev-secret-change-in-production".to_string()),
-                token_expiry_hours: env::var("HUB_TOKEN_EXPIRY_HOURS")
+                private_key_path: env::var("HUB_PRIVATE_KEY_PATH")
+                    .unwrap_or_else(|_| "private_key.pem".to_string()),
+                kid: env::var("HUB_KEY_ID")
+                    .unwrap_or_else(|_| "hub-key-1".to_string()),
+                token_ttl_seconds: env::var("HUB_TOKEN_TTL_SECS")
                     .ok()
-                    .and_then(|h| h.parse().ok())
-                    .unwrap_or(24),
+                    .and_then(|t| t.parse().ok())
+                    .unwrap_or(3600),
             },
             metadata: MetadataSettings {
-                database_url: env::var("HUB_DATABASE_URL")
+                sqlite_path: env::var("HUB_DATABASE_URL")
                     .unwrap_or_else(|_| "hub.db".to_string()),
             },
             cas: CasSettings {
