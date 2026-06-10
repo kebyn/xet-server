@@ -9,7 +9,7 @@ use actix_web::{web, HttpResponse};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-use crate::api::auth::{extract_token_from_request, verify_token};
+use crate::api::auth::{extract_token_from_request, AuthVerifier};
 use crate::config::ServerConfig;
 use crate::metrics::GLOBAL_METRICS;
 
@@ -72,6 +72,7 @@ const MAX_BATCH_SIZE: usize = 1000;
 /// Handle Git LFS batch API requests
 pub async fn batch_operation(
     body: web::Json<BatchRequest>,
+    auth: web::Data<AuthVerifier>,
     config: web::Data<ServerConfig>,
     req: actix_web::HttpRequest,
 ) -> HttpResponse {
@@ -116,7 +117,7 @@ pub async fn batch_operation(
         }
     };
 
-    let claims = match verify_token(&token, &config.auth) {
+    let claims = match auth.verify_token(&token) {
         Ok(c) => c,
         Err(_) => {
             GLOBAL_METRICS.record_request(401);
@@ -143,7 +144,7 @@ pub async fn batch_operation(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let expires_in = claims.exp.saturating_sub(now_secs as usize).max(1) as u64;
+    let expires_in = claims.exp.saturating_sub(now_secs).max(1);
 
     // Process each object
     let mut response_objects = Vec::new();

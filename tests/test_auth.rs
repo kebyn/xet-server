@@ -10,7 +10,7 @@ fn create_test_claims(kid: &str, scope: &str) -> XetClaims {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
-        .as_secs() as usize;
+        .as_secs();
 
     XetClaims {
         sub: "test-user".to_string(),

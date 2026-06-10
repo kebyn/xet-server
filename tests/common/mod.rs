@@ -3,9 +3,23 @@
 //! Provides helpers for creating test tokens and configurations
 //! using Ed25519 authentication.
 
-use xet_server::api::auth::{sign_xet_token, KeyPair, XetClaims};
+use xet_server::api::auth::{sign_xet_token, KeyPair, XetClaims, AuthVerifier};
 use xet_server::config::{AuthConfig, ServerConfig, ServerSettings, StateConfig, StorageConfig};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tempfile::TempDir;
+
+/// Test context that holds temp resources to keep them alive during tests.
+///
+/// The `temp_dir` field keeps the temporary directory alive, preventing
+/// the temp files (including the public key PEM file) from being deleted
+/// until the test completes.
+pub struct TestContext {
+    pub config: ServerConfig,
+    pub keypair: KeyPair,
+    pub auth_verifier: AuthVerifier,
+    /// Keep temp dir alive so key files don't get deleted during test
+    pub temp_dir: TempDir,
+}
 
 /// Create a test token with the given scope
 ///
@@ -17,7 +31,7 @@ pub fn test_token(scope: &str) -> (KeyPair, String) {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
-        .as_secs() as usize;
+        .as_secs();
 
     let claims = XetClaims {
         sub: "test-user".to_string(),
@@ -46,15 +60,24 @@ pub fn test_token_with_claims(claims: XetClaims) -> (KeyPair, String) {
 
 /// Create a test configuration with the given key pair
 ///
-/// Writes the public key to a persistent temp file and sets up the auth config
+/// Returns a TestContext that holds the config, keypair, and temp dir.
+/// The temp dir keeps the public key file alive for the duration of the test.
 #[allow(dead_code)]
-pub fn test_config_with_key(kp: &KeyPair) -> ServerConfig {
-    // Write public key to a persistent temp file (using /tmp with unique name)
+pub fn test_config_with_key(kp: &KeyPair) -> TestContext {
+    // Create a temp directory and write public key inside it
+    let temp_dir = tempfile::tempdir().unwrap();
     let public_key_pem = KeyPair::public_key_to_pem(&kp.verifying_key()).unwrap();
-    let temp_path = format!("/tmp/xet-test-pubkey-{}.pem", kp.kid());
+    let temp_path = temp_dir.path().join(format!("pubkey-{}.pem", kp.kid()));
     std::fs::write(&temp_path, &public_key_pem).unwrap();
 
-    ServerConfig {
+    let auth_config = AuthConfig {
+        public_key_path: temp_path.to_str().unwrap().to_string(),
+        trusted_kids: vec![kp.kid()],
+    };
+
+    let auth_verifier = AuthVerifier::from_config(&auth_config).unwrap();
+
+    let config = ServerConfig {
         server: ServerSettings {
             host: "127.0.0.1".to_string(),
             port: 8080,
@@ -69,25 +92,66 @@ pub fn test_config_with_key(kp: &KeyPair) -> ServerConfig {
             local_path: Some("./data".to_string()),
             upload_temp_dir: None,
         },
-        auth: AuthConfig {
-            public_key_path: temp_path,
-            trusted_kids: vec![kp.kid()],
-            token_prefix: "xet_".to_string(),
-        },
+        auth: auth_config,
         state: StateConfig {
             sqlite_path: "/tmp/xet-test-state.db".to_string(),
         },
+    };
+
+    TestContext {
+        config,
+        keypair: KeyPair::generate(), // New keypair for caller's use
+        auth_verifier,
+        temp_dir: temp_dir,
     }
 }
 
 /// Create a test configuration with a new generated key pair
 ///
-/// Returns both the key pair and the config
+/// Returns a TestContext that holds the config, keypair, and temp dir.
 #[allow(dead_code)]
-pub fn test_config_with_new_key() -> (KeyPair, ServerConfig) {
+pub fn test_config_with_new_key() -> TestContext {
     let kp = KeyPair::generate();
-    let config = test_config_with_key(&kp);
-    (kp, config)
+    // Create a temp directory and write public key inside it
+    let temp_dir = tempfile::tempdir().unwrap();
+    let public_key_pem = KeyPair::public_key_to_pem(&kp.verifying_key()).unwrap();
+    let temp_path = temp_dir.path().join(format!("pubkey-{}.pem", kp.kid()));
+    std::fs::write(&temp_path, &public_key_pem).unwrap();
+
+    let auth_config = AuthConfig {
+        public_key_path: temp_path.to_str().unwrap().to_string(),
+        trusted_kids: vec![kp.kid()],
+    };
+
+    let auth_verifier = AuthVerifier::from_config(&auth_config).unwrap();
+
+    let config = ServerConfig {
+        server: ServerSettings {
+            host: "127.0.0.1".to_string(),
+            port: 8080,
+            public_base_url: None,
+            max_body_size_mb: 2048,
+        },
+        storage: StorageConfig {
+            backend: "local".to_string(),
+            s3_bucket: None,
+            s3_region: None,
+            s3_endpoint: None,
+            local_path: Some("./data".to_string()),
+            upload_temp_dir: None,
+        },
+        auth: auth_config,
+        state: StateConfig {
+            sqlite_path: "/tmp/xet-test-state.db".to_string(),
+        },
+    };
+
+    TestContext {
+        config,
+        keypair: kp,
+        auth_verifier,
+        temp_dir: temp_dir,
+    }
 }
 
 /// Create a test token for a specific key pair (useful for testing with known keys)
@@ -97,7 +161,7 @@ pub fn test_token_for_keypair(kp: &KeyPair, scope: &str) -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
-        .as_secs() as usize;
+        .as_secs();
 
     let claims = XetClaims {
         sub: "test-user".to_string(),

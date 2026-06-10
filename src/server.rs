@@ -3,11 +3,18 @@
 use actix_web::{web, App, HttpServer, HttpResponse, middleware::{Logger, from_fn}};
 use std::sync::Arc;
 
+use crate::api::auth::AuthVerifier;
 use crate::config::ServerConfig;
 use crate::storage::create_storage;
 use crate::middleware::metrics_middleware;
 
 pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
+    // Load auth keys once at startup (avoid per-request file I/O)
+    let auth_verifier = Arc::new(
+        AuthVerifier::from_config(&config.auth)
+            .expect("Failed to load auth public key")
+    );
+
     let storage = Arc::new(create_storage(&config.storage).await
         .expect("Failed to create storage backend"));
 
@@ -27,6 +34,7 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
             // Upload handlers use web::Payload which bypasses this limit and
             // enforce max_body_size_bytes manually via streaming byte counting.
             .app_data(web::PayloadConfig::new(10 * 1024 * 1024))
+            .app_data(web::Data::from(auth_verifier.clone()))
             .app_data(web::Data::from(storage.clone()))
             .app_data(web::Data::from(index.clone()))
             .app_data(web::Data::new(config.clone()))

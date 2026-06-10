@@ -13,7 +13,7 @@ use actix_web::{web, HttpResponse};
 use futures_util::StreamExt;
 use tracing::{error, info};
 
-use crate::api::auth::{check_scope, extract_token_from_request, verify_token};
+use crate::api::auth::{check_scope, extract_token_from_request, AuthVerifier};
 use crate::config::ServerConfig;
 use crate::metrics::GLOBAL_METRICS;
 use crate::storage::{StorageBackend, StorageError};
@@ -28,6 +28,7 @@ pub async fn upload_lfs_object(
     path: web::Path<String>,
     mut payload: web::Payload,
     storage: web::Data<Box<dyn StorageBackend>>,
+    auth: web::Data<AuthVerifier>,
     config: web::Data<ServerConfig>,
     req: actix_web::HttpRequest,
 ) -> HttpResponse {
@@ -55,7 +56,7 @@ pub async fn upload_lfs_object(
         }
     };
 
-    let claims = match verify_token(&token, &config.auth) {
+    let claims = match auth.verify_token(&token) {
         Ok(c) => c,
         Err(_) => {
             GLOBAL_METRICS.record_request(401);
@@ -208,7 +209,8 @@ pub async fn upload_lfs_object(
 pub async fn download_lfs_object(
     path: web::Path<String>,
     storage: web::Data<Box<dyn StorageBackend>>,
-    config: web::Data<ServerConfig>,
+    auth: web::Data<AuthVerifier>,
+    _config: web::Data<ServerConfig>,
     req: actix_web::HttpRequest,
 ) -> HttpResponse {
     let start = std::time::Instant::now();
@@ -235,7 +237,7 @@ pub async fn download_lfs_object(
         }
     };
 
-    let claims = match verify_token(&token, &config.auth) {
+    let claims = match auth.verify_token(&token) {
         Ok(c) => c,
         Err(_) => {
             GLOBAL_METRICS.record_request(401);

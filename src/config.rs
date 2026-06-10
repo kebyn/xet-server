@@ -84,8 +84,6 @@ pub struct AuthConfig {
     pub public_key_path: String,
     /// List of trusted key IDs (kid values) that are accepted
     pub trusted_kids: Vec<String>,
-    /// Token prefix (e.g., "xet_" for xet tokens)
-    pub token_prefix: String,
 }
 
 /// State management configuration
@@ -115,7 +113,6 @@ impl Default for ServerConfig {
             auth: AuthConfig {
                 public_key_path: "/tmp/xet-test-public-key.pem".to_string(),
                 trusted_kids: vec!["test-kid".to_string()],
-                token_prefix: "xet_".to_string(),
             },
             state: StateConfig {
                 sqlite_path: "/tmp/xet-state.db".to_string(),
@@ -152,8 +149,6 @@ impl ServerConfig {
             .ok()
             .map(|s| s.split(',').map(|kid| kid.trim().to_string()).collect())
             .unwrap_or_else(|| vec!["default".to_string()]);
-        let token_prefix = std::env::var("CAS_TOKEN_PREFIX")
-            .unwrap_or_else(|_| "xet_".to_string());
 
         // State database configuration
         let sqlite_path = std::env::var("CAS_STATE_DB_PATH")
@@ -172,7 +167,6 @@ impl ServerConfig {
             auth: AuthConfig {
                 public_key_path,
                 trusted_kids,
-                token_prefix,
             },
             state: StateConfig {
                 sqlite_path,

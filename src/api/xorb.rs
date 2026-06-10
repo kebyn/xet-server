@@ -7,7 +7,7 @@ use futures_util::StreamExt;
 use serde::Serialize;
 use tracing::{error, info};
 
-use crate::api::auth::{check_scope, extract_token_from_request, verify_token};
+use crate::api::auth::{check_scope, extract_token_from_request, AuthVerifier};
 use crate::config::ServerConfig;
 use crate::storage::{StorageBackend, StorageError};
 use crate::types::MerkleHash;
@@ -27,6 +27,7 @@ pub async fn upload_xorb(
     path: web::Path<(String, String)>,
     mut payload: web::Payload,
     storage: web::Data<Box<dyn StorageBackend>>,
+    auth: web::Data<AuthVerifier>,
     config: web::Data<ServerConfig>,
     req: actix_web::HttpRequest,
 ) -> HttpResponse {
@@ -66,7 +67,7 @@ pub async fn upload_xorb(
         }
     };
 
-    let claims = match verify_token(&token, &config.auth) {
+    let claims = match auth.verify_token(&token) {
         Ok(c) => c,
         Err(_) => {
             GLOBAL_METRICS.record_request(401);
@@ -229,7 +230,8 @@ pub async fn upload_xorb(
 pub async fn download_xorb(
     path: web::Path<(String, String)>,
     storage: web::Data<Box<dyn StorageBackend>>,
-    config: web::Data<ServerConfig>,
+    auth: web::Data<AuthVerifier>,
+    _config: web::Data<ServerConfig>,
     req: actix_web::HttpRequest,
 ) -> HttpResponse {
     let start = std::time::Instant::now();
@@ -265,7 +267,7 @@ pub async fn download_xorb(
         }
     };
 
-    let claims = match verify_token(&token, &config.auth) {
+    let claims = match auth.verify_token(&token) {
         Ok(c) => c,
         Err(_) => {
             GLOBAL_METRICS.record_request(401);
@@ -323,33 +325,41 @@ pub async fn download_xorb(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::auth::{KeyPair, XetClaims, sign_xet_token};
+    use crate::api::auth::{KeyPair, XetClaims, sign_xet_token, AuthVerifier};
     use crate::config::{AuthConfig, StateConfig};
     use crate::storage::local::LocalStorage;
     use actix_web::{test, web, App};
     use tempfile::tempdir;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    fn create_test_config() -> (KeyPair, ServerConfig) {
+    fn create_test_config() -> (KeyPair, AuthVerifier, ServerConfig) {
         let kp = KeyPair::generate();
         let public_key_pem = KeyPair::public_key_to_pem(&kp.verifying_key()).unwrap();
 
-        // Use a temp file path that persists for the test
-        let temp_path = format!("/tmp/xet-test-pubkey-{}.pem", kp.kid());
+        // Use a temp file inside a tempdir to ensure cleanup
+        let temp_dir = tempdir().unwrap();
+        let temp_path = temp_dir.path().join(format!("pubkey-{}.pem", kp.kid()));
         std::fs::write(&temp_path, &public_key_pem).unwrap();
 
+        // Keep temp_dir alive by leaking it (test scope is short)
+        let temp_path_str = temp_path.to_str().unwrap().to_string();
+        std::mem::forget(temp_dir); // Keep temp dir alive for test duration
+
+        let auth_config = AuthConfig {
+            public_key_path: temp_path_str,
+            trusted_kids: vec![kp.kid()],
+        };
+
+        let auth_verifier = AuthVerifier::from_config(&auth_config).unwrap();
+
         let config = ServerConfig {
-            auth: AuthConfig {
-                public_key_path: temp_path,
-                trusted_kids: vec![kp.kid()],
-                token_prefix: "xet_".to_string(),
-            },
+            auth: auth_config,
             state: StateConfig {
                 sqlite_path: "/tmp/xet-test-state.db".to_string(),
             },
             ..Default::default()
         };
-        (kp, config)
+        (kp, auth_verifier, config)
     }
 
     fn create_test_token(kp: &KeyPair, scope: &str) -> String {
@@ -357,7 +367,7 @@ mod tests {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
-            .as_secs() as usize;
+            .as_secs();
         let claims = XetClaims {
             sub: "test".to_string(),
             scope: scope.to_string(),
@@ -378,11 +388,12 @@ mod tests {
             LocalStorage::new(dir.path().to_str().unwrap()).unwrap()
         );
 
-        let (_, config) = create_test_config();
+        let (_, auth, config) = create_test_config();
 
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(storage))
+                .app_data(web::Data::new(auth))
                 .app_data(web::Data::new(config))
                 .route("/v1/xorbs/{prefix}/{hash}", web::post().to(upload_xorb))
         ).await;
@@ -404,12 +415,13 @@ mod tests {
             LocalStorage::new(dir.path().to_str().unwrap()).unwrap()
         );
 
-        let (kp, config) = create_test_config();
+        let (kp, auth, config) = create_test_config();
         let token = create_test_token(&kp, "read write");
 
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(storage))
+                .app_data(web::Data::new(auth))
                 .app_data(web::Data::new(config))
                 .route("/v1/xorbs/{prefix}/{hash}", web::post().to(upload_xorb))
         ).await;
