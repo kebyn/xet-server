@@ -88,6 +88,8 @@ pub enum MetadataError {
     DatabaseError(String),
     #[error("Invalid operation: {0}")]
     InvalidOperation(String),
+    #[error("Conflict: HEAD mismatch (expected parent '{0}')")]
+    Conflict(String),
 }
 
 /// Trait for metadata storage operations
@@ -161,4 +163,13 @@ pub trait MetadataStore: Send + Sync {
         commit_id: &str,
         path: &str,
     ) -> Result<FileEntry, MetadataError>;
+
+    /// Atomically check HEAD matches expected_parent, then create revision + entries + set HEAD.
+    /// Returns Err(MetadataError::Conflict(current_head)) if HEAD doesn't match.
+    async fn commit_atomic(
+        &self,
+        rev: &Revision,
+        entries: &[FileEntry],
+        expected_parent: Option<&str>,
+    ) -> Result<(), MetadataError>;
 }

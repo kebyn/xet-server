@@ -407,3 +407,146 @@ async fn test_commit_log() {
     assert_eq!(log_limited[0].commit_id, "commit3");
     assert_eq!(log_limited[1].commit_id, "commit2");
 }
+
+#[tokio::test]
+async fn test_commit_atomic_success() {
+    let store = create_test_store();
+
+    let repo = store
+        .create_repo("testuser", "testrepo", RepoType::Model, false)
+        .await
+        .expect("Failed to create repo");
+
+    // First commit with no parent (expected_parent = None, HEAD is None)
+    let rev = Revision {
+        commit_id: "commit1".to_string(),
+        repo_id: repo.id,
+        parent: None,
+        message: "First commit".to_string(),
+        author: "testuser".to_string(),
+        created_at: 1000,
+    };
+    let entries = vec![
+        FileEntry {
+            path: "file1.txt".to_string(),
+            repo_id: repo.id,
+            commit_id: "commit1".to_string(),
+            size: 100,
+            cas_hash: "hash1".to_string(),
+            is_lfs: false,
+        },
+    ];
+
+    // Should succeed since HEAD is None and expected_parent is None
+    store.commit_atomic(&rev, &entries, None).await.expect("commit_atomic failed");
+
+    // Verify HEAD was set
+    let head = store.get_head(repo.id).await.expect("Failed to get head");
+    assert_eq!(head, Some("commit1".to_string()));
+
+    // Verify file entry was added
+    let tree = store.get_file_tree(repo.id, "commit1").await.expect("Failed to get tree");
+    assert_eq!(tree.len(), 1);
+    assert_eq!(tree[0].path, "file1.txt");
+}
+
+#[tokio::test]
+async fn test_commit_atomic_rejects_mismatched_parent() {
+    let store = create_test_store();
+
+    let repo = store
+        .create_repo("testuser", "testrepo", RepoType::Model, false)
+        .await
+        .expect("Failed to create repo");
+
+    // Create initial commit and set HEAD
+    let rev1 = Revision {
+        commit_id: "commit1".to_string(),
+        repo_id: repo.id,
+        parent: None,
+        message: "First commit".to_string(),
+        author: "testuser".to_string(),
+        created_at: 1000,
+    };
+    store.add_revision(rev1).await.unwrap();
+    store.set_head(repo.id, "commit1").await.unwrap();
+
+    // Try to commit with wrong expected_parent
+    let rev2 = Revision {
+        commit_id: "commit2".to_string(),
+        repo_id: repo.id,
+        parent: Some("commit1".to_string()),
+        message: "Second commit".to_string(),
+        author: "testuser".to_string(),
+        created_at: 2000,
+    };
+    let entries = vec![];
+
+    // Should fail since HEAD is "commit1" but expected_parent is "wrong_parent"
+    let result = store.commit_atomic(&rev2, &entries, Some("wrong_parent")).await;
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(matches!(err, hub_api::metadata::MetadataError::Conflict(_)));
+
+    // Verify the conflict contains the actual HEAD
+    if let hub_api::metadata::MetadataError::Conflict(actual_head) = err {
+        assert_eq!(actual_head, "commit1");
+    }
+
+    // Verify HEAD wasn't changed
+    let head = store.get_head(repo.id).await.expect("Failed to get head");
+    assert_eq!(head, Some("commit1".to_string()));
+}
+
+#[tokio::test]
+async fn test_commit_atomic_concurrent_protection() {
+    let store = create_test_store();
+
+    let repo = store
+        .create_repo("testuser", "testrepo", RepoType::Model, false)
+        .await
+        .expect("Failed to create repo");
+
+    // Create initial commit atomically
+    let rev1 = Revision {
+        commit_id: "commit1".to_string(),
+        repo_id: repo.id,
+        parent: None,
+        message: "First commit".to_string(),
+        author: "testuser".to_string(),
+        created_at: 1000,
+    };
+    store.commit_atomic(&rev1, &[], None).await.expect("First commit failed");
+
+    // First concurrent attempt with correct parent
+    let rev2a = Revision {
+        commit_id: "commit2a".to_string(),
+        repo_id: repo.id,
+        parent: Some("commit1".to_string()),
+        message: "Concurrent A".to_string(),
+        author: "testuser".to_string(),
+        created_at: 2000,
+    };
+
+    // This should succeed
+    store.commit_atomic(&rev2a, &[], Some("commit1")).await.expect("commit_atomic should succeed");
+
+    // Second concurrent attempt with same parent (now stale)
+    let rev2b = Revision {
+        commit_id: "commit2b".to_string(),
+        repo_id: repo.id,
+        parent: Some("commit1".to_string()),
+        message: "Concurrent B".to_string(),
+        author: "testuser".to_string(),
+        created_at: 2001,
+    };
+
+    // This should fail since HEAD is now "commit2a", not "commit1"
+    let result = store.commit_atomic(&rev2b, &[], Some("commit1")).await;
+    assert!(result.is_err());
+    assert!(matches!(result.unwrap_err(), hub_api::metadata::MetadataError::Conflict(_)));
+
+    // Verify HEAD is commit2a
+    let head = store.get_head(repo.id).await.expect("Failed to get head");
+    assert_eq!(head, Some("commit2a".to_string()));
+}
