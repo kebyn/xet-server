@@ -1,1 +1,3 @@
-// Placeholder - will be implemented in later tasks
+pub mod whoami;
+
+pub use whoami::whoami;
