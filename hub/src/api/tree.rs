@@ -32,13 +32,19 @@ async fn resolve_revision(
         if metadata.get_revision(repo_id, revision).await.is_ok() {
             return Ok(revision.to_string());
         }
+        // I14: Return error for unknown commit hashes instead of falling through
+        return Err(format!("Revision not found: {}", revision));
     }
 
-    // If revision is "main" or a branch name, resolve to HEAD
-    let head = metadata.get_head(repo_id).await.ok().flatten();
-    match head {
-        Some(h) => Ok(h),
-        None => Err(format!("Revision not found: {}", revision)),
+    // I14: Only allow "main" as a branch name (no arbitrary branch resolution yet)
+    if revision == "main" {
+        let head = metadata.get_head(repo_id).await.ok().flatten();
+        match head {
+            Some(h) => Ok(h),
+            None => Err(format!("No HEAD found for repo")),
+        }
+    } else {
+        Err(format!("Revision not found: {} (only 'main' branch or commit hashes are supported)", revision))
     }
 }
 

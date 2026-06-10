@@ -39,6 +39,8 @@ pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
     HttpServer::new(move || {
         App::new()
             .wrap(Logger::default())
+            // I13: Configure payload size limit for large commit payloads with inline files
+            .app_data(web::PayloadConfig::default().limit(50 * 1024 * 1024)) // 50MB
             .app_data(web::Data::new(config.clone()))
             .app_data(web::Data::from(token_store.clone()))
             .app_data(web::Data::from(metadata.clone()))
