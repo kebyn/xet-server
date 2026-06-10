@@ -20,6 +20,10 @@ impl SqliteStateManager {
     pub fn new(path: &str) -> Result<Self, StateError> {
         let conn = Connection::open(path).map_err(|e| StateError::Database(e.to_string()))?;
 
+        // I6: Enable foreign key constraints
+        conn.execute_batch("PRAGMA foreign_keys = ON;")
+            .map_err(|e| StateError::Database(e.to_string()))?;
+
         // Create tables
         conn.execute_batch(
             r#"
@@ -56,6 +60,10 @@ impl SqliteStateManager {
     /// Create an in-memory SQLite state manager (useful for testing).
     pub fn new_in_memory() -> Result<Self, StateError> {
         let conn = Connection::open_in_memory().map_err(|e| StateError::Database(e.to_string()))?;
+
+        // I6: Enable foreign key constraints
+        conn.execute_batch("PRAGMA foreign_keys = ON;")
+            .map_err(|e| StateError::Database(e.to_string()))?;
 
         // Create tables
         conn.execute_batch(

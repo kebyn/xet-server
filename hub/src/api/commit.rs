@@ -211,9 +211,14 @@ async fn handle_commit(
                 "currentHead": null
             }));
         }
-        (None, Some(_head)) => {
-            // No parent specified but repo has HEAD - use current HEAD as parent
-            // This is acceptable for the first commit to the repo
+        (None, Some(head)) => {
+            // I9: No parent specified but repo has HEAD - this is a conflict
+            // Must explicitly specify the parent when repo already has commits
+            return HttpResponse::Conflict().json(serde_json::json!({
+                "error": format!("No parent specified but repository already has HEAD: {}", head),
+                "error_type": "ConflictError",
+                "currentHead": head
+            }));
         }
         (None, None) => {
             // No parent, no HEAD - first commit

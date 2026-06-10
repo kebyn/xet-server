@@ -32,6 +32,11 @@ fn rewrite_batch_urls(response: &mut serde_json::Value, hub_base: &str, cas_base
     }
 }
 
+/// Validate OID format (64 hex characters)
+fn validate_oid(oid: &str) -> bool {
+    oid.len() == 64 && oid.chars().all(|c| c.is_ascii_hexdigit())
+}
+
 /// Handle Git LFS batch request
 pub async fn lfs_batch(
     req: HttpRequest,
@@ -110,8 +115,8 @@ pub async fn lfs_upload(
         }
     };
 
-    match token_store.validate_token(&token) {
-        Ok(Some(_)) => {},
+    let token_info = match token_store.validate_token(&token) {
+        Ok(Some(info)) => info,
         Ok(None) => {
             return HttpResponse::Unauthorized().json(serde_json::json!({
                 "error": "Invalid token",
@@ -126,7 +131,23 @@ pub async fn lfs_upload(
         }
     };
 
+    // I1: Check write scope for upload operations
+    if token_info.scope != "write" && !token_info.scope.contains("write") {
+        return HttpResponse::Forbidden().json(serde_json::json!({
+            "error": "Write scope required",
+            "error_type": "AuthorizationError"
+        }));
+    }
+
     let oid = path.into_inner();
+
+    // I7: Validate OID format
+    if !validate_oid(&oid) {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "Invalid OID format",
+            "error_type": "ValidationError"
+        }));
+    }
 
     // Generate internal token for CAS
     let (internal_token, _) = xet_signer.sign_internal();
@@ -162,8 +183,8 @@ pub async fn lfs_download(
         }
     };
 
-    match token_store.validate_token(&token) {
-        Ok(Some(_)) => {},
+    let token_info = match token_store.validate_token(&token) {
+        Ok(Some(info)) => info,
         Ok(None) => {
             return HttpResponse::Unauthorized().json(serde_json::json!({
                 "error": "Invalid token",
@@ -178,7 +199,23 @@ pub async fn lfs_download(
         }
     };
 
+    // I1: Check read scope for download operations (explicit check)
+    if token_info.scope != "read" && token_info.scope != "write" && !token_info.scope.contains("read") {
+        return HttpResponse::Forbidden().json(serde_json::json!({
+            "error": "Read scope required",
+            "error_type": "AuthorizationError"
+        }));
+    }
+
     let oid = path.into_inner();
+
+    // I7: Validate OID format
+    if !validate_oid(&oid) {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "Invalid OID format",
+            "error_type": "ValidationError"
+        }));
+    }
 
     // Generate internal token for CAS
     let (internal_token, _) = xet_signer.sign_internal();
