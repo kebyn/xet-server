@@ -8,7 +8,11 @@ use xet_server::storage::local::LocalStorage;
 use xet_server::metrics::GLOBAL_METRICS;
 use tempfile::tempdir;
 
+// Use serial test execution to avoid flaky tests with shared global state
+use serial_test::serial;
+
 #[actix_web::test]
+#[serial]
 async fn test_metrics_endpoint() {
     // 先记录一些指标
     GLOBAL_METRICS.record_request(200);
@@ -35,11 +39,15 @@ async fn test_metrics_endpoint() {
     assert!(body_str.contains("http_requests_total"));
     assert!(body_str.contains("storage_operations_total"));
     assert!(body_str.contains("upload_bytes_total"));
+    // 验证新的延迟指标格式（总计和计数分离）
+    assert!(body_str.contains("request_latency_us_total"));
+    assert!(body_str.contains("request_latency_count"));
     assert!(body_str.contains("# HELP"));
     assert!(body_str.contains("# TYPE"));
 }
 
 #[actix_web::test]
+#[serial]
 async fn test_upload_records_metrics() {
     let dir = tempdir().unwrap();
     let storage: Box<dyn xet_server::storage::StorageBackend> = Box::new(

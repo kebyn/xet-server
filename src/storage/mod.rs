@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use std::path::Path;
 use thiserror::Error;
 
 pub mod local;
@@ -25,6 +26,25 @@ pub type StorageResult<T> = Result<T, StorageError>;
 pub trait StorageBackend: Send + Sync {
     /// Store an object
     async fn put(&self, key: &str, data: Bytes) -> StorageResult<()>;
+
+    /// Store an object from a file on disk.
+    /// Default implementation reads the entire file into RAM and delegates to `put()`.
+    ///
+    /// **Performance warning**: this default defeats the purpose of streaming uploads.
+    /// Storage backends should override this method with a streaming implementation
+    /// (e.g., LocalStorage uses rename for zero-copy, S3Storage uses multipart upload).
+    /// A warning is logged when this default is exercised.
+    async fn put_from_path(&self, key: &str, path: &Path) -> StorageResult<()> {
+        tracing::warn!(
+            "put_from_path using default (non-streaming) implementation for key={}; \
+             this reads the entire file into RAM. Override put_from_path in your \
+             StorageBackend implementation for streaming support.",
+            key
+        );
+        let data = tokio::fs::read(path).await
+            .map_err(|e| StorageError::Internal(format!("Failed to read file {}: {}", path.display(), e)))?;
+        self.put(key, Bytes::from(data)).await
+    }
 
     /// Retrieve an object
     async fn get(&self, key: &str) -> StorageResult<Bytes>;

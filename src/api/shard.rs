@@ -1,16 +1,19 @@
 //! Shard Upload API
 //!
-//! POST /v1/shards - Upload metadata shards
+//! POST /v1/shards - Upload metadata shards (streaming)
 
 use actix_web::{web, HttpResponse};
+use futures_util::StreamExt;
 use serde::Serialize;
 use tracing::{error, info};
 
-use crate::api::auth::{check_scope, extract_bearer_token, validate_jwt};
+use crate::api::auth::{check_scope, extract_token_from_request, validate_jwt};
 use crate::config::ServerConfig;
 use crate::format::shard::MDBShardFile;
 use crate::index::MetadataIndex;
+use crate::metrics::GLOBAL_METRICS;
 use crate::storage::StorageBackend;
+use crate::util::{StreamingHasher, TempFile};
 
 #[derive(Serialize)]
 struct ShardUploadResponse {
@@ -18,43 +21,36 @@ struct ShardUploadResponse {
     shard_id: String,
 }
 
-/// Upload a metadata shard
+/// Upload a metadata shard via streaming.
+///
+/// Data is streamed to a temp file with incremental BLAKE3 hashing,
+/// then parsed from disk and moved to final storage via rename.
 pub async fn upload_shard(
-    body: web::Bytes,
+    mut payload: web::Payload,
     storage: web::Data<Box<dyn StorageBackend>>,
     index: web::Data<MetadataIndex>,
     config: web::Data<ServerConfig>,
     req: actix_web::HttpRequest,
 ) -> HttpResponse {
-    // Extract and validate auth token
-    let auth_header = match req.headers().get("Authorization") {
-        Some(h) => match h.to_str() {
-            Ok(s) => s.to_string(),
-            Err(_) => {
-                return HttpResponse::Unauthorized().json(serde_json::json!({
-                    "error": "Invalid authorization header"
-                }))
-            }
-        },
-        None => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Missing authorization token"
-            }))
-        }
-    };
+    let start = std::time::Instant::now();
 
-    let token = match extract_bearer_token(&auth_header) {
+    // Extract and validate auth token
+    let token = match extract_token_from_request(&req) {
         Some(t) => t,
         None => {
+            GLOBAL_METRICS.record_request(401);
+            GLOBAL_METRICS.record_latency(start);
             return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Invalid token format"
-            }))
+                "error": "Missing or invalid authorization token"
+            }));
         }
     };
 
     let claims = match validate_jwt(&token, &config.auth.jwt_secret) {
         Ok(c) => c,
         Err(_) => {
+            GLOBAL_METRICS.record_request(401);
+            GLOBAL_METRICS.record_latency(start);
             return HttpResponse::Unauthorized().json(serde_json::json!({
                 "error": "Invalid token"
             }))
@@ -62,24 +58,92 @@ pub async fn upload_shard(
     };
 
     if !check_scope(&claims, "write") {
+        GLOBAL_METRICS.record_request(403);
+        GLOBAL_METRICS.record_latency(start);
         return HttpResponse::Forbidden().json(serde_json::json!({
             "error": "Insufficient scope"
         }));
     }
 
-    // Parse shard binary format
-    let shard = match MDBShardFile::parse(&body) {
+    // Stream payload to temp file with incremental BLAKE3 hashing
+    let temp_dir = config.storage.resolve_upload_temp_dir();
+    let mut temp_file = match TempFile::create(&temp_dir).await {
+        Ok(tf) => tf,
+        Err(e) => {
+            error!("Failed to create temp file: {}", e);
+            GLOBAL_METRICS.record_request(500);
+            GLOBAL_METRICS.record_error();
+            GLOBAL_METRICS.record_latency(start);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to create temp file: {}", e)
+            }));
+        }
+    };
+
+    let mut hasher = StreamingHasher::new();
+    let max_bytes = config.server.max_body_size_bytes() as u64;
+    let mut total_bytes: u64 = 0;
+
+    while let Some(chunk_result) = payload.next().await {
+        let chunk = match chunk_result {
+            Ok(c) => c,
+            Err(e) => {
+                error!("Payload stream error: {}", e);
+                GLOBAL_METRICS.record_request(400);
+                GLOBAL_METRICS.record_latency(start);
+                return HttpResponse::BadRequest().json(serde_json::json!({
+                    "error": format!("Upload stream error: {}", e)
+                }));
+            }
+        };
+
+        total_bytes += chunk.len() as u64;
+        if total_bytes > max_bytes {
+            GLOBAL_METRICS.record_request(413);
+            GLOBAL_METRICS.record_latency(start);
+            return HttpResponse::PayloadTooLarge().json(serde_json::json!({
+                "error": format!("Upload exceeds maximum size of {} MB", config.server.max_body_size_mb)
+            }));
+        }
+
+        hasher.update(&chunk);
+        if let Err(e) = temp_file.write_all(&chunk).await {
+            error!("Failed to write to temp file: {}", e);
+            GLOBAL_METRICS.record_request(500);
+            GLOBAL_METRICS.record_error();
+            GLOBAL_METRICS.record_latency(start);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to write upload data: {}", e)
+            }));
+        }
+    }
+
+    if let Err(e) = temp_file.sync_all().await {
+        error!("Failed to sync temp file: {}", e);
+        GLOBAL_METRICS.record_request(500);
+        GLOBAL_METRICS.record_error();
+        GLOBAL_METRICS.record_latency(start);
+        return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Failed to sync upload data: {}", e)
+        }));
+    }
+
+    // Parse shard from temp file on disk
+    let temp_path = temp_file.path().to_path_buf();
+    let shard = match MDBShardFile::parse_from_file(&temp_path) {
         Ok(s) => s,
         Err(e) => {
             error!("Failed to parse shard: {}", e);
+            GLOBAL_METRICS.record_request(400);
+            GLOBAL_METRICS.record_latency(start);
             return HttpResponse::BadRequest().json(serde_json::json!({
                 "error": format!("Invalid shard format: {}", e)
             }));
         }
     };
 
-    // Generate shard ID (using shard hash)
-    let shard_id = shard.compute_hash();
+    // Use streaming-computed hash as shard ID (raw_data is empty in parse_from_file)
+    let shard_id = hasher.finalize().to_hex();
     let shard_key = format!("shards/{}", shard_id);
 
     // Check if shard already exists
@@ -87,6 +151,9 @@ pub async fn upload_shard(
         Ok(exists) => exists,
         Err(e) => {
             error!("Failed to check shard existence: {}", e);
+            GLOBAL_METRICS.record_request(500);
+            GLOBAL_METRICS.record_error();
+            GLOBAL_METRICS.record_latency(start);
             return HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": format!("Storage error: {}", e)
             }));
@@ -94,15 +161,23 @@ pub async fn upload_shard(
     };
 
     if already_exists {
+        GLOBAL_METRICS.record_request(200);
+        GLOBAL_METRICS.record_storage_operation();
+        GLOBAL_METRICS.record_latency(start);
         return HttpResponse::Ok().json(ShardUploadResponse {
             was_inserted: false,
             shard_id,
         });
     }
 
-    // Store shard
-    if let Err(e) = storage.put(&shard_key, body.to_vec().into()).await {
+    // Move temp file to final storage (zero-copy rename for local storage)
+    let temp_path = temp_file.into_path();
+    if let Err(e) = storage.put_from_path(&shard_key, &temp_path).await {
         error!("Failed to store shard: {}", e);
+        let _ = std::fs::remove_file(&temp_path);
+        GLOBAL_METRICS.record_request(500);
+        GLOBAL_METRICS.record_error();
+        GLOBAL_METRICS.record_latency(start);
         return HttpResponse::InternalServerError().json(serde_json::json!({
             "error": format!("Storage error: {}", e)
         }));
@@ -123,6 +198,11 @@ pub async fn upload_shard(
         shard.file_hashes().len(),
         shard.chunk_mappings().len()
     );
+
+    GLOBAL_METRICS.record_request(200);
+    GLOBAL_METRICS.record_storage_operation();
+    GLOBAL_METRICS.record_upload_bytes(total_bytes);
+    GLOBAL_METRICS.record_latency(start);
 
     HttpResponse::Ok().json(ShardUploadResponse {
         was_inserted: true,

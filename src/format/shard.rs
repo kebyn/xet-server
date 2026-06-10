@@ -1,4 +1,6 @@
-use std::io::{Read, Result, Write};
+use std::io::{Read, Result, Write, Seek, SeekFrom, Cursor};
+use std::fs::File;
+use std::path::Path;
 use crate::error::Result as XetResult;
 
 /// Shard file header (48 bytes)
@@ -317,8 +319,6 @@ impl XorbChunkSequenceEntry {
     }
 }
 
-use std::io::Cursor;
-
 /// High-level shard file representation
 ///
 /// Contains parsed metadata from a shard file for indexing and querying.
@@ -384,6 +384,121 @@ impl MDBShardFile {
             chunk_mappings,
             raw_data: data.to_vec(),
         })
+    }
+
+    /// Parse a shard file from a file on disk without loading the entire file into RAM.
+    ///
+    /// Reads only the header (start) and footer (end) from the file.
+    /// `raw_data` is left empty — the hash must be computed externally (e.g., during
+    /// streaming upload) since this method does not retain the file contents.
+    ///
+    /// Use `compute_hash_from_file(path)` or a streaming hasher to get the shard hash.
+    pub fn parse_from_file(path: &Path) -> XetResult<Self> {
+        let mut file = File::open(path).map_err(|e| {
+            crate::error::XetError::IoError(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to open shard file {}: {}", path.display(), e),
+            ))
+        })?;
+
+        let file_len = file.metadata().map_err(|e| {
+            crate::error::XetError::IoError(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to get file metadata: {}", e),
+            ))
+        })?.len();
+
+        if file_len < 256 {
+            return Err(crate::error::XetError::ParseError(
+                format!("Shard file too small: {} bytes, minimum 256 bytes required (48-byte header + 208-byte footer)", file_len)
+            ));
+        }
+
+        // Read header from start of file
+        // Read enough bytes for the header (48 bytes: 32 tag + 8 version + 8 footer_size)
+        let mut header_buf = [0u8; 48];
+        file.read_exact(&mut header_buf).map_err(|e| {
+            crate::error::XetError::IoError(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to read shard header: {}", e),
+            ))
+        })?;
+        let mut header_cursor = Cursor::new(&header_buf[..]);
+        let header = MDBShardFileHeader::deserialize(&mut header_cursor)?;
+
+        // Verify magic tag
+        let expected_tag = MDBShardFileHeader::default().tag;
+        if header.tag != expected_tag {
+            return Err(crate::error::XetError::ParseError(
+                "Invalid shard magic tag".to_string(),
+            ));
+        }
+
+        // Verify footer size
+        if header.footer_size != 208 {
+            return Err(crate::error::XetError::ParseError(
+                format!("Invalid footer size: expected 208, got {}", header.footer_size),
+            ));
+        }
+
+        // Read footer from end of file
+        file.seek(SeekFrom::End(-208)).map_err(|e| {
+            crate::error::XetError::IoError(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to seek to shard footer: {}", e),
+            ))
+        })?;
+        let mut footer_buf = [0u8; 208];
+        file.read_exact(&mut footer_buf).map_err(|e| {
+            crate::error::XetError::IoError(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to read shard footer: {}", e),
+            ))
+        })?;
+        let mut footer_cursor = Cursor::new(&footer_buf[..]);
+        let footer = MDBShardFileFooter::deserialize(&mut footer_cursor)?;
+
+        // Simplified parse — same as parse() above
+        let file_hashes = Vec::new();
+        let chunk_mappings = Vec::new();
+        let file_entries = Vec::new();
+        let xorb_entries = Vec::new();
+
+        Ok(Self {
+            header,
+            footer,
+            file_entries,
+            xorb_entries,
+            file_hashes,
+            chunk_mappings,
+            raw_data: Vec::new(), // Hash computed externally via streaming
+        })
+    }
+
+    /// Compute the BLAKE3 hash of a shard file on disk.
+    /// Reads the file incrementally to bound memory usage.
+    pub fn compute_hash_from_file(path: &Path) -> XetResult<String> {
+        use crate::util::StreamingHasher;
+        let mut file = File::open(path).map_err(|e| {
+            crate::error::XetError::IoError(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to open shard file for hashing: {}", e),
+            ))
+        })?;
+
+        let mut hasher = StreamingHasher::new();
+        let mut buf = [0u8; 64 * 1024];
+        loop {
+            let n = file.read(&mut buf).map_err(|e| {
+                crate::error::XetError::IoError(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("Failed to read shard file for hashing: {}", e),
+                ))
+            })?;
+            if n == 0 { break; }
+            hasher.update(&buf[..n]);
+        }
+        Ok(hasher.finalize().to_hex())
     }
 
     /// Compute hash of the shard (using the raw data)

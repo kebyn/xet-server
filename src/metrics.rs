@@ -187,12 +187,19 @@ impl Metrics {
             self.active_connections.load(Ordering::Relaxed)
         ));
 
-        // 平均请求延迟
-        output.push_str("# HELP request_latency_us_avg Average request latency in microseconds\n");
-        output.push_str("# TYPE request_latency_us_avg gauge\n");
+        // 请求延迟（总计和计数，用于 Prometheus 计算平均值）
+        output.push_str("# HELP request_latency_us_total Total request latency in microseconds\n");
+        output.push_str("# TYPE request_latency_us_total counter\n");
         output.push_str(&format!(
-            "request_latency_us_avg {:.2}\n",
-            self.average_latency_us()
+            "request_latency_us_total {}\n",
+            self.request_latency_us.load(Ordering::Relaxed)
+        ));
+
+        output.push_str("# HELP request_latency_count Total number of latency measurements\n");
+        output.push_str("# TYPE request_latency_count counter\n");
+        output.push_str(&format!(
+            "request_latency_count {}\n",
+            self.request_latency_count.load(Ordering::Relaxed)
         ));
 
         output
@@ -243,6 +250,23 @@ mod tests {
         // 记录错误
         metrics.record_error();
         assert_eq!(metrics.errors_total.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn test_status_code_buckets() {
+        let metrics = Metrics::new();
+
+        // 测试 3xx 状态码
+        metrics.record_request(301);
+        metrics.record_request(302);
+        assert_eq!(metrics.http_requests_by_status[1].load(Ordering::Relaxed), 2); // 3xx
+
+        // 测试 "other" 状态码（1xx 和超出范围的）
+        metrics.record_request(100);
+        metrics.record_request(600);
+        assert_eq!(metrics.http_requests_by_status[4].load(Ordering::Relaxed), 2); // other
+
+        assert_eq!(metrics.http_requests_total.load(Ordering::Relaxed), 4);
     }
 
     #[test]

@@ -29,8 +29,14 @@ impl MerkleHash {
         Self(result)
     }
 
-    pub fn as_bytes(&self) -> &[u8; 32] {
-        unsafe { &*(self.0.as_ptr() as *const [u8; 32]) }
+    /// Convert hash to bytes in little-endian order.
+    /// Returns owned array to ensure endian-safety on all platforms.
+    pub fn as_bytes(&self) -> [u8; 32] {
+        let mut result = [0u8; 32];
+        for i in 0..4 {
+            result[i * 8..(i + 1) * 8].copy_from_slice(&self.0[i].to_le_bytes());
+        }
+        result
     }
 
     pub fn from_hex(hex_str: &str) -> Result<Self> {
@@ -73,7 +79,7 @@ impl From<[u8; 32]> for MerkleHash {
 
 impl From<MerkleHash> for [u8; 32] {
     fn from(hash: MerkleHash) -> Self {
-        *hash.as_bytes()
+        hash.as_bytes()
     }
 }
 

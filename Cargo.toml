@@ -21,11 +21,14 @@ aws-config = "1.1"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 lazy_static = "1.4"
+base64 = "0.22"
+futures-util = "0.3"
 
 [dev-dependencies]
 rand = "0.8"
 criterion = "0.5"
 tempfile = "3.10"
+serial_test = "3.0"
 
 [[bench]]
 name = "bench_hash"
