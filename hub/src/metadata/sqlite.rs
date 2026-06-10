@@ -14,6 +14,10 @@ impl SqliteMetadataStore {
         let conn = rusqlite::Connection::open(path)
             .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
+        // I6: Enable foreign key constraints
+        conn.execute_batch("PRAGMA foreign_keys = ON;")
+            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+
         // Create tables
         conn.execute_batch(
             r#"
@@ -71,6 +75,10 @@ impl SqliteMetadataStore {
     /// Create an in-memory SQLite metadata store (for testing)
     pub fn in_memory() -> Result<Self, MetadataError> {
         let conn = rusqlite::Connection::open_in_memory()
+            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+
+        // I6: Enable foreign key constraints
+        conn.execute_batch("PRAGMA foreign_keys = ON;")
             .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
         conn.execute_batch(
@@ -232,24 +240,41 @@ impl MetadataStore for SqliteMetadataStore {
             MetadataError::DatabaseError(format!("Failed to acquire lock: {}", e))
         })?;
 
-        // Delete in order (foreign key constraints)
-        conn.execute("DELETE FROM file_tree WHERE repo_id = ?1", params![repo_id])
+        // I5: Wrap deletion in a transaction for atomicity
+        conn.execute("BEGIN", [])
             .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
-        conn.execute("DELETE FROM heads WHERE repo_id = ?1", params![repo_id])
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+        let result = (|| -> Result<(), MetadataError> {
+            // Delete in order (foreign key constraints)
+            conn.execute("DELETE FROM file_tree WHERE repo_id = ?1", params![repo_id])
+                .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
-        conn.execute("DELETE FROM revisions WHERE repo_id = ?1", params![repo_id])
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+            conn.execute("DELETE FROM heads WHERE repo_id = ?1", params![repo_id])
+                .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
-        let rows = conn
-            .execute("DELETE FROM repos WHERE id = ?1", params![repo_id])
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+            conn.execute("DELETE FROM revisions WHERE repo_id = ?1", params![repo_id])
+                .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
-        if rows == 0 {
-            Err(MetadataError::RepoNotFound(format!("id={}", repo_id)))
-        } else {
-            Ok(())
+            let rows = conn
+                .execute("DELETE FROM repos WHERE id = ?1", params![repo_id])
+                .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+
+            if rows == 0 {
+                Err(MetadataError::RepoNotFound(format!("id={}", repo_id)))
+            } else {
+                Ok(())
+            }
+        })();
+
+        match result {
+            Ok(()) => {
+                conn.execute("COMMIT", []).ok();
+                Ok(())
+            }
+            Err(e) => {
+                conn.execute("ROLLBACK", []).ok();
+                Err(e)
+            }
         }
     }
 

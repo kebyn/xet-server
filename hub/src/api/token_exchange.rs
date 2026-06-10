@@ -93,11 +93,12 @@ async fn do_exchange(
         path_revision.to_string()
     };
 
-    // Sign the xet token
+    // I2: Sign the xet token with the requested scope, not the user's full scope
+    // This prevents a read token from getting write permissions via exchange
     let repo_id = format!("{}/{}", path_namespace, path_repo);
     let (xet_token, exp) = xet_signer.sign(
         &info.user_id,
-        &info.scope,
+        required_scope,  // Use requested scope, not info.scope
         &repo_id,
         &repo_type.to_string(),
         &revision,

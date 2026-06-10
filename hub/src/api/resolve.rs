@@ -59,8 +59,8 @@ async fn handle_resolve(
         }
     };
 
-    match token_store.validate_token(&token) {
-        Ok(Some(_)) => {},
+    let info = match token_store.validate_token(&token) {
+        Ok(Some(i)) => i,
         Ok(None) => {
             return HttpResponse::Unauthorized().json(serde_json::json!({
                 "error": "Invalid token",
@@ -74,6 +74,14 @@ async fn handle_resolve(
             }));
         }
     };
+
+    // I3: Check that scope includes read (any valid token should have at least read)
+    if !info.scope.contains("read") && !info.scope.contains("write") {
+        return HttpResponse::Forbidden().json(serde_json::json!({
+            "error": "Read scope required",
+            "error_type": "AuthorizationError"
+        }));
+    }
 
     let (namespace, repo_name, revision, file_path) = path.into_inner();
 
@@ -126,8 +134,10 @@ async fn handle_resolve(
         }
     };
 
-    // Build download URL
-    let download_url = format!("{}/lfs/objects/{}", config.cas.base_url, file_entry.cas_hash);
+    // I8: Build download URL using Hub's URL (not CAS internal URL)
+    // Clients go through Hub, which proxies to CAS
+    let hub_base_url = format!("http://{}:{}", config.server.host, config.server.port);
+    let download_url = format!("{}/lfs/objects/{}", hub_base_url, file_entry.cas_hash);
 
     HttpResponse::Ok().json(ResolveResponse {
         oid: file_entry.cas_hash,
