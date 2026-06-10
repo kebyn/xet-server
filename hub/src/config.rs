@@ -49,15 +49,15 @@ impl Default for MetadataSettings {
 /// CAS (Content Addressable Storage) settings
 #[derive(Debug, Clone)]
 pub struct CasSettings {
-    pub cas_url: String,
-    pub cas_timeout_secs: u64,
+    pub base_url: String,
+    pub internal_timeout_seconds: u64,
 }
 
 impl Default for CasSettings {
     fn default() -> Self {
         CasSettings {
-            cas_url: "http://localhost:3000".to_string(),
-            cas_timeout_secs: 30,
+            base_url: "http://localhost:3000".to_string(),
+            internal_timeout_seconds: 30,
         }
     }
 }
@@ -122,9 +122,9 @@ impl HubConfig {
                     .unwrap_or_else(|_| "hub.db".to_string()),
             },
             cas: CasSettings {
-                cas_url: env::var("HUB_CAS_URL")
+                base_url: env::var("HUB_CAS_URL")
                     .unwrap_or_else(|_| "http://localhost:3000".to_string()),
-                cas_timeout_secs: env::var("HUB_CAS_TIMEOUT_SECS")
+                internal_timeout_seconds: env::var("HUB_CAS_TIMEOUT_SECS")
                     .ok()
                     .and_then(|t| t.parse().ok())
                     .unwrap_or(30),
