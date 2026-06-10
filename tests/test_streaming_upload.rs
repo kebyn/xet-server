@@ -8,12 +8,14 @@ mod common;
 use actix_web::{test, web, App};
 use bytes::Bytes;
 use tempfile::tempdir;
+use std::sync::Arc;
 
 use common::{test_token_for_keypair, TestContext};
 use xet_server::api::auth::{AuthVerifier, KeyPair};
 use xet_server::format::xorb::XorbObjectInfoV1;
 use xet_server::hash::compute_data_hash;
 use xet_server::index::MetadataIndex;
+use xet_server::state::{SqliteStateManager, StorageStateManager};
 use xet_server::storage::local::LocalStorage;
 use xet_server::storage::StorageBackend;
 
@@ -112,6 +114,10 @@ async fn test_streaming_lfs_upload() {
         LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap(),
     );
 
+    let state_mgr: Arc<dyn StorageStateManager> = Arc::new(
+        SqliteStateManager::new_in_memory().unwrap(),
+    );
+
     let content = b"hello streaming world";
     let oid = compute_data_hash(content).to_hex();
 
@@ -119,6 +125,7 @@ async fn test_streaming_lfs_upload() {
         App::new()
             .app_data(web::Data::new(storage))
             .app_data(web::Data::new(ctx.auth_verifier))
+            .app_data(web::Data::new(state_mgr.clone()))
             .app_data(web::Data::new(ctx.config))
             .route(
                 "/lfs/objects/{oid}",
@@ -149,6 +156,10 @@ async fn test_streaming_lfs_hash_mismatch() {
         LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap(),
     );
 
+    let state_mgr: Arc<dyn StorageStateManager> = Arc::new(
+        SqliteStateManager::new_in_memory().unwrap(),
+    );
+
     // Use a random valid-looking oid that doesn't match the content
     let wrong_oid = "a".repeat(64);
 
@@ -156,6 +167,7 @@ async fn test_streaming_lfs_hash_mismatch() {
         App::new()
             .app_data(web::Data::new(storage))
             .app_data(web::Data::new(ctx.auth_verifier))
+            .app_data(web::Data::new(state_mgr.clone()))
             .app_data(web::Data::new(ctx.config))
             .route(
                 "/lfs/objects/{oid}",
@@ -193,6 +205,10 @@ async fn test_streaming_lfs_oversized_rejected() {
         LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap(),
     );
 
+    let state_mgr: Arc<dyn StorageStateManager> = Arc::new(
+        SqliteStateManager::new_in_memory().unwrap(),
+    );
+
     // Create content larger than 1MB
     let large_content = vec![0u8; 2 * 1024 * 1024]; // 2 MB
     let oid = compute_data_hash(&large_content).to_hex();
@@ -201,6 +217,7 @@ async fn test_streaming_lfs_oversized_rejected() {
         App::new()
             .app_data(web::Data::new(storage))
             .app_data(web::Data::new(ctx.auth_verifier))
+            .app_data(web::Data::new(state_mgr.clone()))
             .app_data(web::Data::new(ctx.config))
             .route(
                 "/lfs/objects/{oid}",
@@ -386,6 +403,10 @@ async fn test_streaming_lfs_idempotent() {
         LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap(),
     );
 
+    let state_mgr: Arc<dyn StorageStateManager> = Arc::new(
+        SqliteStateManager::new_in_memory().unwrap(),
+    );
+
     let content = b"idempotent upload test";
     let oid = compute_data_hash(content).to_hex();
 
@@ -393,6 +414,7 @@ async fn test_streaming_lfs_idempotent() {
         App::new()
             .app_data(web::Data::new(storage))
             .app_data(web::Data::new(ctx.auth_verifier))
+            .app_data(web::Data::new(state_mgr.clone()))
             .app_data(web::Data::new(ctx.config))
             .route(
                 "/lfs/objects/{oid}",

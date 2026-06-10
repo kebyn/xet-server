@@ -11,11 +11,13 @@
 
 use actix_web::{web, HttpResponse};
 use futures_util::StreamExt;
-use tracing::{error, info};
+use std::sync::Arc;
+use tracing::{error, info, warn};
 
 use crate::api::auth::{check_scope, extract_token_from_request, AuthVerifier};
 use crate::config::ServerConfig;
 use crate::metrics::GLOBAL_METRICS;
+use crate::state::{StorageState, StorageStateManager};
 use crate::storage::{StorageBackend, StorageError};
 use crate::util::{StreamingHasher, TempFile};
 
@@ -24,11 +26,13 @@ use crate::util::{StreamingHasher, TempFile};
 /// Data is streamed from the HTTP payload to a temp file with incremental
 /// BLAKE3 hashing. After the stream completes, the hash is verified against
 /// the OID and the temp file is moved to final storage via rename.
+/// After successful upload, the blob is registered as raw_only in the state manager.
 pub async fn upload_lfs_object(
     path: web::Path<String>,
     mut payload: web::Payload,
     storage: web::Data<Box<dyn StorageBackend>>,
     auth: web::Data<AuthVerifier>,
+    state_mgr: web::Data<Arc<dyn StorageStateManager>>,
     config: web::Data<ServerConfig>,
     req: actix_web::HttpRequest,
 ) -> HttpResponse {
@@ -195,6 +199,12 @@ pub async fn upload_lfs_object(
 
     info!("Uploaded LFS object {} ({} bytes)", oid, total_bytes);
 
+    // Register blob as raw_only in state manager (non-fatal if it fails)
+    if let Err(e) = state_mgr.register_raw_blob(&oid, total_bytes).await {
+        warn!("Failed to register state for {}: {}", oid, e);
+        // Non-fatal: file is stored, state tracking can be repaired
+    }
+
     GLOBAL_METRICS.record_request(200);
     GLOBAL_METRICS.record_storage_operation();
     GLOBAL_METRICS.record_upload_bytes(total_bytes);
@@ -205,11 +215,17 @@ pub async fn upload_lfs_object(
     }))
 }
 
-/// Download an LFS object
+/// Download an LFS object.
+///
+/// Checks state before serving:
+/// - If state is RawOnly: serve from lfs/objects/{oid}
+/// - If state is XetOnly: reconstruct from xorbs/shards
+/// - If state is None: fall back to trying raw blob (backward compat)
 pub async fn download_lfs_object(
     path: web::Path<String>,
     storage: web::Data<Box<dyn StorageBackend>>,
     auth: web::Data<AuthVerifier>,
+    state_mgr: web::Data<Arc<dyn StorageStateManager>>,
     _config: web::Data<ServerConfig>,
     req: actix_web::HttpRequest,
 ) -> HttpResponse {
@@ -256,7 +272,55 @@ pub async fn download_lfs_object(
         }));
     }
 
-    // Fetch object from storage
+    // Query state from state manager
+    let file_state = match state_mgr.get_state(&oid).await {
+        Ok(state) => state,
+        Err(e) => {
+            warn!("Failed to get state for {}: {}", oid, e);
+            // Non-fatal: fall back to raw blob check
+            None
+        }
+    };
+
+    // Handle based on state
+    match file_state {
+        Some(state) => match state.state {
+            StorageState::RawOnly => {
+                // Serve from raw storage
+                serve_raw_blob(&oid, storage, start).await
+            }
+            StorageState::XetOnly => {
+                // Reconstruct from xorbs/shards
+                // TODO: Full reconstruction implementation
+                // For now, return error indicating xet reconstruction needed
+                let file_id = state.xet_file_id.clone().unwrap_or_else(|| "unknown".to_string());
+                error!(
+                    "XetOnly blob {} requires reconstruction (file_id: {})",
+                    oid,
+                    file_id
+                );
+                GLOBAL_METRICS.record_request(501);
+                GLOBAL_METRICS.record_latency(start);
+                HttpResponse::NotImplemented().json(serde_json::json!({
+                    "error": "Xet reconstruction not yet implemented for this blob",
+                    "file_id": file_id,
+                    "oid": oid
+                }))
+            }
+        },
+        None => {
+            // No state record - fall back to raw blob check (backward compat)
+            serve_raw_blob(&oid, storage, start).await
+        }
+    }
+}
+
+/// Serve a raw blob from storage.
+async fn serve_raw_blob(
+    oid: &str,
+    storage: web::Data<Box<dyn StorageBackend>>,
+    start: std::time::Instant,
+) -> HttpResponse {
     let object_key = format!("lfs/objects/{}", oid);
     let object_data = match storage.get(&object_key).await {
         Ok(data) => {

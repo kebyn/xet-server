@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 use crate::api::auth::AuthVerifier;
 use crate::config::ServerConfig;
-use crate::storage::create_storage;
+use crate::storage::{create_storage, StorageBackend};
+use crate::state::SqliteStateManager;
 use crate::middleware::metrics_middleware;
 
 pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
@@ -15,16 +16,23 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
             .expect("Failed to load auth public key")
     );
 
-    let storage = Arc::new(create_storage(&config.storage).await
+    let storage: Arc<Box<dyn StorageBackend>> = Arc::new(create_storage(&config.storage).await
         .expect("Failed to create storage backend"));
 
     let index = Arc::new(crate::index::MetadataIndex::new());
+
+    // Create state manager for tracking blob storage state
+    let state_mgr: Arc<dyn crate::state::StorageStateManager> = Arc::new(
+        SqliteStateManager::new(&config.state.sqlite_path)
+            .expect("Failed to create state manager")
+    );
 
     let bind_addr = format!("{}:{}", config.server.host, config.server.port);
 
     println!("Starting Xet Storage server on {}", bind_addr);
     println!("Storage backend: {}", config.storage.backend);
     println!("Max upload size: {} MB", config.server.max_body_size_mb);
+    println!("State database: {}", config.state.sqlite_path);
 
     HttpServer::new(move || {
         App::new()
@@ -37,7 +45,12 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
             .app_data(web::Data::from(auth_verifier.clone()))
             .app_data(web::Data::from(storage.clone()))
             .app_data(web::Data::from(index.clone()))
+            .app_data(web::Data::from(state_mgr.clone()))
             .app_data(web::Data::new(config.clone()))
+            // Internal endpoints (Hub-to-CAS communication)
+            .route("/internal/state/{oid}", web::get().to(crate::api::internal::get_blob_state))
+            .route("/internal/blob/{oid}", web::head().to(crate::api::internal::head_blob))
+            // Public API routes
             .route("/v1/xorbs/{prefix}/{hash}", web::post().to(crate::api::xorb::upload_xorb))
             .route("/v1/xorbs/{prefix}/{hash}", web::put().to(crate::api::xorb::upload_xorb))
             .route("/v1/xorbs/{prefix}/{hash}/download", web::get().to(crate::api::xorb::download_xorb))
