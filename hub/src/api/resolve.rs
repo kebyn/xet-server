@@ -21,13 +21,19 @@ async fn resolve_revision(
         if metadata.get_revision(repo_id, revision).await.is_ok() {
             return Ok(revision.to_string());
         }
+        // I14: Return error for unknown commit hashes instead of falling through
+        return Err(format!("Revision not found: {}", revision));
     }
 
-    // If revision is "main" or a branch name, resolve to HEAD
-    let head = metadata.get_head(repo_id).await.ok().flatten();
-    match head {
-        Some(h) => Ok(h),
-        None => Err(format!("Revision not found: {}", revision)),
+    // I14: Only allow "main" as a branch name (no arbitrary branch resolution yet)
+    if revision == "main" {
+        let head = metadata.get_head(repo_id).await.ok().flatten();
+        match head {
+            Some(h) => Ok(h),
+            None => Err(format!("No HEAD found for repo")),
+        }
+    } else {
+        Err(format!("Revision not found: {} (only 'main' branch or commit hashes are supported)", revision))
     }
 }
 
@@ -75,8 +81,8 @@ async fn handle_resolve(
         }
     };
 
-    // I3: Check that scope includes read (any valid token should have at least read)
-    if !info.scope.contains("read") && !info.scope.contains("write") {
+    // C5: Check that scope is read or write (exact match to prevent compound scope bypass)
+    if info.scope != "read" && info.scope != "write" {
         return HttpResponse::Forbidden().json(serde_json::json!({
             "error": "Read scope required",
             "error_type": "AuthorizationError"
@@ -136,7 +142,7 @@ async fn handle_resolve(
 
     // I8: Build download URL using Hub's URL (not CAS internal URL)
     // Clients go through Hub, which proxies to CAS
-    let hub_base_url = format!("http://{}:{}", config.server.host, config.server.port);
+    let hub_base_url = config.server.base_url();
     let download_url = format!("{}/lfs/objects/{}", hub_base_url, file_entry.cas_hash);
 
     HttpResponse::Ok().json(ResolveResponse {

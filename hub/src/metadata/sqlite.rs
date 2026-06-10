@@ -3,6 +3,52 @@ use async_trait::async_trait;
 use rusqlite::params;
 use std::sync::Mutex;
 
+// I15: Extract schema to constant to eliminate duplication
+const SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS repos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    namespace TEXT NOT NULL,
+    repo_type TEXT NOT NULL,
+    sha TEXT,
+    private INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    UNIQUE(namespace, name, repo_type)
+);
+
+CREATE TABLE IF NOT EXISTS revisions (
+    commit_id TEXT PRIMARY KEY,
+    repo_id INTEGER NOT NULL,
+    parent TEXT,
+    message TEXT NOT NULL,
+    author TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    FOREIGN KEY (repo_id) REFERENCES repos(id)
+);
+
+CREATE TABLE IF NOT EXISTS heads (
+    repo_id INTEGER PRIMARY KEY,
+    commit_id TEXT NOT NULL,
+    FOREIGN KEY (repo_id) REFERENCES repos(id),
+    FOREIGN KEY (commit_id) REFERENCES revisions(commit_id)
+);
+
+CREATE TABLE IF NOT EXISTS file_tree (
+    path TEXT NOT NULL,
+    repo_id INTEGER NOT NULL,
+    commit_id TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    cas_hash TEXT NOT NULL,
+    is_lfs INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (path, repo_id, commit_id),
+    FOREIGN KEY (repo_id) REFERENCES repos(id),
+    FOREIGN KEY (commit_id) REFERENCES revisions(commit_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_file_tree_prefix ON file_tree(repo_id, commit_id, path);
+"#;
+
 /// SQLite-based metadata store
 pub struct SqliteMetadataStore {
     conn: Mutex<rusqlite::Connection>,
@@ -19,53 +65,8 @@ impl SqliteMetadataStore {
             .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
         // Create tables
-        conn.execute_batch(
-            r#"
-            CREATE TABLE IF NOT EXISTS repos (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                namespace TEXT NOT NULL,
-                repo_type TEXT NOT NULL,
-                sha TEXT,
-                private INTEGER NOT NULL DEFAULT 0,
-                created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL,
-                UNIQUE(namespace, name, repo_type)
-            );
-
-            CREATE TABLE IF NOT EXISTS revisions (
-                commit_id TEXT PRIMARY KEY,
-                repo_id INTEGER NOT NULL,
-                parent TEXT,
-                message TEXT NOT NULL,
-                author TEXT NOT NULL,
-                created_at INTEGER NOT NULL,
-                FOREIGN KEY (repo_id) REFERENCES repos(id)
-            );
-
-            CREATE TABLE IF NOT EXISTS heads (
-                repo_id INTEGER PRIMARY KEY,
-                commit_id TEXT NOT NULL,
-                FOREIGN KEY (repo_id) REFERENCES repos(id),
-                FOREIGN KEY (commit_id) REFERENCES revisions(commit_id)
-            );
-
-            CREATE TABLE IF NOT EXISTS file_tree (
-                path TEXT NOT NULL,
-                repo_id INTEGER NOT NULL,
-                commit_id TEXT NOT NULL,
-                size INTEGER NOT NULL,
-                cas_hash TEXT NOT NULL,
-                is_lfs INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY (path, repo_id, commit_id),
-                FOREIGN KEY (repo_id) REFERENCES repos(id),
-                FOREIGN KEY (commit_id) REFERENCES revisions(commit_id)
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_file_tree_prefix ON file_tree(repo_id, commit_id, path);
-            "#,
-        )
-        .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+        conn.execute_batch(SCHEMA)
+            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
         Ok(Self {
             conn: Mutex::new(conn),
@@ -81,53 +82,8 @@ impl SqliteMetadataStore {
         conn.execute_batch("PRAGMA foreign_keys = ON;")
             .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
-        conn.execute_batch(
-            r#"
-            CREATE TABLE IF NOT EXISTS repos (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                namespace TEXT NOT NULL,
-                repo_type TEXT NOT NULL,
-                sha TEXT,
-                private INTEGER NOT NULL DEFAULT 0,
-                created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL,
-                UNIQUE(namespace, name, repo_type)
-            );
-
-            CREATE TABLE IF NOT EXISTS revisions (
-                commit_id TEXT PRIMARY KEY,
-                repo_id INTEGER NOT NULL,
-                parent TEXT,
-                message TEXT NOT NULL,
-                author TEXT NOT NULL,
-                created_at INTEGER NOT NULL,
-                FOREIGN KEY (repo_id) REFERENCES repos(id)
-            );
-
-            CREATE TABLE IF NOT EXISTS heads (
-                repo_id INTEGER PRIMARY KEY,
-                commit_id TEXT NOT NULL,
-                FOREIGN KEY (repo_id) REFERENCES repos(id),
-                FOREIGN KEY (commit_id) REFERENCES revisions(commit_id)
-            );
-
-            CREATE TABLE IF NOT EXISTS file_tree (
-                path TEXT NOT NULL,
-                repo_id INTEGER NOT NULL,
-                commit_id TEXT NOT NULL,
-                size INTEGER NOT NULL,
-                cas_hash TEXT NOT NULL,
-                is_lfs INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY (path, repo_id, commit_id),
-                FOREIGN KEY (repo_id) REFERENCES repos(id),
-                FOREIGN KEY (commit_id) REFERENCES revisions(commit_id)
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_file_tree_prefix ON file_tree(repo_id, commit_id, path);
-            "#,
-        )
-        .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+        conn.execute_batch(SCHEMA)
+            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
         Ok(Self {
             conn: Mutex::new(conn),
@@ -495,7 +451,9 @@ impl MetadataStore for SqliteMetadataStore {
         prefix: &str,
     ) -> Result<Vec<FileEntry>, MetadataError> {
         let commit_id = commit_id.to_string();
-        let prefix_pattern = format!("{}%", prefix);
+        // I10: Escape SQL LIKE metacharacters to prevent logic bugs
+        let escaped_prefix = prefix.replace('%', "\\%").replace('_', "\\_");
+        let prefix_pattern = format!("{}%", escaped_prefix);
 
         let conn = self.conn.lock().map_err(|e| {
             MetadataError::DatabaseError(format!("Failed to acquire lock: {}", e))
@@ -503,7 +461,7 @@ impl MetadataStore for SqliteMetadataStore {
 
         let mut stmt = conn
             .prepare(
-                "SELECT path, repo_id, commit_id, size, cas_hash, is_lfs FROM file_tree WHERE repo_id = ?1 AND commit_id = ?2 AND path LIKE ?3 ORDER BY path",
+                "SELECT path, repo_id, commit_id, size, cas_hash, is_lfs FROM file_tree WHERE repo_id = ?1 AND commit_id = ?2 AND path LIKE ?3 ESCAPE '\\' ORDER BY path",
             )
             .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 

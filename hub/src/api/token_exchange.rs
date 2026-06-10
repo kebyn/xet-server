@@ -2,17 +2,16 @@ use actix_web::{web, HttpRequest, HttpResponse};
 use crate::auth::token_store::TokenStore;
 use crate::auth::xet_signer::XetSigner;
 use crate::metadata::{MetadataStore, RepoType};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Token exchange response
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TokenExchangeResponse {
     pub access_token: String,
     pub exp: u64,
     pub cas_url: String,
 }
-
-use serde::Serialize;
 
 /// Internal helper to handle token exchange
 async fn do_exchange(

@@ -88,7 +88,7 @@ pub async fn lfs_batch(
     };
 
     // Rewrite URLs
-    let hub_base = format!("http://{}:{}", config.server.host, config.server.port);
+    let hub_base = config.server.base_url();
     let cas_base = config.cas.base_url.clone();
     rewrite_batch_urls(&mut response, &hub_base, &cas_base);
 
@@ -131,8 +131,8 @@ pub async fn lfs_upload(
         }
     };
 
-    // I1: Check write scope for upload operations
-    if token_info.scope != "write" && !token_info.scope.contains("write") {
+    // C5: Check write scope for upload operations (exact match to prevent "readwrite" bypass)
+    if token_info.scope != "write" {
         return HttpResponse::Forbidden().json(serde_json::json!({
             "error": "Write scope required",
             "error_type": "AuthorizationError"

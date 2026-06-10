@@ -27,10 +27,6 @@ pub struct PreuploadFileResponse {
     pub upload_mode: String,
 }
 
-// Threshold constants
-const INLINE_THRESHOLD: u64 = 1 * 1024 * 1024; // 1MB
-const LFS_THRESHOLD: u64 = 10 * 1024 * 1024; // 10MB
-
 /// Extract Bearer token from Authorization header
 fn extract_bearer(req: &HttpRequest) -> Option<String> {
     let auth = req.headers().get("Authorization")?;
@@ -38,10 +34,10 @@ fn extract_bearer(req: &HttpRequest) -> Option<String> {
 }
 
 /// Determine upload mode based on file size
-fn classify_upload_mode(size: u64) -> String {
-    if size <= INLINE_THRESHOLD {
+fn classify_upload_mode(size: u64, inline_threshold: u64, lfs_threshold: u64) -> String {
+    if size <= inline_threshold {
         "regular".to_string()
-    } else if size <= LFS_THRESHOLD {
+    } else if size <= lfs_threshold {
         "lfs".to_string()
     } else {
         "xet".to_string()
@@ -56,6 +52,7 @@ async fn handle_preupload(
     repo_type: RepoType,
     token_store: web::Data<std::sync::Arc<TokenStore>>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
+    config: web::Data<crate::config::HubConfig>,
 ) -> HttpResponse {
     // Extract and validate Bearer token
     let token = match extract_bearer(&req) {
@@ -68,8 +65,8 @@ async fn handle_preupload(
         }
     };
 
-    match token_store.validate_token(&token) {
-        Ok(Some(_)) => {},
+    let token_info = match token_store.validate_token(&token) {
+        Ok(Some(info)) => info,
         Ok(None) => {
             return HttpResponse::Unauthorized().json(serde_json::json!({
                 "error": "Invalid token",
@@ -83,6 +80,14 @@ async fn handle_preupload(
             }));
         }
     };
+
+    // I11: Enforce write scope for preupload (semantically a write-path operation)
+    if token_info.scope != "write" {
+        return HttpResponse::Forbidden().json(serde_json::json!({
+            "error": "Write scope required",
+            "error_type": "AuthorizationError"
+        }));
+    }
 
     let (namespace, repo_name, _revision) = path.into_inner();
 
@@ -109,7 +114,7 @@ async fn handle_preupload(
     let file_responses: Vec<PreuploadFileResponse> = body.files.iter()
         .map(|f| PreuploadFileResponse {
             path: f.path.clone(),
-            upload_mode: classify_upload_mode(f.size),
+            upload_mode: classify_upload_mode(f.size, config.storage.inline_threshold_bytes, config.storage.lfs_threshold_bytes),
         })
         .collect();
 
@@ -123,8 +128,9 @@ pub async fn preupload_model(
     body: web::Json<PreuploadRequest>,
     token_store: web::Data<std::sync::Arc<TokenStore>>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
+    config: web::Data<crate::config::HubConfig>,
 ) -> HttpResponse {
-    handle_preupload(req, path, body, RepoType::Model, token_store, metadata).await
+    handle_preupload(req, path, body, RepoType::Model, token_store, metadata, config).await
 }
 
 // Dataset preupload handler
@@ -134,8 +140,9 @@ pub async fn preupload_dataset(
     body: web::Json<PreuploadRequest>,
     token_store: web::Data<std::sync::Arc<TokenStore>>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
+    config: web::Data<crate::config::HubConfig>,
 ) -> HttpResponse {
-    handle_preupload(req, path, body, RepoType::Dataset, token_store, metadata).await
+    handle_preupload(req, path, body, RepoType::Dataset, token_store, metadata, config).await
 }
 
 // Space preupload handler
@@ -145,8 +152,9 @@ pub async fn preupload_space(
     body: web::Json<PreuploadRequest>,
     token_store: web::Data<std::sync::Arc<TokenStore>>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
+    config: web::Data<crate::config::HubConfig>,
 ) -> HttpResponse {
-    handle_preupload(req, path, body, RepoType::Space, token_store, metadata).await
+    handle_preupload(req, path, body, RepoType::Space, token_store, metadata, config).await
 }
 
 #[cfg(test)]
@@ -166,7 +174,7 @@ mod tests {
     #[actix_web::test]
     async fn test_preupload_mode_regular() {
         let (token_store, metadata) = setup_test_env();
-        let token = token_store.create_token("testuser", "test-token", "read").unwrap();
+        let token = token_store.create_token("testuser", "test-token", "write").unwrap();
 
         // Create repo
         metadata.create_repo("testuser", "my-model", RepoType::Model, false).await.unwrap();
@@ -175,6 +183,7 @@ mod tests {
             App::new()
                 .app_data(web::Data::new(token_store.clone()))
                 .app_data(web::Data::new(metadata.clone()))
+                .app_data(web::Data::new(crate::config::HubConfig::default()))
                 .route("/api/models/{ns}/{repo}/preupload/{revision}", web::post().to(preupload_model))
         ).await;
 
@@ -201,7 +210,7 @@ mod tests {
     #[actix_web::test]
     async fn test_preupload_mode_lfs() {
         let (token_store, metadata) = setup_test_env();
-        let token = token_store.create_token("testuser", "test-token", "read").unwrap();
+        let token = token_store.create_token("testuser", "test-token", "write").unwrap();
 
         // Create repo
         metadata.create_repo("testuser", "my-model", RepoType::Model, false).await.unwrap();
@@ -210,6 +219,7 @@ mod tests {
             App::new()
                 .app_data(web::Data::new(token_store.clone()))
                 .app_data(web::Data::new(metadata.clone()))
+                .app_data(web::Data::new(crate::config::HubConfig::default()))
                 .route("/api/models/{ns}/{repo}/preupload/{revision}", web::post().to(preupload_model))
         ).await;
 
@@ -236,7 +246,7 @@ mod tests {
     #[actix_web::test]
     async fn test_preupload_mode_xet() {
         let (token_store, metadata) = setup_test_env();
-        let token = token_store.create_token("testuser", "test-token", "read").unwrap();
+        let token = token_store.create_token("testuser", "test-token", "write").unwrap();
 
         // Create repo
         metadata.create_repo("testuser", "my-model", RepoType::Model, false).await.unwrap();
@@ -245,6 +255,7 @@ mod tests {
             App::new()
                 .app_data(web::Data::new(token_store.clone()))
                 .app_data(web::Data::new(metadata.clone()))
+                .app_data(web::Data::new(crate::config::HubConfig::default()))
                 .route("/api/models/{ns}/{repo}/preupload/{revision}", web::post().to(preupload_model))
         ).await;
 
@@ -270,19 +281,22 @@ mod tests {
 
     #[test]
     fn test_classify_upload_mode() {
+        let inline_threshold = 1 * 1024 * 1024; // 1MB
+        let lfs_threshold = 10 * 1024 * 1024;   // 10MB
+
         // Regular: <= 1MB
-        assert_eq!(classify_upload_mode(0), "regular");
-        assert_eq!(classify_upload_mode(1024), "regular");
-        assert_eq!(classify_upload_mode(1 * 1024 * 1024), "regular");
+        assert_eq!(classify_upload_mode(0, inline_threshold, lfs_threshold), "regular");
+        assert_eq!(classify_upload_mode(1024, inline_threshold, lfs_threshold), "regular");
+        assert_eq!(classify_upload_mode(1 * 1024 * 1024, inline_threshold, lfs_threshold), "regular");
 
         // LFS: 1MB < size <= 10MB
-        assert_eq!(classify_upload_mode(1 * 1024 * 1024 + 1), "lfs");
-        assert_eq!(classify_upload_mode(5 * 1024 * 1024), "lfs");
-        assert_eq!(classify_upload_mode(10 * 1024 * 1024), "lfs");
+        assert_eq!(classify_upload_mode(1 * 1024 * 1024 + 1, inline_threshold, lfs_threshold), "lfs");
+        assert_eq!(classify_upload_mode(5 * 1024 * 1024, inline_threshold, lfs_threshold), "lfs");
+        assert_eq!(classify_upload_mode(10 * 1024 * 1024, inline_threshold, lfs_threshold), "lfs");
 
         // Xet: > 10MB
-        assert_eq!(classify_upload_mode(10 * 1024 * 1024 + 1), "xet");
-        assert_eq!(classify_upload_mode(100 * 1024 * 1024), "xet");
-        assert_eq!(classify_upload_mode(1024 * 1024 * 1024), "xet");
+        assert_eq!(classify_upload_mode(10 * 1024 * 1024 + 1, inline_threshold, lfs_threshold), "xet");
+        assert_eq!(classify_upload_mode(100 * 1024 * 1024, inline_threshold, lfs_threshold), "xet");
+        assert_eq!(classify_upload_mode(1024 * 1024 * 1024, inline_threshold, lfs_threshold), "xet");
     }
 }

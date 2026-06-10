@@ -254,7 +254,7 @@ async fn test_token_exchange() {
     assert!(resp.status().is_success());
 
     let body: serde_json::Value = test::read_body_json(resp).await;
-    assert!(body["access_token"].as_str().unwrap().starts_with("xet_"));
+    assert!(body["accessToken"].as_str().unwrap().starts_with("xet_"));
     assert!(body["exp"].as_u64().unwrap() > 0);
 }
 
@@ -269,6 +269,7 @@ async fn test_preupload_endpoint() {
         App::new()
             .app_data(web::Data::new(token_store.clone()))
             .app_data(web::Data::new(metadata.clone()))
+            .app_data(web::Data::new(hub_api::config::HubConfig::default()))
             .route("/api/models/{ns}/{repo}/preupload/{rev}", web::post().to(hub_api::api::preupload::preupload_model))
     ).await;
 
@@ -405,5 +406,5 @@ async fn test_full_workflow() {
     let resp = test::call_service(&app, req).await;
     assert!(resp.status().is_success());
     let body: serde_json::Value = test::read_body_json(resp).await;
-    assert!(body["access_token"].as_str().unwrap().starts_with("xet_"));
+    assert!(body["accessToken"].as_str().unwrap().starts_with("xet_"));
 }

@@ -5,6 +5,15 @@ use std::env;
 pub struct ServerSettings {
     pub host: String,
     pub port: u16,
+    pub public_base_url: Option<String>,
+}
+
+impl ServerSettings {
+    pub fn base_url(&self) -> String {
+        self.public_base_url.clone()
+            .unwrap_or_else(|| format!("http://{}:{}", self.host, self.port))
+            .trim_end_matches('/').to_string()
+    }
 }
 
 impl Default for ServerSettings {
@@ -12,6 +21,7 @@ impl Default for ServerSettings {
         ServerSettings {
             host: "0.0.0.0".to_string(),
             port: 8080,
+            public_base_url: None,
         }
     }
 }
@@ -68,12 +78,16 @@ impl Default for CasSettings {
 #[derive(Debug, Clone)]
 pub struct StorageSettings {
     pub data_dir: String,
+    pub inline_threshold_bytes: u64,
+    pub lfs_threshold_bytes: u64,
 }
 
 impl Default for StorageSettings {
     fn default() -> Self {
         StorageSettings {
             data_dir: "./data".to_string(),
+            inline_threshold_bytes: 1 * 1024 * 1024, // 1MB
+            lfs_threshold_bytes: 10 * 1024 * 1024,   // 10MB
         }
     }
 }
@@ -110,23 +124,24 @@ impl HubConfig {
                     .ok()
                     .and_then(|p| p.parse().ok())
                     .unwrap_or(8080),
+                public_base_url: env::var("HUB_PUBLIC_BASE_URL").ok(),
             },
             auth: AuthSettings {
                 private_key_path: env::var("HUB_PRIVATE_KEY_PATH")
                     .unwrap_or_else(|_| "private_key.pem".to_string()),
-                kid: env::var("HUB_KEY_ID")
+                kid: env::var("HUB_KID")
                     .unwrap_or_else(|_| "hub-key-1".to_string()),
-                token_ttl_seconds: env::var("HUB_TOKEN_TTL_SECS")
+                token_ttl_seconds: env::var("HUB_TOKEN_TTL_SECONDS")
                     .ok()
                     .and_then(|t| t.parse().ok())
                     .unwrap_or(3600),
             },
             metadata: MetadataSettings {
-                sqlite_path: env::var("HUB_DATABASE_URL")
+                sqlite_path: env::var("HUB_SQLITE_PATH")
                     .unwrap_or_else(|_| "hub.db".to_string()),
             },
             cas: CasSettings {
-                base_url: env::var("HUB_CAS_URL")
+                base_url: env::var("CAS_BASE_URL")
                     .unwrap_or_else(|_| "http://localhost:3000".to_string()),
                 internal_timeout_seconds: env::var("HUB_CAS_TIMEOUT_SECS")
                     .ok()
@@ -136,6 +151,14 @@ impl HubConfig {
             storage: StorageSettings {
                 data_dir: env::var("HUB_DATA_DIR")
                     .unwrap_or_else(|_| "./data".to_string()),
+                inline_threshold_bytes: env::var("HUB_INLINE_THRESHOLD")
+                    .ok()
+                    .and_then(|t| t.parse().ok())
+                    .unwrap_or(1 * 1024 * 1024),
+                lfs_threshold_bytes: env::var("HUB_LFS_THRESHOLD")
+                    .ok()
+                    .and_then(|t| t.parse().ok())
+                    .unwrap_or(10 * 1024 * 1024),
             },
         }
     }
