@@ -7,7 +7,7 @@ use futures_util::StreamExt;
 use serde::Serialize;
 use tracing::{error, info};
 
-use crate::api::auth::{check_scope, extract_token_from_request, validate_jwt};
+use crate::api::auth::{check_scope, extract_token_from_request, verify_token};
 use crate::config::ServerConfig;
 use crate::storage::{StorageBackend, StorageError};
 use crate::types::MerkleHash;
@@ -66,7 +66,7 @@ pub async fn upload_xorb(
         }
     };
 
-    let claims = match validate_jwt(&token, &config.auth.jwt_secret) {
+    let claims = match verify_token(&token, &config.auth) {
         Ok(c) => c,
         Err(_) => {
             GLOBAL_METRICS.record_request(401);
@@ -265,7 +265,7 @@ pub async fn download_xorb(
         }
     };
 
-    let claims = match validate_jwt(&token, &config.auth.jwt_secret) {
+    let claims = match verify_token(&token, &config.auth) {
         Ok(c) => c,
         Err(_) => {
             GLOBAL_METRICS.record_request(401);
@@ -323,11 +323,53 @@ pub async fn download_xorb(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::auth::{JwtClaims, create_jwt};
-    use crate::config::AuthConfig;
+    use crate::api::auth::{KeyPair, XetClaims, sign_xet_token};
+    use crate::config::{AuthConfig, StateConfig};
     use crate::storage::local::LocalStorage;
     use actix_web::{test, web, App};
     use tempfile::tempdir;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn create_test_config() -> (KeyPair, ServerConfig) {
+        let kp = KeyPair::generate();
+        let public_key_pem = KeyPair::public_key_to_pem(&kp.verifying_key()).unwrap();
+
+        // Use a temp file path that persists for the test
+        let temp_path = format!("/tmp/xet-test-pubkey-{}.pem", kp.kid());
+        std::fs::write(&temp_path, &public_key_pem).unwrap();
+
+        let config = ServerConfig {
+            auth: AuthConfig {
+                public_key_path: temp_path,
+                trusted_kids: vec![kp.kid()],
+                token_prefix: "xet_".to_string(),
+            },
+            state: StateConfig {
+                sqlite_path: "/tmp/xet-test-state.db".to_string(),
+            },
+            ..Default::default()
+        };
+        (kp, config)
+    }
+
+    fn create_test_token(kp: &KeyPair, scope: &str) -> String {
+        let kid = kp.kid();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as usize;
+        let claims = XetClaims {
+            sub: "test".to_string(),
+            scope: scope.to_string(),
+            repo_id: "test/repo".to_string(),
+            repo_type: "model".to_string(),
+            revision: "main".to_string(),
+            exp: now + 3600,
+            iat: now,
+            kid,
+        };
+        sign_xet_token(&claims, kp).unwrap()
+    }
 
     #[actix_web::test]
     async fn test_upload_xorb_unauthorized() {
@@ -336,12 +378,7 @@ mod tests {
             LocalStorage::new(dir.path().to_str().unwrap()).unwrap()
         );
 
-        let config = ServerConfig {
-            auth: AuthConfig {
-                jwt_secret: "test-secret".to_string(),
-            },
-            ..Default::default()
-        };
+        let (_, config) = create_test_config();
 
         let app = test::init_service(
             App::new()
@@ -367,21 +404,8 @@ mod tests {
             LocalStorage::new(dir.path().to_str().unwrap()).unwrap()
         );
 
-        let config = ServerConfig {
-            auth: AuthConfig {
-                jwt_secret: "test-secret".to_string(),
-            },
-            ..Default::default()
-        };
-
-        let token = create_jwt(
-            &JwtClaims {
-                sub: "test".to_string(),
-                scope: "read write".to_string(),
-                exp: 9999999999,
-            },
-            &config.auth.jwt_secret,
-        ).unwrap();
+        let (kp, config) = create_test_config();
+        let token = create_test_token(&kp, "read write");
 
         let app = test::init_service(
             App::new()

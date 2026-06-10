@@ -1,6 +1,6 @@
 //! Tests for configuration module
 
-use xet_server::config::{ServerConfig, StorageConfig};
+use xet_server::config::{ServerConfig, StorageConfig, AuthConfig, StateConfig};
 
 #[test]
 fn test_config_default() {
@@ -8,6 +8,9 @@ fn test_config_default() {
     assert_eq!(config.server.host, "127.0.0.1");
     assert_eq!(config.server.port, 8080);
     assert_eq!(config.storage.backend, "local");
+    assert!(!config.auth.trusted_kids.is_empty());
+    assert!(!config.auth.public_key_path.is_empty());
+    assert!(!config.state.sqlite_path.is_empty());
 }
 
 #[test]
@@ -30,9 +33,38 @@ fn test_config_s3_settings() {
 }
 
 #[test]
+fn test_config_auth_settings() {
+    let config = ServerConfig {
+        auth: AuthConfig {
+            public_key_path: "/path/to/key.pem".to_string(),
+            trusted_kids: vec!["kid1".to_string(), "kid2".to_string()],
+            token_prefix: "xet_".to_string(),
+        },
+        ..Default::default()
+    };
+
+    assert_eq!(config.auth.public_key_path, "/path/to/key.pem");
+    assert_eq!(config.auth.trusted_kids.len(), 2);
+    assert_eq!(config.auth.token_prefix, "xet_");
+}
+
+#[test]
+fn test_config_state_settings() {
+    let config = ServerConfig {
+        state: StateConfig {
+            sqlite_path: "/custom/path/state.db".to_string(),
+        },
+        ..Default::default()
+    };
+
+    assert_eq!(config.state.sqlite_path, "/custom/path/state.db");
+}
+
+#[test]
 fn test_config_serialization() {
     let config = ServerConfig::default();
     let json = serde_json::to_string(&config).unwrap();
     let deserialized: ServerConfig = serde_json::from_str(&json).unwrap();
     assert_eq!(deserialized.server.port, config.server.port);
+    assert_eq!(deserialized.auth.trusted_kids, config.auth.trusted_kids);
 }

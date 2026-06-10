@@ -1,11 +1,12 @@
 //! Integration tests for API endpoints
 
+mod common;
+
 use actix_web::{test, web, App};
 use bytes::Bytes;
 use tempfile::tempdir;
 
-use xet_server::api::auth::{create_jwt, JwtClaims};
-use xet_server::config::ServerConfig;
+use common::{test_config_with_new_key, test_token_for_keypair};
 use xet_server::format::xorb::XorbObjectInfoV1;
 use xet_server::storage::local::LocalStorage;
 use xet_server::storage::StorageBackend;
@@ -37,15 +38,8 @@ async fn test_upload_xorb() {
         LocalStorage::new(dir.path().to_str().unwrap()).unwrap()
     );
 
-    let config = ServerConfig::default();
-    let token = create_jwt(
-        &JwtClaims {
-            sub: "test".to_string(),
-            scope: "read write".to_string(),
-            exp: 9999999999,
-        },
-        &config.auth.jwt_secret,
-    ).unwrap();
+    let (kp, config) = test_config_with_new_key();
+    let token = test_token_for_keypair(&kp, "read write");
 
     let app = test::init_service(
         App::new()
@@ -75,15 +69,8 @@ async fn test_upload_xorb_duplicate() {
         LocalStorage::new(dir.path().to_str().unwrap()).unwrap()
     );
 
-    let config = ServerConfig::default();
-    let token = create_jwt(
-        &JwtClaims {
-            sub: "test".to_string(),
-            scope: "read write".to_string(),
-            exp: 9999999999,
-        },
-        &config.auth.jwt_secret,
-    ).unwrap();
+    let (kp, config) = test_config_with_new_key();
+    let token = test_token_for_keypair(&kp, "read write");
 
     let app = test::init_service(
         App::new()
@@ -125,15 +112,8 @@ async fn test_upload_xorb_invalid_hash() {
         LocalStorage::new(dir.path().to_str().unwrap()).unwrap()
     );
 
-    let config = ServerConfig::default();
-    let token = create_jwt(
-        &JwtClaims {
-            sub: "test".to_string(),
-            scope: "read write".to_string(),
-            exp: 9999999999,
-        },
-        &config.auth.jwt_secret,
-    ).unwrap();
+    let (kp, config) = test_config_with_new_key();
+    let token = test_token_for_keypair(&kp, "read write");
 
     let app = test::init_service(
         App::new()
@@ -160,7 +140,7 @@ async fn test_upload_xorb_no_auth() {
         LocalStorage::new(dir.path().to_str().unwrap()).unwrap()
     );
 
-    let config = ServerConfig::default();
+    let (_, config) = test_config_with_new_key();
 
     let app = test::init_service(
         App::new()

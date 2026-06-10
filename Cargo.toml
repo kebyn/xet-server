@@ -26,6 +26,7 @@ ed25519-dalek = { version = "2", features = ["pem", "rand_core", "pkcs8"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 uuid = { version = "1", features = ["v4"] }
 rand = "0.8"
+pkcs8 = { version = "0.10", features = ["pem"] }
 
 [dev-dependencies]
 rand = "0.8"

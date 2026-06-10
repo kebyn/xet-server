@@ -6,38 +6,17 @@
 //! 3. Query reconstructions
 //! 4. Query global dedup
 
+mod common;
+
 use actix_web::{test, web, App};
 use bytes::Bytes;
 use tempfile::tempdir;
 
-use xet_server::api::auth::{create_jwt, JwtClaims};
-use xet_server::config::{ServerConfig, StorageConfig, AuthConfig, ServerSettings};
+use common::{test_config_with_new_key, test_token_for_keypair};
 use xet_server::format::xorb::XorbObjectInfoV1;
 use xet_server::index::MetadataIndex;
 use xet_server::storage::local::LocalStorage;
 use xet_server::storage::StorageBackend;
-
-fn create_test_config() -> ServerConfig {
-    ServerConfig {
-        storage: StorageConfig {
-            backend: "local".to_string(),
-            s3_bucket: None,
-            s3_region: None,
-            s3_endpoint: None,
-            local_path: None,
-            upload_temp_dir: None,
-        },
-        auth: AuthConfig {
-            jwt_secret: "test-secret-key".to_string(),
-        },
-        server: ServerSettings {
-            host: "127.0.0.1".to_string(),
-            port: 8080,
-            public_base_url: None,
-            max_body_size_mb: 2048,
-        },
-    }
-}
 
 /// Helper to create a valid xorb with proper structure and hash
 fn create_valid_xorb(content: &[u8]) -> (Vec<u8>, String) {
@@ -68,16 +47,8 @@ async fn test_full_upload_workflow() {
     );
 
     let index = MetadataIndex::new();
-    let config = create_test_config();
-
-    let token = create_jwt(
-        &JwtClaims {
-            sub: "test-user".to_string(),
-            scope: "read write".to_string(),
-            exp: 9999999999,
-        },
-        &config.auth.jwt_secret,
-    ).unwrap();
+    let (kp, config) = test_config_with_new_key();
+    let token = test_token_for_keypair(&kp, "read write");
 
     let app = test::init_service(
         App::new()
@@ -157,7 +128,7 @@ async fn test_auth_workflow() {
     );
 
     let index = MetadataIndex::new();
-    let config = create_test_config();
+    let (kp, config) = test_config_with_new_key();
 
     let app = test::init_service(
         App::new()
@@ -188,10 +159,10 @@ async fn test_auth_workflow() {
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), 401);
 
-    // Test 3: Invalid token signature
+    // Test 3: Invalid token (not signed by our key)
     let req = test::TestRequest::post()
         .uri(&format!("/v1/xorbs/default/{}", xorb_hash))
-        .insert_header(("Authorization", "Bearer invalid.token.here"))
+        .insert_header(("Authorization", "Bearer xet_invalid.token.here"))
         .set_payload(Bytes::from("test data"))
         .to_request();
 
@@ -199,14 +170,7 @@ async fn test_auth_workflow() {
     assert_eq!(resp.status(), 401);
 
     // Test 4: Valid token but insufficient scope
-    let token = create_jwt(
-        &JwtClaims {
-            sub: "test-user".to_string(),
-            scope: "read".to_string(),  // Only read scope
-            exp: 9999999999,
-        },
-        &create_test_config().auth.jwt_secret,
-    ).unwrap();
+    let token = test_token_for_keypair(&kp, "read"); // Only read scope
 
     let req = test::TestRequest::post()
         .uri(&format!("/v1/xorbs/default/{}", xorb_hash))
@@ -226,16 +190,8 @@ async fn test_hash_validation() {
     );
 
     let index = MetadataIndex::new();
-    let config = create_test_config();
-
-    let token = create_jwt(
-        &JwtClaims {
-            sub: "test-user".to_string(),
-            scope: "read write".to_string(),
-            exp: 9999999999,
-        },
-        &config.auth.jwt_secret,
-    ).unwrap();
+    let (kp, config) = test_config_with_new_key();
+    let token = test_token_for_keypair(&kp, "read write");
 
     let app = test::init_service(
         App::new()
@@ -258,7 +214,7 @@ async fn test_hash_validation() {
     assert_eq!(resp.status(), 400);
 
     // Test 2: Invalid hash characters
-    let invalid_hash = "g".repeat(64);  // 'g' is not a valid hex character
+    let invalid_hash = "g".repeat(64); // 'g' is not a valid hex character
     let req = test::TestRequest::post()
         .uri(&format!("/v1/xorbs/default/{}", invalid_hash))
         .insert_header(("Authorization", format!("Bearer {}", token)))
@@ -304,16 +260,8 @@ async fn test_idempotency() {
     );
 
     let index = MetadataIndex::new();
-    let config = create_test_config();
-
-    let token = create_jwt(
-        &JwtClaims {
-            sub: "test-user".to_string(),
-            scope: "read write".to_string(),
-            exp: 9999999999,
-        },
-        &config.auth.jwt_secret,
-    ).unwrap();
+    let (kp, config) = test_config_with_new_key();
+    let token = test_token_for_keypair(&kp, "read write");
 
     let app = test::init_service(
         App::new()
