@@ -3,29 +3,16 @@
 //! These tests verify the complete workflow from file chunking to xorb upload,
 //! shard creation, and file reconstruction.
 
+mod common;
+
 use bytes::Bytes;
 use tempfile::tempdir;
 
-use xet_server::api::auth::{create_jwt, JwtClaims};
 use xet_server::chunking::{ChunkConfig, Chunker};
-use xet_server::config::ServerConfig;
 use xet_server::hash::{compute_data_hash, xorb_hash};
 use xet_server::index::MetadataIndex;
 use xet_server::storage::local::LocalStorage;
 use xet_server::storage::StorageBackend;
-
-/// Helper function to create a valid JWT token
-fn create_test_token(config: &ServerConfig) -> String {
-    create_jwt(
-        &JwtClaims {
-            sub: "test-user".to_string(),
-            scope: "read write".to_string(),
-            exp: 9999999999,
-        },
-        &config.auth.jwt_secret,
-    )
-    .unwrap()
-}
 
 /// Test 5.1.1: Complete file upload workflow
 ///
@@ -40,8 +27,7 @@ async fn test_e2e_complete_file_upload() {
     let storage: Box<dyn StorageBackend> = Box::new(
         LocalStorage::new(dir.path().to_str().unwrap()).unwrap(),
     );
-    let config = ServerConfig::default();
-    let _token = create_test_token(&config);
+    let (_kp, _config) = common::test_config_with_new_key();
 
     // Step 1: Create test data and chunk it
     let test_data = b"Hello, this is a test file for end-to-end testing. \

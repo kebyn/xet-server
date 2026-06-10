@@ -9,6 +9,7 @@ pub struct ServerConfig {
     pub server: ServerSettings,
     pub storage: StorageConfig,
     pub auth: AuthConfig,
+    pub state: StateConfig,
 }
 
 /// HTTP server settings
@@ -57,7 +58,7 @@ pub struct StorageConfig {
     pub s3_endpoint: Option<String>,
     pub local_path: Option<String>,
     /// Directory for streaming upload temp files.
-    /// For local storage, defaults to `{local_path}/.tmp` (same filesystem → atomic rename).
+    /// For local storage, defaults to `{local_path}/.tmp` (same filesystem -> atomic rename).
     /// For S3 or if unset, defaults to `/tmp/xet-uploads`.
     /// Configure via `XET_UPLOAD_TEMP_DIR` environment variable.
     pub upload_temp_dir: Option<String>,
@@ -76,10 +77,22 @@ impl StorageConfig {
     }
 }
 
-/// Authentication configuration
+/// Authentication configuration (Ed25519-based)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthConfig {
-    pub jwt_secret: String,
+    /// Path to the public key PEM file for token verification
+    pub public_key_path: String,
+    /// List of trusted key IDs (kid values) that are accepted
+    pub trusted_kids: Vec<String>,
+    /// Token prefix (e.g., "xet_" for xet tokens)
+    pub token_prefix: String,
+}
+
+/// State management configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StateConfig {
+    /// Path to the SQLite database for state tracking
+    pub sqlite_path: String,
 }
 
 impl Default for ServerConfig {
@@ -100,7 +113,12 @@ impl Default for ServerConfig {
                 upload_temp_dir: None,
             },
             auth: AuthConfig {
-                jwt_secret: "dev-secret-change-in-production".to_string(),
+                public_key_path: "/tmp/xet-test-public-key.pem".to_string(),
+                trusted_kids: vec!["test-kid".to_string()],
+                token_prefix: "xet_".to_string(),
+            },
+            state: StateConfig {
+                sqlite_path: "/tmp/xet-state.db".to_string(),
             },
         }
     }
@@ -127,8 +145,19 @@ impl ServerConfig {
         let local_path = std::env::var("XET_LOCAL_PATH").ok();
         let upload_temp_dir = std::env::var("XET_UPLOAD_TEMP_DIR").ok();
 
-        let jwt_secret = std::env::var("XET_JWT_SECRET")
-            .unwrap_or_else(|_| "dev-secret".to_string());
+        // CAS-specific auth configuration
+        let public_key_path = std::env::var("CAS_PUBLIC_KEY_PATH")
+            .unwrap_or_else(|_| "/tmp/xet-public-key.pem".to_string());
+        let trusted_kids = std::env::var("CAS_TRUSTED_KIDS")
+            .ok()
+            .map(|s| s.split(',').map(|kid| kid.trim().to_string()).collect())
+            .unwrap_or_else(|| vec!["default".to_string()]);
+        let token_prefix = std::env::var("CAS_TOKEN_PREFIX")
+            .unwrap_or_else(|_| "xet_".to_string());
+
+        // State database configuration
+        let sqlite_path = std::env::var("CAS_STATE_DB_PATH")
+            .unwrap_or_else(|_| "/tmp/xet-state.db".to_string());
 
         Self {
             server: ServerSettings { host, port, public_base_url, max_body_size_mb },
@@ -140,7 +169,14 @@ impl ServerConfig {
                 local_path,
                 upload_temp_dir,
             },
-            auth: AuthConfig { jwt_secret },
+            auth: AuthConfig {
+                public_key_path,
+                trusted_kids,
+                token_prefix,
+            },
+            state: StateConfig {
+                sqlite_path,
+            },
         }
     }
 }

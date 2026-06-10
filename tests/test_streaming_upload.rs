@@ -3,60 +3,66 @@
 //! Verifies that uploads work via actix-web's streaming Payload extractor,
 //! and that content integrity checks reject tampered data.
 
+mod common;
+
 use actix_web::{test, web, App};
 use bytes::Bytes;
 use tempfile::tempdir;
 
-use xet_server::api::auth::{create_jwt, JwtClaims};
-use xet_server::config::{AuthConfig, ServerConfig, ServerSettings, StorageConfig};
+use common::test_token_for_keypair;
+use xet_server::api::auth::KeyPair;
 use xet_server::format::xorb::XorbObjectInfoV1;
 use xet_server::hash::compute_data_hash;
 use xet_server::index::MetadataIndex;
 use xet_server::storage::local::LocalStorage;
 use xet_server::storage::StorageBackend;
 
-fn create_test_config_with_temp_dir(temp_dir: &str) -> ServerConfig {
-    ServerConfig {
-        storage: StorageConfig {
-            backend: "local".to_string(),
-            s3_bucket: None,
-            s3_region: None,
-            s3_endpoint: None,
-            local_path: None,
-            upload_temp_dir: Some(temp_dir.to_string()),
-        },
-        auth: AuthConfig {
-            jwt_secret: "test-secret-key".to_string(),
-        },
-        server: ServerSettings {
+fn create_test_config_with_temp_dir(temp_dir: &str) -> (KeyPair, xet_server::config::ServerConfig) {
+    // Generate a key pair first
+    let kp = KeyPair::generate();
+
+    // Write public key to a persistent temp file (using /tmp with unique name)
+    let public_key_pem = KeyPair::public_key_to_pem(&kp.verifying_key()).unwrap();
+    let pub_key_path = format!("/tmp/xet-test-pubkey-{}.pem", kp.kid());
+    std::fs::write(&pub_key_path, &public_key_pem).unwrap();
+
+    let config = xet_server::config::ServerConfig {
+        server: xet_server::config::ServerSettings {
             host: "127.0.0.1".to_string(),
             port: 8080,
             public_base_url: None,
             max_body_size_mb: 2048,
         },
-    }
+        storage: xet_server::config::StorageConfig {
+            backend: "local".to_string(),
+            s3_bucket: None,
+            s3_region: None,
+            s3_endpoint: None,
+            local_path: Some("./data".to_string()),
+            upload_temp_dir: Some(temp_dir.to_string()),
+        },
+        auth: xet_server::config::AuthConfig {
+            public_key_path: pub_key_path,
+            trusted_kids: vec![kp.kid()],
+            token_prefix: "xet_".to_string(),
+        },
+        state: xet_server::config::StateConfig {
+            sqlite_path: "/tmp/xet-test-state.db".to_string(),
+        },
+    };
+    (kp, config)
 }
 
-fn create_test_config_small_limit(temp_dir: &str) -> ServerConfig {
-    ServerConfig {
-        server: ServerSettings {
+fn create_test_config_small_limit(temp_dir: &str) -> (KeyPair, xet_server::config::ServerConfig) {
+    let (kp, config) = create_test_config_with_temp_dir(temp_dir);
+    let config = xet_server::config::ServerConfig {
+        server: xet_server::config::ServerSettings {
             max_body_size_mb: 1, // 1 MB limit for testing 413
-            ..create_test_config_with_temp_dir(temp_dir).server
+            ..config.server
         },
-        ..create_test_config_with_temp_dir(temp_dir)
-    }
-}
-
-fn create_auth_token(config: &ServerConfig) -> String {
-    create_jwt(
-        &JwtClaims {
-            sub: "test-user".to_string(),
-            scope: "read write".to_string(),
-            exp: 9999999999,
-        },
-        &config.auth.jwt_secret,
-    )
-    .unwrap()
+        ..config
+    };
+    (kp, config)
 }
 
 /// Helper to create a valid xorb with proper structure and hash
@@ -83,8 +89,9 @@ fn create_valid_xorb(content: &[u8]) -> (Vec<u8>, String) {
 async fn test_streaming_lfs_upload() {
     let storage_dir = tempdir().unwrap();
     let temp_dir = tempdir().unwrap();
-    let config = create_test_config_with_temp_dir(temp_dir.path().to_str().unwrap());
-    let token = create_auth_token(&config);
+
+    let (kp, config) = create_test_config_with_temp_dir(temp_dir.path().to_str().unwrap());
+    let token = test_token_for_keypair(&kp, "read write");
 
     let storage: Box<dyn StorageBackend> = Box::new(
         LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap(),
@@ -118,8 +125,9 @@ async fn test_streaming_lfs_upload() {
 async fn test_streaming_lfs_hash_mismatch() {
     let storage_dir = tempdir().unwrap();
     let temp_dir = tempdir().unwrap();
-    let config = create_test_config_with_temp_dir(temp_dir.path().to_str().unwrap());
-    let token = create_auth_token(&config);
+
+    let (kp, config) = create_test_config_with_temp_dir(temp_dir.path().to_str().unwrap());
+    let token = test_token_for_keypair(&kp, "read write");
 
     let storage: Box<dyn StorageBackend> = Box::new(
         LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap(),
@@ -160,8 +168,9 @@ async fn test_streaming_lfs_hash_mismatch() {
 async fn test_streaming_lfs_oversized_rejected() {
     let storage_dir = tempdir().unwrap();
     let temp_dir = tempdir().unwrap();
-    let config = create_test_config_small_limit(temp_dir.path().to_str().unwrap());
-    let token = create_auth_token(&config);
+
+    let (kp, config) = create_test_config_small_limit(temp_dir.path().to_str().unwrap());
+    let token = test_token_for_keypair(&kp, "read write");
 
     let storage: Box<dyn StorageBackend> = Box::new(
         LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap(),
@@ -200,8 +209,9 @@ async fn test_streaming_lfs_oversized_rejected() {
 async fn test_streaming_xorb_upload() {
     let storage_dir = tempdir().unwrap();
     let temp_dir = tempdir().unwrap();
-    let config = create_test_config_with_temp_dir(temp_dir.path().to_str().unwrap());
-    let token = create_auth_token(&config);
+
+    let (kp, config) = create_test_config_with_temp_dir(temp_dir.path().to_str().unwrap());
+    let token = test_token_for_keypair(&kp, "read write");
 
     let storage: Box<dyn StorageBackend> = Box::new(
         LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap(),
@@ -235,8 +245,9 @@ async fn test_streaming_xorb_upload() {
 async fn test_streaming_xorb_invalid_structure() {
     let storage_dir = tempdir().unwrap();
     let temp_dir = tempdir().unwrap();
-    let config = create_test_config_with_temp_dir(temp_dir.path().to_str().unwrap());
-    let token = create_auth_token(&config);
+
+    let (kp, config) = create_test_config_with_temp_dir(temp_dir.path().to_str().unwrap());
+    let token = test_token_for_keypair(&kp, "read write");
 
     let storage: Box<dyn StorageBackend> = Box::new(
         LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap(),
@@ -275,8 +286,9 @@ async fn test_streaming_xorb_invalid_structure() {
 async fn test_streaming_shard_upload() {
     let storage_dir = tempdir().unwrap();
     let temp_dir = tempdir().unwrap();
-    let config = create_test_config_with_temp_dir(temp_dir.path().to_str().unwrap());
-    let token = create_auth_token(&config);
+
+    let (kp, config) = create_test_config_with_temp_dir(temp_dir.path().to_str().unwrap());
+    let token = test_token_for_keypair(&kp, "read write");
 
     let storage: Box<dyn StorageBackend> = Box::new(
         LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap(),
@@ -345,8 +357,9 @@ async fn test_streaming_shard_upload() {
 async fn test_streaming_lfs_idempotent() {
     let storage_dir = tempdir().unwrap();
     let temp_dir = tempdir().unwrap();
-    let config = create_test_config_with_temp_dir(temp_dir.path().to_str().unwrap());
-    let token = create_auth_token(&config);
+
+    let (kp, config) = create_test_config_with_temp_dir(temp_dir.path().to_str().unwrap());
+    let token = test_token_for_keypair(&kp, "read write");
 
     let storage: Box<dyn StorageBackend> = Box::new(
         LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap(),

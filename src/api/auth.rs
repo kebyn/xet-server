@@ -1,46 +1,255 @@
-//! JWT authentication for Xet Storage server
+//! Ed25519 JWT authentication for Xet Storage server
+//!
+//! Uses EdDSA signing for xet tokens with the format:
+//! `xet_{base64url(header).base64url(payload).base64url(signature)}`
 
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct JwtClaims {
+/// Error types for authentication operations
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthError {
+    /// Token format is invalid (not a valid JWT structure)
+    InvalidToken,
+    /// Token has expired (exp claim check failed)
+    Expired,
+    /// Signature verification failed
+    InvalidSignature,
+    /// Key ID (kid) not recognized
+    UnknownKid,
+    /// Key parsing/loading failed
+    InvalidKey,
+}
+
+impl std::fmt::Display for AuthError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AuthError::InvalidToken => write!(f, "Invalid token format"),
+            AuthError::Expired => write!(f, "Token has expired"),
+            AuthError::InvalidSignature => write!(f, "Invalid signature"),
+            AuthError::UnknownKid => write!(f, "Unknown key ID"),
+            AuthError::InvalidKey => write!(f, "Invalid key"),
+        }
+    }
+}
+
+impl std::error::Error for AuthError {}
+
+/// JWT header for xet tokens
+#[derive(Debug, Serialize, Deserialize)]
+struct JwtHeader {
+    alg: String,
+    typ: String,
+    kid: String,
+}
+
+/// Claims embedded in a xet JWT token
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct XetClaims {
+    /// Subject (user identity)
     pub sub: String,
+    /// Scope(s) granted (space-separated, e.g., "read write")
     pub scope: String,
+    /// Repository ID (HuggingFace-style repo identifier)
+    pub repo_id: String,
+    /// Repository type (e.g., "model", "dataset", "space")
+    pub repo_type: String,
+    /// Git revision being accessed
+    pub revision: String,
+    /// Expiration timestamp (Unix seconds)
     pub exp: usize,
+    /// Issued-at timestamp (Unix seconds)
+    pub iat: usize,
+    /// Key ID identifying the signing key
+    pub kid: String,
 }
 
-pub fn create_jwt(claims: &JwtClaims, secret: &str) -> Result<String, jsonwebtoken::errors::Error> {
-    encode(
-        &Header::default(),
-        claims,
-        &EncodingKey::from_secret(secret.as_bytes()),
-    )
+/// Ed25519 key pair for signing and verification
+pub struct KeyPair {
+    signing_key: SigningKey,
 }
 
-pub fn validate_jwt(token: &str, secret: &str) -> Result<JwtClaims, jsonwebtoken::errors::Error> {
-    let token_data = decode::<JwtClaims>(
-        token,
-        &DecodingKey::from_secret(secret.as_bytes()),
-        &Validation::default(),
-    )?;
+impl KeyPair {
+    /// Generate a new random Ed25519 key pair
+    pub fn generate() -> Self {
+        let signing_key = SigningKey::generate(&mut rand::rngs::OsRng);
+        KeyPair { signing_key }
+    }
 
-    Ok(token_data.claims)
+    /// Get the verifying (public) key from this key pair
+    pub fn verifying_key(&self) -> VerifyingKey {
+        self.signing_key.verifying_key()
+    }
+
+    /// Load a public key from PEM format (SPKI DER wrapped in PEM markers)
+    pub fn public_key_from_pem(pem: &str) -> Result<VerifyingKey, AuthError> {
+        use ed25519_dalek::pkcs8::DecodePublicKey;
+        VerifyingKey::from_public_key_pem(pem).map_err(|_| AuthError::InvalidKey)
+    }
+
+    /// Load a private key from PEM format
+    pub fn private_key_from_pem(pem: &str) -> Result<Self, AuthError> {
+        use ed25519_dalek::pkcs8::DecodePrivateKey;
+        let signing_key = SigningKey::from_pkcs8_pem(pem).map_err(|_| AuthError::InvalidKey)?;
+        Ok(KeyPair { signing_key })
+    }
+
+    /// Export the public key to PEM format
+    pub fn public_key_to_pem(verifying_key: &VerifyingKey) -> Result<String, AuthError> {
+        use ed25519_dalek::pkcs8::EncodePublicKey;
+        // LineEnding::LF is the standard for PEM files
+        verifying_key
+            .to_public_key_pem(pkcs8::LineEnding::LF)
+            .map_err(|_| AuthError::InvalidKey)
+    }
+
+    /// Get a unique key ID for this key pair (first 8 bytes of public key as hex)
+    pub fn kid(&self) -> String {
+        let verifying_key = self.signing_key.verifying_key();
+        let pk_bytes = verifying_key.as_bytes();
+        hex::encode(&pk_bytes[..8])
+    }
+}
+
+/// Sign claims with the key pair to create a xet token
+///
+/// The token format is: `xet_{base64url(header).base64url(payload).base64url(signature)}`
+pub fn sign_xet_token(claims: &XetClaims, keypair: &KeyPair) -> Result<String, AuthError> {
+    // Create header with matching kid from claims
+    let header = JwtHeader {
+        alg: "EdDSA".to_string(),
+        typ: "JWT".to_string(),
+        kid: claims.kid.clone(),
+    };
+
+    // Serialize header and payload
+    let header_json = serde_json::to_string(&header).map_err(|_| AuthError::InvalidToken)?;
+    let payload_json = serde_json::to_string(claims).map_err(|_| AuthError::InvalidToken)?;
+
+    // Base64url encode (no padding)
+    let header_b64 = URL_SAFE_NO_PAD.encode(header_json.as_bytes());
+    let payload_b64 = URL_SAFE_NO_PAD.encode(payload_json.as_bytes());
+
+    // Sign the message "{header_b64}.{payload_b64}"
+    let message = format!("{}.{}", header_b64, payload_b64);
+    let signature = keypair.signing_key.sign(message.as_bytes());
+    let sig_b64 = URL_SAFE_NO_PAD.encode(signature.to_bytes());
+
+    // Final token with "xet_" prefix
+    Ok(format!("xet_{}.{}.{}", header_b64, payload_b64, sig_b64))
+}
+
+/// Verify a xet token with a specific public key and expected kid
+///
+/// Checks:
+/// 1. Token format (xet_ prefix, three base64url parts)
+/// 2. Signature validity
+/// 3. Key ID matches expected kid
+/// 4. Token has not expired
+pub fn verify_xet_token(
+    token: &str,
+    public_key: &VerifyingKey,
+    expected_kid: &str,
+) -> Result<XetClaims, AuthError> {
+    // Strip "xet_" prefix
+    let token_body = token.strip_prefix("xet_").ok_or(AuthError::InvalidToken)?;
+
+    // Split into three parts
+    let parts: Vec<&str> = token_body.split('.').collect();
+    if parts.len() != 3 {
+        return Err(AuthError::InvalidToken);
+    }
+
+    let header_b64 = parts[0];
+    let payload_b64 = parts[1];
+    let sig_b64 = parts[2];
+
+    // Decode header
+    let header_bytes = URL_SAFE_NO_PAD
+        .decode(header_b64)
+        .map_err(|_| AuthError::InvalidToken)?;
+    let header: JwtHeader =
+        serde_json::from_slice(&header_bytes).map_err(|_| AuthError::InvalidToken)?;
+
+    // Verify kid matches expected
+    if header.kid != expected_kid {
+        return Err(AuthError::UnknownKid);
+    }
+
+    // Verify algorithm is EdDSA
+    if header.alg != "EdDSA" {
+        return Err(AuthError::InvalidToken);
+    }
+
+    // Decode signature
+    let sig_bytes = URL_SAFE_NO_PAD
+        .decode(sig_b64)
+        .map_err(|_| AuthError::InvalidToken)?;
+    let signature =
+        Signature::from_slice(&sig_bytes).map_err(|_| AuthError::InvalidSignature)?;
+
+    // Verify signature over "{header_b64}.{payload_b64}"
+    let message = format!("{}.{}", header_b64, payload_b64);
+    public_key
+        .verify(message.as_bytes(), &signature)
+        .map_err(|_| AuthError::InvalidSignature)?;
+
+    // Decode payload
+    let payload_bytes = URL_SAFE_NO_PAD
+        .decode(payload_b64)
+        .map_err(|_| AuthError::InvalidToken)?;
+    let claims: XetClaims =
+        serde_json::from_slice(&payload_bytes).map_err(|_| AuthError::InvalidToken)?;
+
+    // Check expiration
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| AuthError::InvalidToken)?
+        .as_secs() as usize;
+    if claims.exp < now {
+        return Err(AuthError::Expired);
+    }
+
+    Ok(claims)
+}
+
+/// Verify a token against auth config by trying each trusted kid
+///
+/// Reads the public key from the configured path and tries to verify
+/// with each trusted kid until one succeeds.
+pub fn verify_token(token: &str, auth_config: &crate::config::AuthConfig) -> Result<XetClaims, AuthError> {
+    // Load public key from PEM file
+    let pem_content = std::fs::read_to_string(&auth_config.public_key_path)
+        .map_err(|_| AuthError::InvalidKey)?;
+    let public_key = KeyPair::public_key_from_pem(&pem_content)?;
+
+    // Try each trusted kid
+    for trusted_kid in &auth_config.trusted_kids {
+        if let Ok(claims) = verify_xet_token(token, &public_key, trusted_kid) {
+            // Also verify the token's kid matches what we expect
+            if claims.kid == *trusted_kid {
+                return Ok(claims);
+            }
+        }
+    }
+
+    Err(AuthError::UnknownKid)
 }
 
 /// Extract a bearer token from an Authorization header value.
 /// Returns `Some(token)` if the header is `Bearer <token>`, `None` otherwise.
 pub fn extract_bearer_token(auth_header: &str) -> Option<String> {
-    auth_header
-        .strip_prefix("Bearer ")
-        .map(|s| s.to_string())
+    auth_header.strip_prefix("Bearer ").map(|s| s.to_string())
 }
 
 /// Extract JWT token from HTTP request.
 /// Supports both Bearer token and Basic auth (where password is JWT token).
 /// Delegates Bearer extraction to `extract_bearer_token`.
 pub fn extract_token_from_request(req: &actix_web::HttpRequest) -> Option<String> {
+    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+
     let auth_header = req.headers().get("Authorization")?;
     let auth_str = auth_header.to_str().ok()?;
 
@@ -65,6 +274,13 @@ pub fn extract_token_from_request(req: &actix_web::HttpRequest) -> Option<String
     None
 }
 
-pub fn check_scope(claims: &JwtClaims, required_scope: &str) -> bool {
+/// Check if claims contain a required scope.
+/// The "internal" scope supersedes all other scope checks.
+pub fn check_scope(claims: &XetClaims, required_scope: &str) -> bool {
+    // "internal" scope grants all permissions
+    if claims.scope.split_whitespace().any(|s| s == "internal") {
+        return true;
+    }
+    // Check for the specific required scope
     claims.scope.split_whitespace().any(|s| s == required_scope)
 }

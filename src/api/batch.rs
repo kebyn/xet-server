@@ -9,7 +9,7 @@ use actix_web::{web, HttpResponse};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-use crate::api::auth::{extract_token_from_request, validate_jwt};
+use crate::api::auth::{extract_token_from_request, verify_token};
 use crate::config::ServerConfig;
 use crate::metrics::GLOBAL_METRICS;
 
@@ -116,7 +116,7 @@ pub async fn batch_operation(
         }
     };
 
-    let claims = match validate_jwt(&token, &config.auth.jwt_secret) {
+    let claims = match verify_token(&token, &config.auth) {
         Ok(c) => c,
         Err(_) => {
             GLOBAL_METRICS.record_request(401);

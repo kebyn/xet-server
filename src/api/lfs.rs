@@ -13,7 +13,7 @@ use actix_web::{web, HttpResponse};
 use futures_util::StreamExt;
 use tracing::{error, info};
 
-use crate::api::auth::{check_scope, extract_token_from_request, validate_jwt};
+use crate::api::auth::{check_scope, extract_token_from_request, verify_token};
 use crate::config::ServerConfig;
 use crate::metrics::GLOBAL_METRICS;
 use crate::storage::{StorageBackend, StorageError};
@@ -55,7 +55,7 @@ pub async fn upload_lfs_object(
         }
     };
 
-    let claims = match validate_jwt(&token, &config.auth.jwt_secret) {
+    let claims = match verify_token(&token, &config.auth) {
         Ok(c) => c,
         Err(_) => {
             GLOBAL_METRICS.record_request(401);
@@ -235,7 +235,7 @@ pub async fn download_lfs_object(
         }
     };
 
-    let claims = match validate_jwt(&token, &config.auth.jwt_secret) {
+    let claims = match verify_token(&token, &config.auth) {
         Ok(c) => c,
         Err(_) => {
             GLOBAL_METRICS.record_request(401);
