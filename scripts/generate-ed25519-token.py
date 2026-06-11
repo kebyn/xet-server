@@ -69,7 +69,7 @@ def generate_keypair(private_key_path, public_key_path):
     with open(public_key_path, 'wb') as f:
         f.write(public_pem)
 
-    print(f"Generated key pair:", file=sys.stderr)
+    print("Generated key pair", file=sys.stderr)
     print(f"  Private: {private_key_path}", file=sys.stderr)
     print(f"  Public:  {public_key_path}", file=sys.stderr)
 
@@ -121,25 +121,27 @@ def generate_token(private_key, kid, hours=24, repo_id="test/repo", repo_type="m
 
 def main():
     parser = argparse.ArgumentParser(description="Generate Ed25519 key pair and JWT tokens")
-    parser.add_argument('private_key', nargs='?', default=None,
+    parser.add_argument('private_key', nargs='?', default='private_key.pem',
                         help='Path to private key PEM file (default: private_key.pem)')
     parser.add_argument('hours', nargs='?', type=int, default=24,
                         help='Token validity in hours (default: 24)')
     parser.add_argument('--kid', default='test-kid',
                         help='Key ID (must match CAS trusted_kids, default: test-kid)')
-    parser.add_argument('--private-key', dest='private_key_path', default='private_key.pem',
-                        help='Path to private key PEM (default: private_key.pem)')
     parser.add_argument('--public-key', dest='public_key_path', default=None,
                         help='Path to public key PEM (default: <private_key_dir>/public_key.pem)')
     parser.add_argument('--keys-only', action='store_true',
                         help='Only generate key pair, no token')
     parser.add_argument('--repo-id', default='test/repo',
                         help='Repository ID for token claims')
+    parser.add_argument('--repo-type', default='model',
+                        help='Repository type for token claims (default: model)')
+    parser.add_argument('--revision', default='main',
+                        help='Revision for token claims (default: main)')
 
     args = parser.parse_args()
 
     # Determine paths
-    private_key_path = args.private_key or args.private_key_path
+    private_key_path = args.private_key
     if args.public_key_path:
         public_key_path = args.public_key_path
     else:
@@ -147,13 +149,21 @@ def main():
         dirname = os.path.dirname(private_key_path) or '.'
         public_key_path = os.path.join(dirname, 'public_key.pem')
 
-    # Generate keys if private key doesn't exist
-    if not os.path.exists(private_key_path):
-        print(f"Private key not found: {private_key_path}", file=sys.stderr)
+    # Generate keys if either key file is missing (orphan key = broken state)
+    if not os.path.exists(private_key_path) or not os.path.exists(public_key_path):
+        missing = []
+        if not os.path.exists(private_key_path):
+            missing.append(f"private: {private_key_path}")
+        if not os.path.exists(public_key_path):
+            missing.append(f"public: {public_key_path}")
+        print(f"Key pair incomplete. Missing: {', '.join(missing)}", file=sys.stderr)
         print("Generating new Ed25519 key pair...", file=sys.stderr)
         private_key = generate_keypair(private_key_path, public_key_path)
     else:
         private_key = load_private_key(private_key_path)
+        if not isinstance(private_key, Ed25519PrivateKey):
+            print(f"Error: {private_key_path} is not an Ed25519 key", file=sys.stderr)
+            sys.exit(1)
 
     if args.keys_only:
         return
@@ -163,7 +173,9 @@ def main():
         private_key,
         kid=args.kid,
         hours=args.hours,
-        repo_id=args.repo_id
+        repo_id=args.repo_id,
+        repo_type=args.repo_type,
+        revision=args.revision
     )
     print(token)
 
