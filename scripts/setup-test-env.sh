@@ -21,8 +21,8 @@ mkdir -p "${STORAGE_DIR}" "${KEY_DIR}"
 # Generate Ed25519 key pair (if not already present)
 echo "Generating Ed25519 key pair..."
 python3 scripts/generate-ed25519-token.py \
+    "${PRIVATE_KEY}" \
     --keys-only \
-    --private-key "${PRIVATE_KEY}" \
     --public-key "${PUBLIC_KEY}" \
     --kid "${KID}"
 
@@ -59,4 +59,4 @@ echo ""
 echo "To start the Hub API server:"
 echo "  HUB_PRIVATE_KEY_PATH=\$(pwd)/${PRIVATE_KEY} \\"
 echo "  HUB_KID=${KID} \\"
-echo "  ./target/release/hub-api-server"
+echo "  ./target/release/hub-api"

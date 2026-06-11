@@ -148,7 +148,7 @@ impl ServerConfig {
         let trusted_kids = std::env::var("CAS_TRUSTED_KIDS")
             .ok()
             .map(|s| s.split(',').map(|kid| kid.trim().to_string()).collect())
-            .unwrap_or_else(|| vec!["default".to_string()]);
+            .unwrap_or_else(|| vec!["test-kid".to_string()]);
 
         // State database configuration
         let sqlite_path = std::env::var("CAS_STATE_DB_PATH")
