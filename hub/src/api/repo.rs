@@ -1,5 +1,5 @@
-use actix_web::{web, HttpRequest, HttpResponse};
-use crate::auth::token_store::TokenStore;
+use actix_web::{web, HttpResponse};
+use crate::auth::extract::{AuthUser, AuthAny, AuthWrite};
 use crate::metadata::{MetadataStore, Repo, RepoType};
 use serde::{Deserialize, Serialize};
 use chrono::DateTime;
@@ -10,12 +10,6 @@ pub struct CreateRepoRequest {
     pub name: String,
     #[serde(default)]
     pub private: bool,
-}
-
-/// Extract Bearer token from Authorization header
-fn extract_bearer(req: &HttpRequest) -> Option<String> {
-    let auth = req.headers().get("Authorization")?;
-    auth.to_str().ok()?.strip_prefix("Bearer ").map(|s| s.to_string())
 }
 
 /// Convert Repo to HF-compatible JSON response
@@ -43,41 +37,13 @@ fn chrono_datetime(timestamp: i64) -> String {
 
 /// Internal helper to create a repo
 async fn create_repo(
-    req: HttpRequest,
+    auth: AuthUser<AuthWrite>,
     body: web::Json<CreateRepoRequest>,
     repo_type: RepoType,
-    token_store: web::Data<std::sync::Arc<TokenStore>>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
-    // Extract and validate Bearer token
-    let token = match extract_bearer(&req) {
-        Some(t) => t,
-        None => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Missing authorization",
-                "error_type": "AuthenticationError"
-            }));
-        }
-    };
-
-    let info = match token_store.validate_token(&token) {
-        Ok(Some(i)) => i,
-        Ok(None) => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Invalid token",
-                "error_type": "AuthenticationError"
-            }));
-        }
-        Err(e) => {
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("{}", e),
-                "error_type": "InternalError"
-            }));
-        }
-    };
-
     // Namespace is derived from the user's username
-    let namespace = info.username.clone();
+    let namespace = auth.info.username.clone();
     let name = body.name.clone();
     let private = body.private;
 
@@ -117,41 +83,14 @@ pub struct CreateRepoUnifiedRequest {
 
 /// POST /api/repos/create — unified repo creation endpoint used by hf CLI
 pub async fn create_repo_unified(
-    req: HttpRequest,
+    auth: AuthUser<AuthWrite>,
     body: web::Json<CreateRepoUnifiedRequest>,
-    token_store: web::Data<std::sync::Arc<TokenStore>>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
-    let token = match extract_bearer(&req) {
-        Some(t) => t,
-        None => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Missing authorization",
-                "error_type": "AuthenticationError"
-            }));
-        }
-    };
-
-    let info = match token_store.validate_token(&token) {
-        Ok(Some(i)) => i,
-        Ok(None) => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Invalid token",
-                "error_type": "AuthenticationError"
-            }));
-        }
-        Err(e) => {
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("{}", e),
-                "error_type": "InternalError"
-            }));
-        }
-    };
-
-    let namespace = body.organization.clone().unwrap_or_else(|| info.username.clone());
+    let namespace = body.organization.clone().unwrap_or_else(|| auth.info.username.clone());
 
     // Security: Only allow creating repos in own namespace (no org membership yet)
-    if namespace != info.username {
+    if namespace != auth.info.username {
         return HttpResponse::Forbidden().json(serde_json::json!({
             "error": format!("Cannot create repo in namespace '{}': not a member", namespace),
             "error_type": "AuthorizationError"
@@ -195,39 +134,11 @@ pub async fn create_repo_unified(
 
 /// Internal helper to get repo info
 async fn get_repo_info(
-    req: HttpRequest,
+    _auth: AuthUser<AuthAny>,
     path: web::Path<(String, String)>,
     repo_type: RepoType,
-    token_store: web::Data<std::sync::Arc<TokenStore>>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
-    // Extract and validate Bearer token
-    let token = match extract_bearer(&req) {
-        Some(t) => t,
-        None => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Missing authorization",
-                "error_type": "AuthenticationError"
-            }));
-        }
-    };
-
-    match token_store.validate_token(&token) {
-        Ok(Some(_)) => {},
-        Ok(None) => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Invalid token",
-                "error_type": "AuthenticationError"
-            }));
-        }
-        Err(e) => {
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("{}", e),
-                "error_type": "InternalError"
-            }));
-        }
-    };
-
     let (namespace, repo_name) = path.into_inner();
 
     // Get the repo
@@ -254,39 +165,11 @@ async fn get_repo_info(
 
 /// Internal helper to delete a repo
 async fn delete_repo_info(
-    req: HttpRequest,
+    auth: AuthUser<AuthWrite>,
     path: web::Path<(String, String)>,
     repo_type: RepoType,
-    token_store: web::Data<std::sync::Arc<TokenStore>>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
-    // Extract and validate Bearer token
-    let token = match extract_bearer(&req) {
-        Some(t) => t,
-        None => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Missing authorization",
-                "error_type": "AuthenticationError"
-            }));
-        }
-    };
-
-    let info = match token_store.validate_token(&token) {
-        Ok(Some(i)) => i,
-        Ok(None) => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Invalid token",
-                "error_type": "AuthenticationError"
-            }));
-        }
-        Err(e) => {
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("{}", e),
-                "error_type": "InternalError"
-            }));
-        }
-    };
-
     let (namespace, repo_name) = path.into_inner();
 
     // Verify the repo exists and user owns it (namespace matches username)
@@ -309,7 +192,7 @@ async fn delete_repo_info(
     };
 
     // Check ownership: namespace should match username
-    if repo.namespace != info.username {
+    if repo.namespace != auth.info.username {
         return HttpResponse::Forbidden().json(serde_json::json!({
             "error": "You do not have permission to delete this repository",
             "error_type": "AuthorizationError"
@@ -330,150 +213,111 @@ async fn delete_repo_info(
 
 // Model handlers
 pub async fn create_model(
-    req: HttpRequest,
+    auth: AuthUser<AuthWrite>,
     body: web::Json<CreateRepoRequest>,
-    token_store: web::Data<std::sync::Arc<TokenStore>>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
-    create_repo(req, body, RepoType::Model, token_store, metadata).await
+    create_repo(auth, body, RepoType::Model, metadata).await
 }
 
 pub async fn get_repo_model(
-    req: HttpRequest,
+    auth: AuthUser<AuthAny>,
     path: web::Path<(String, String)>,
-    token_store: web::Data<std::sync::Arc<TokenStore>>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
-    get_repo_info(req, path, RepoType::Model, token_store, metadata).await
+    get_repo_info(auth, path, RepoType::Model, metadata).await
 }
 
 pub async fn delete_repo_model(
-    req: HttpRequest,
+    auth: AuthUser<AuthWrite>,
     path: web::Path<(String, String)>,
-    token_store: web::Data<std::sync::Arc<TokenStore>>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
-    delete_repo_info(req, path, RepoType::Model, token_store, metadata).await
+    delete_repo_info(auth, path, RepoType::Model, metadata).await
 }
 
 // Dataset handlers
 pub async fn create_dataset(
-    req: HttpRequest,
+    auth: AuthUser<AuthWrite>,
     body: web::Json<CreateRepoRequest>,
-    token_store: web::Data<std::sync::Arc<TokenStore>>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
-    create_repo(req, body, RepoType::Dataset, token_store, metadata).await
+    create_repo(auth, body, RepoType::Dataset, metadata).await
 }
 
 pub async fn get_repo_dataset(
-    req: HttpRequest,
+    auth: AuthUser<AuthAny>,
     path: web::Path<(String, String)>,
-    token_store: web::Data<std::sync::Arc<TokenStore>>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
-    get_repo_info(req, path, RepoType::Dataset, token_store, metadata).await
+    get_repo_info(auth, path, RepoType::Dataset, metadata).await
 }
 
 pub async fn delete_repo_dataset(
-    req: HttpRequest,
+    auth: AuthUser<AuthWrite>,
     path: web::Path<(String, String)>,
-    token_store: web::Data<std::sync::Arc<TokenStore>>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
-    delete_repo_info(req, path, RepoType::Dataset, token_store, metadata).await
+    delete_repo_info(auth, path, RepoType::Dataset, metadata).await
 }
 
 // Space handlers
 pub async fn create_space(
-    req: HttpRequest,
+    auth: AuthUser<AuthWrite>,
     body: web::Json<CreateRepoRequest>,
-    token_store: web::Data<std::sync::Arc<TokenStore>>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
-    create_repo(req, body, RepoType::Space, token_store, metadata).await
+    create_repo(auth, body, RepoType::Space, metadata).await
 }
 
 pub async fn get_repo_space(
-    req: HttpRequest,
+    auth: AuthUser<AuthAny>,
     path: web::Path<(String, String)>,
-    token_store: web::Data<std::sync::Arc<TokenStore>>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
-    get_repo_info(req, path, RepoType::Space, token_store, metadata).await
+    get_repo_info(auth, path, RepoType::Space, metadata).await
 }
 
 pub async fn delete_repo_space(
-    req: HttpRequest,
+    auth: AuthUser<AuthWrite>,
     path: web::Path<(String, String)>,
-    token_store: web::Data<std::sync::Arc<TokenStore>>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
-    delete_repo_info(req, path, RepoType::Space, token_store, metadata).await
+    delete_repo_info(auth, path, RepoType::Space, metadata).await
 }
 
 /// GET /api/{models,datasets,spaces}/{ns}/{repo}/revision/{rev}
 /// Returns revision info. For new repos with no commits, returns empty revision.
 pub async fn get_revision_model(
-    req: HttpRequest,
+    auth: AuthUser<AuthAny>,
     path: web::Path<(String, String, String)>,
-    token_store: web::Data<std::sync::Arc<TokenStore>>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
-    get_revision_handler(req, path, RepoType::Model, token_store, metadata).await
+    get_revision_handler(auth, path, RepoType::Model, metadata).await
 }
 
 pub async fn get_revision_dataset(
-    req: HttpRequest,
+    auth: AuthUser<AuthAny>,
     path: web::Path<(String, String, String)>,
-    token_store: web::Data<std::sync::Arc<TokenStore>>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
-    get_revision_handler(req, path, RepoType::Dataset, token_store, metadata).await
+    get_revision_handler(auth, path, RepoType::Dataset, metadata).await
 }
 
 pub async fn get_revision_space(
-    req: HttpRequest,
+    auth: AuthUser<AuthAny>,
     path: web::Path<(String, String, String)>,
-    token_store: web::Data<std::sync::Arc<TokenStore>>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
-    get_revision_handler(req, path, RepoType::Space, token_store, metadata).await
+    get_revision_handler(auth, path, RepoType::Space, metadata).await
 }
 
 async fn get_revision_handler(
-    req: HttpRequest,
+    _auth: AuthUser<AuthAny>,
     path: web::Path<(String, String, String)>,
     repo_type: RepoType,
-    token_store: web::Data<std::sync::Arc<TokenStore>>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
-    let token = match extract_bearer(&req) {
-        Some(t) => t,
-        None => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Missing authorization",
-                "error_type": "AuthenticationError"
-            }));
-        }
-    };
-
-    match token_store.validate_token(&token) {
-        Ok(Some(_)) => {},
-        Ok(None) => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Invalid token",
-                "error_type": "AuthenticationError"
-            }));
-        }
-        Err(_) => {
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Token validation failed",
-                "error_type": "InternalError"
-            }));
-        }
-    };
-
     let (namespace, repo_name, revision) = path.into_inner();
 
     // Check repo exists
@@ -537,6 +381,7 @@ async fn get_revision_handler(
 mod tests {
     use super::*;
     use actix_web::{test as actix_test, App};
+    use crate::auth::token_store::TokenStore;
     use crate::metadata::SqliteMetadataStore;
 
     fn setup_test_env() -> (std::sync::Arc<TokenStore>, std::sync::Arc<dyn MetadataStore>) {

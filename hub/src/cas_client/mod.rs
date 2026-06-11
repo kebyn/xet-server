@@ -130,7 +130,7 @@ impl CasClient {
         Ok(resp_body)
     }
 
-    /// Upload a blob to CAS via LFS endpoint
+    /// Upload a blob to CAS via LFS endpoint (buffered version)
     pub async fn proxy_lfs_upload(&self, oid: &str, data: bytes::Bytes, token: &str) -> Result<(), HubError> {
         let url = format!("{}/lfs/objects/{}", self.base_url, oid);
         let resp = self.client()

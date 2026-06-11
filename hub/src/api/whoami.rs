@@ -1,55 +1,30 @@
-use actix_web::{web, HttpRequest, HttpResponse};
-use crate::auth::token_store::TokenStore;
+use actix_web::HttpResponse;
+use crate::auth::extract::AuthUser;
+use crate::auth::extract::AuthAny;
 
 /// GET /api/whoami - Get current user info from token
 pub async fn whoami(
-    req: HttpRequest,
-    token_store: web::Data<std::sync::Arc<TokenStore>>,
+    auth: AuthUser<AuthAny>,
 ) -> HttpResponse {
-    let token = match extract_bearer(&req) {
-        Some(t) => t,
-        None => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Missing authorization",
-                "error_type": "AuthenticationError"
-            }));
-        }
-    };
-
-    match token_store.validate_token(&token) {
-        Ok(Some(info)) => HttpResponse::Ok().json(serde_json::json!({
-            "name": info.username,
-            "email": "",
-            "orgs": [],
-            "auth": {
-                "type": "access_token",
-                "accessToken": {
-                    "name": info.token_name,
-                    "role": info.scope
-                }
+    HttpResponse::Ok().json(serde_json::json!({
+        "name": auth.info.username,
+        "email": "",
+        "orgs": [],
+        "auth": {
+            "type": "access_token",
+            "accessToken": {
+                "name": auth.info.token_name,
+                "role": auth.info.scope
             }
-        })),
-        Ok(None) => HttpResponse::Unauthorized().json(serde_json::json!({
-            "error": "Invalid token",
-            "error_type": "AuthenticationError"
-        })),
-        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
-            "error": format!("{}", e),
-            "error_type": "InternalError"
-        })),
-    }
-}
-
-/// Extract Bearer token from Authorization header
-pub fn extract_bearer(req: &HttpRequest) -> Option<String> {
-    let auth = req.headers().get("Authorization")?;
-    auth.to_str().ok()?.strip_prefix("Bearer ").map(|s| s.to_string())
+        }
+    }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use actix_web::{test, App};
+    use actix_web::{test, App, web};
+    use crate::auth::token_store::TokenStore;
 
     #[actix_web::test]
     async fn test_whoami_valid_token() {
@@ -111,34 +86,5 @@ mod tests {
 
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), actix_web::http::StatusCode::UNAUTHORIZED);
-    }
-
-    #[actix_web::test]
-    async fn test_extract_bearer() {
-        let req = actix_web::test::TestRequest::default()
-            .insert_header(("Authorization", "Bearer hf_test123"))
-            .to_http_request();
-
-        let token = extract_bearer(&req);
-        assert_eq!(token, Some("hf_test123".to_string()));
-    }
-
-    #[actix_web::test]
-    async fn test_extract_bearer_missing_header() {
-        let req = actix_web::test::TestRequest::default()
-            .to_http_request();
-
-        let token = extract_bearer(&req);
-        assert!(token.is_none());
-    }
-
-    #[actix_web::test]
-    async fn test_extract_bearer_wrong_prefix() {
-        let req = actix_web::test::TestRequest::default()
-            .insert_header(("Authorization", "Basic hf_test123"))
-            .to_http_request();
-
-        let token = extract_bearer(&req);
-        assert!(token.is_none());
     }
 }

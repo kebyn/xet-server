@@ -1,5 +1,6 @@
-use actix_web::{web, HttpRequest, HttpResponse};
-use crate::auth::token_store::TokenStore;
+use actix_web::{web, HttpResponse};
+use crate::auth::extract::{AuthUser, AuthRead, AuthWrite};
+use crate::auth::token_store::TokenInfo;
 use crate::auth::xet_signer::XetSigner;
 use crate::metadata::{MetadataStore, RepoType};
 use serde::{Deserialize, Serialize};
@@ -15,53 +16,16 @@ pub struct TokenExchangeResponse {
 
 /// Internal helper to handle token exchange
 async fn do_exchange(
-    req: &HttpRequest,
+    info: &TokenInfo,
     path_namespace: &str,
     path_repo: &str,
     path_revision: &str,
     required_scope: &str,
     repo_type: RepoType,
-    token_store: &std::sync::Arc<TokenStore>,
     xet_signer: &std::sync::Arc<XetSigner>,
     metadata: &std::sync::Arc<dyn MetadataStore>,
     cas_url: &str,
 ) -> HttpResponse {
-    // Extract and validate Bearer token
-    let token = match extract_bearer(req) {
-        Some(t) => t,
-        None => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Missing authorization",
-                "error_type": "AuthenticationError"
-            }));
-        }
-    };
-
-    // Validate the hf_ token
-    let info = match token_store.validate_token(&token) {
-        Ok(Some(i)) => i,
-        Ok(None) => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Invalid token",
-                "error_type": "AuthenticationError"
-            }));
-        }
-        Err(e) => {
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("{}", e),
-                "error_type": "InternalError"
-            }));
-        }
-    };
-
-    // Check scope for write operations
-    if required_scope == "write" && info.scope != "write" {
-        return HttpResponse::Forbidden().json(serde_json::json!({
-            "error": "Token does not have write scope",
-            "error_type": "AuthorizationError"
-        }));
-    }
-
     // Check repo exists
     let repo = match metadata.get_repo(path_namespace, path_repo, repo_type).await {
         Ok(r) => r,
@@ -110,30 +74,22 @@ async fn do_exchange(
     })
 }
 
-/// Extract Bearer token from Authorization header
-fn extract_bearer(req: &HttpRequest) -> Option<String> {
-    let auth = req.headers().get("Authorization")?;
-    auth.to_str().ok()?.strip_prefix("Bearer ").map(|s| s.to_string())
-}
-
 // Model endpoints
 pub async fn exchange_model_read(
-    req: HttpRequest,
+    auth: AuthUser<AuthRead>,
     path: web::Path<(String, String, String)>,
-    token_store: web::Data<std::sync::Arc<TokenStore>>,
     xet_signer: web::Data<std::sync::Arc<XetSigner>>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
     config: web::Data<crate::config::HubConfig>,
 ) -> HttpResponse {
     let (namespace, repo, revision) = path.into_inner();
     do_exchange(
-        &req,
+        &auth.info,
         &namespace,
         &repo,
         &revision,
         "read",
         RepoType::Model,
-        &token_store,
         &xet_signer,
         &metadata,
         &config.cas.base_url,
@@ -141,22 +97,20 @@ pub async fn exchange_model_read(
 }
 
 pub async fn exchange_model_write(
-    req: HttpRequest,
+    auth: AuthUser<AuthWrite>,
     path: web::Path<(String, String, String)>,
-    token_store: web::Data<std::sync::Arc<TokenStore>>,
     xet_signer: web::Data<std::sync::Arc<XetSigner>>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
     config: web::Data<crate::config::HubConfig>,
 ) -> HttpResponse {
     let (namespace, repo, revision) = path.into_inner();
     do_exchange(
-        &req,
+        &auth.info,
         &namespace,
         &repo,
         &revision,
         "write",
         RepoType::Model,
-        &token_store,
         &xet_signer,
         &metadata,
         &config.cas.base_url,
@@ -165,22 +119,20 @@ pub async fn exchange_model_write(
 
 // Dataset endpoints
 pub async fn exchange_dataset_read(
-    req: HttpRequest,
+    auth: AuthUser<AuthRead>,
     path: web::Path<(String, String, String)>,
-    token_store: web::Data<std::sync::Arc<TokenStore>>,
     xet_signer: web::Data<std::sync::Arc<XetSigner>>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
     config: web::Data<crate::config::HubConfig>,
 ) -> HttpResponse {
     let (namespace, repo, revision) = path.into_inner();
     do_exchange(
-        &req,
+        &auth.info,
         &namespace,
         &repo,
         &revision,
         "read",
         RepoType::Dataset,
-        &token_store,
         &xet_signer,
         &metadata,
         &config.cas.base_url,
@@ -188,22 +140,20 @@ pub async fn exchange_dataset_read(
 }
 
 pub async fn exchange_dataset_write(
-    req: HttpRequest,
+    auth: AuthUser<AuthWrite>,
     path: web::Path<(String, String, String)>,
-    token_store: web::Data<std::sync::Arc<TokenStore>>,
     xet_signer: web::Data<std::sync::Arc<XetSigner>>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
     config: web::Data<crate::config::HubConfig>,
 ) -> HttpResponse {
     let (namespace, repo, revision) = path.into_inner();
     do_exchange(
-        &req,
+        &auth.info,
         &namespace,
         &repo,
         &revision,
         "write",
         RepoType::Dataset,
-        &token_store,
         &xet_signer,
         &metadata,
         &config.cas.base_url,
@@ -212,22 +162,20 @@ pub async fn exchange_dataset_write(
 
 // Space endpoints
 pub async fn exchange_space_read(
-    req: HttpRequest,
+    auth: AuthUser<AuthRead>,
     path: web::Path<(String, String, String)>,
-    token_store: web::Data<std::sync::Arc<TokenStore>>,
     xet_signer: web::Data<std::sync::Arc<XetSigner>>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
     config: web::Data<crate::config::HubConfig>,
 ) -> HttpResponse {
     let (namespace, repo, revision) = path.into_inner();
     do_exchange(
-        &req,
+        &auth.info,
         &namespace,
         &repo,
         &revision,
         "read",
         RepoType::Space,
-        &token_store,
         &xet_signer,
         &metadata,
         &config.cas.base_url,
@@ -235,22 +183,20 @@ pub async fn exchange_space_read(
 }
 
 pub async fn exchange_space_write(
-    req: HttpRequest,
+    auth: AuthUser<AuthWrite>,
     path: web::Path<(String, String, String)>,
-    token_store: web::Data<std::sync::Arc<TokenStore>>,
     xet_signer: web::Data<std::sync::Arc<XetSigner>>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
     config: web::Data<crate::config::HubConfig>,
 ) -> HttpResponse {
     let (namespace, repo, revision) = path.into_inner();
     do_exchange(
-        &req,
+        &auth.info,
         &namespace,
         &repo,
         &revision,
         "write",
         RepoType::Space,
-        &token_store,
         &xet_signer,
         &metadata,
         &config.cas.base_url,
@@ -261,6 +207,7 @@ pub async fn exchange_space_write(
 mod tests {
     use super::*;
     use actix_web::{test, App};
+    use crate::auth::token_store::TokenStore;
     use crate::metadata::SqliteMetadataStore;
     use crate::config::HubConfig;
     use ed25519_dalek::SigningKey;

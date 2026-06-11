@@ -247,6 +247,8 @@ pub async fn lfs_batch(
 }
 
 /// Handle LFS object upload
+/// Note: Currently uses buffered upload with 512MB limit.
+/// Future improvement: Implement true streaming with awc send_stream.
 pub async fn lfs_upload(
     req: HttpRequest,
     path: web::Path<String>,
@@ -280,6 +282,20 @@ pub async fn lfs_upload(
         return HttpResponse::Unauthorized().json(serde_json::json!({
             "error": "Invalid or expired proxy token",
             "error_type": "AuthenticationError"
+        }));
+    }
+
+    // Verify content hash matches OID (SHA256)
+    use sha2::{Sha256, Digest};
+    let computed_hash = hex::encode(Sha256::digest(&body));
+    if computed_hash != oid {
+        tracing::warn!(
+            "Hash mismatch for OID {}: computed {} ({} bytes)",
+            oid, computed_hash, body.len()
+        );
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "Hash mismatch: uploaded content does not match OID",
+            "error_type": "ValidationError"
         }));
     }
 

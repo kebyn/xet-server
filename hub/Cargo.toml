@@ -27,6 +27,7 @@ async-trait = "0.1"
 uuid = { version = "1", features = ["v4"] }
 rand = "0.8"
 bytes = "1.5"
+futures-util = "0.3"
 url = "2.5"
 percent-encoding = "2.3"
 chrono = { version = "0.4", features = ["serde"] }
