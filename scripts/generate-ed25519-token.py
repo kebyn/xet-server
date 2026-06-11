@@ -1,18 +1,32 @@
 #!/usr/bin/env python3
 """
-Generate Ed25519 JWT token for Xet server testing.
+Generate Ed25519 key pair and JWT tokens for Xet server testing.
 
 Usage:
-    python3 scripts/generate-ed25519-token.py [private_key_pem] [hours]
+    # Generate key pair + token (auto-creates keys if missing):
+    python3 scripts/generate-ed25519-token.py
 
-Example:
-    python3 scripts/generate-ed25519-token.py test-data/xet-private.pem 24
+    # Use existing key:
+    python3 scripts/generate-ed25519-token.py private_key.pem
+
+    # Custom kid and output paths:
+    python3 scripts/generate-ed25519-token.py --kid test-kid \
+        --private-key test-data/keys/private.pem \
+        --public-key test-data/keys/public.pem
+
+    # Just generate keys (no token):
+    python3 scripts/generate-ed25519-token.py --keys-only
+
+    # Generate token with specific hours:
+    python3 scripts/generate-ed25519-token.py private_key.pem 48
 """
 
 import sys
+import os
 import time
 import json
 import base64
+import argparse
 
 try:
     from cryptography.hazmat.primitives import serialization
@@ -25,34 +39,64 @@ def b64url_encode(data):
     """Base64url encode without padding."""
     return base64.urlsafe_b64encode(data).rstrip(b'=').decode('ascii')
 
-def generate_token(private_key_path, hours=24):
-    """Generate an Ed25519 JWT token with xet claims."""
-    # Load private key
-    with open(private_key_path, 'rb') as f:
-        private_key = serialization.load_pem_private_key(f.read(), password=None)
+def generate_keypair(private_key_path, public_key_path):
+    """Generate a new Ed25519 key pair and save as PEM files."""
+    private_key = Ed25519PrivateKey.generate()
 
-    # Get public key for kid
-    public_key = private_key.public_key()
-    public_bytes = public_key.public_bytes(
-        encoding=serialization.Encoding.Raw,
-        format=serialization.PublicFormat.Raw
+    # Serialize private key as PKCS8 PEM
+    private_pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption()
     )
-    kid = public_bytes[:8].hex()
 
-    # Create claims
+    # Serialize public key as SPKI PEM
+    public_pem = private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+
+    # Ensure parent directories exist
+    for path in [private_key_path, public_key_path]:
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+
+    with open(private_key_path, 'wb') as f:
+        f.write(private_pem)
+    os.chmod(private_key_path, 0o600)
+
+    with open(public_key_path, 'wb') as f:
+        f.write(public_pem)
+
+    print(f"Generated key pair:", file=sys.stderr)
+    print(f"  Private: {private_key_path}", file=sys.stderr)
+    print(f"  Public:  {public_key_path}", file=sys.stderr)
+
+    return private_key
+
+def load_private_key(private_key_path):
+    """Load an Ed25519 private key from PEM file."""
+    with open(private_key_path, 'rb') as f:
+        return serialization.load_pem_private_key(f.read(), password=None)
+
+def generate_token(private_key, kid, hours=24, repo_id="test/repo", repo_type="model", revision="main"):
+    """Generate an Ed25519 JWT token with xet claims."""
+    # Create claims (matching hub XetSigner format)
     now = int(time.time())
     claims = {
         "sub": "test-user",
         "scope": "read write",
-        "repo_id": "test/repo",
-        "repo_type": "model",
-        "revision": "main",
+        "repo_id": repo_id,
+        "repo_type": repo_type,
+        "revision": revision,
         "exp": now + (hours * 3600),
         "iat": now,
-        "kid": kid
+        "kid": kid,
+        "token_type": "user"
     }
 
-    # Create header
+    # Create header (kid must match hub's configured kid)
     header = {
         "alg": "EdDSA",
         "typ": "JWT",
@@ -75,9 +119,53 @@ def generate_token(private_key_path, hours=24):
     token = f"xet_{header_b64}.{payload_b64}.{sig_b64}"
     return token
 
-if __name__ == "__main__":
-    private_key_path = sys.argv[1] if len(sys.argv) > 1 else "test-data/xet-private.pem"
-    hours = int(sys.argv[2]) if len(sys.argv) > 2 else 24
+def main():
+    parser = argparse.ArgumentParser(description="Generate Ed25519 key pair and JWT tokens")
+    parser.add_argument('private_key', nargs='?', default=None,
+                        help='Path to private key PEM file (default: private_key.pem)')
+    parser.add_argument('hours', nargs='?', type=int, default=24,
+                        help='Token validity in hours (default: 24)')
+    parser.add_argument('--kid', default='test-kid',
+                        help='Key ID (must match CAS trusted_kids, default: test-kid)')
+    parser.add_argument('--private-key', dest='private_key_path', default='private_key.pem',
+                        help='Path to private key PEM (default: private_key.pem)')
+    parser.add_argument('--public-key', dest='public_key_path', default=None,
+                        help='Path to public key PEM (default: <private_key_dir>/public_key.pem)')
+    parser.add_argument('--keys-only', action='store_true',
+                        help='Only generate key pair, no token')
+    parser.add_argument('--repo-id', default='test/repo',
+                        help='Repository ID for token claims')
 
-    token = generate_token(private_key_path, hours)
+    args = parser.parse_args()
+
+    # Determine paths
+    private_key_path = args.private_key or args.private_key_path
+    if args.public_key_path:
+        public_key_path = args.public_key_path
+    else:
+        # Default: same directory as private key, named public_key.pem
+        dirname = os.path.dirname(private_key_path) or '.'
+        public_key_path = os.path.join(dirname, 'public_key.pem')
+
+    # Generate keys if private key doesn't exist
+    if not os.path.exists(private_key_path):
+        print(f"Private key not found: {private_key_path}", file=sys.stderr)
+        print("Generating new Ed25519 key pair...", file=sys.stderr)
+        private_key = generate_keypair(private_key_path, public_key_path)
+    else:
+        private_key = load_private_key(private_key_path)
+
+    if args.keys_only:
+        return
+
+    # Generate token
+    token = generate_token(
+        private_key,
+        kid=args.kid,
+        hours=args.hours,
+        repo_id=args.repo_id
+    )
     print(token)
+
+if __name__ == "__main__":
+    main()
