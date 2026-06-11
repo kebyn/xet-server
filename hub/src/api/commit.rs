@@ -1,5 +1,5 @@
-use actix_web::{web, HttpRequest, HttpResponse};
-use crate::auth::token_store::TokenStore;
+use actix_web::{web, HttpResponse};
+use crate::auth::extract::{AuthUser, AuthWrite};
 use crate::auth::xet_signer::XetSigner;
 use crate::cas_client::CasClient;
 use crate::metadata::{FileEntry, MetadataStore, RepoType, Revision};
@@ -59,12 +59,6 @@ pub struct CommitResponse {
     pub pr_num: Option<u64>,
 }
 
-/// Extract Bearer token from Authorization header
-fn extract_bearer(req: &HttpRequest) -> Option<String> {
-    let auth = req.headers().get("Authorization")?;
-    auth.to_str().ok()?.strip_prefix("Bearer ").map(|s| s.to_string())
-}
-
 /// Get current Unix timestamp
 fn now_timestamp() -> i64 {
     SystemTime::now()
@@ -93,50 +87,14 @@ fn decode_base64_content(content: &str) -> Result<Vec<u8>, String> {
 
 /// Internal helper for commit handling
 async fn handle_commit(
-    req: HttpRequest,
+    auth: AuthUser<AuthWrite>,
     path: web::Path<(String, String, String)>,
     body: String,
     repo_type: RepoType,
-    token_store: web::Data<std::sync::Arc<TokenStore>>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
     cas_client: web::Data<std::sync::Arc<CasClient>>,
     signer: web::Data<std::sync::Arc<XetSigner>>,
 ) -> HttpResponse {
-    // Extract and validate Bearer token
-    let token = match extract_bearer(&req) {
-        Some(t) => t,
-        None => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Missing authorization",
-                "error_type": "AuthenticationError"
-            }));
-        }
-    };
-
-    let info = match token_store.validate_token(&token) {
-        Ok(Some(i)) => i,
-        Ok(None) => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Invalid token",
-                "error_type": "AuthenticationError"
-            }));
-        }
-        Err(e) => {
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("{}", e),
-                "error_type": "InternalError"
-            }));
-        }
-    };
-
-    // Check write scope
-    if info.scope != "write" {
-        return HttpResponse::Forbidden().json(serde_json::json!({
-            "error": "Token does not have write scope",
-            "error_type": "AuthorizationError"
-        }));
-    }
-
     let (namespace, repo_name, _revision) = path.into_inner();
 
     // Get the repo
@@ -353,7 +311,7 @@ async fn handle_commit(
         repo_id: repo.id,
         parent: current_head.clone(),
         message: header.summary.clone(),
-        author: info.username.clone(),
+        author: auth.info.username.clone(),
         created_at: timestamp,
     };
 
@@ -385,47 +343,45 @@ async fn handle_commit(
 
 // Model commit handler
 pub async fn commit_model(
-    req: HttpRequest,
+    auth: AuthUser<AuthWrite>,
     path: web::Path<(String, String, String)>,
     body: String,
-    token_store: web::Data<std::sync::Arc<TokenStore>>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
     cas_client: web::Data<std::sync::Arc<CasClient>>,
     signer: web::Data<std::sync::Arc<XetSigner>>,
 ) -> HttpResponse {
-    handle_commit(req, path, body, RepoType::Model, token_store, metadata, cas_client, signer).await
+    handle_commit(auth, path, body, RepoType::Model, metadata, cas_client, signer).await
 }
 
 // Dataset commit handler
 pub async fn commit_dataset(
-    req: HttpRequest,
+    auth: AuthUser<AuthWrite>,
     path: web::Path<(String, String, String)>,
     body: String,
-    token_store: web::Data<std::sync::Arc<TokenStore>>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
     cas_client: web::Data<std::sync::Arc<CasClient>>,
     signer: web::Data<std::sync::Arc<XetSigner>>,
 ) -> HttpResponse {
-    handle_commit(req, path, body, RepoType::Dataset, token_store, metadata, cas_client, signer).await
+    handle_commit(auth, path, body, RepoType::Dataset, metadata, cas_client, signer).await
 }
 
 // Space commit handler
 pub async fn commit_space(
-    req: HttpRequest,
+    auth: AuthUser<AuthWrite>,
     path: web::Path<(String, String, String)>,
     body: String,
-    token_store: web::Data<std::sync::Arc<TokenStore>>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
     cas_client: web::Data<std::sync::Arc<CasClient>>,
     signer: web::Data<std::sync::Arc<XetSigner>>,
 ) -> HttpResponse {
-    handle_commit(req, path, body, RepoType::Space, token_store, metadata, cas_client, signer).await
+    handle_commit(auth, path, body, RepoType::Space, metadata, cas_client, signer).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use actix_web::{test as actix_test, App};
+    use crate::auth::token_store::TokenStore;
     use crate::metadata::SqliteMetadataStore;
     use crate::config::CasSettings;
     use ed25519_dalek::SigningKey;

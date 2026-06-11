@@ -1893,6 +1893,7 @@ dependencies = [
  "bytes",
  "chrono",
  "ed25519-dalek",
+ "futures-util",
  "hex",
  "percent-encoding",
  "pkcs8",

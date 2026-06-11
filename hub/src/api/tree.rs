@@ -1,5 +1,5 @@
 use actix_web::{web, HttpRequest, HttpResponse};
-use crate::auth::token_store::TokenStore;
+use crate::auth::extract::{AuthUser, AuthAny};
 use crate::metadata::{FileEntry, MetadataStore, RepoType};
 use serde::Serialize;
 use std::collections::HashSet;
@@ -12,12 +12,6 @@ pub struct TreeEntry {
     pub oid: Option<String>,
     pub size: u64,
     pub path: String,
-}
-
-/// Extract Bearer token from Authorization header
-fn extract_bearer(req: &HttpRequest) -> Option<String> {
-    let auth = req.headers().get("Authorization")?;
-    auth.to_str().ok()?.strip_prefix("Bearer ").map(|s| s.to_string())
 }
 
 /// Resolve a revision name/branch to a commit ID
@@ -75,36 +69,9 @@ async fn handle_tree(
     req: HttpRequest,
     path: web::Path<(String, String, String, String)>,
     repo_type: RepoType,
-    token_store: web::Data<std::sync::Arc<TokenStore>>,
+    _auth: AuthUser<AuthAny>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
-    // Extract and validate Bearer token
-    let token = match extract_bearer(&req) {
-        Some(t) => t,
-        None => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Missing authorization",
-                "error_type": "AuthenticationError"
-            }));
-        }
-    };
-
-    match token_store.validate_token(&token) {
-        Ok(Some(_)) => {},
-        Ok(None) => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Invalid token",
-                "error_type": "AuthenticationError"
-            }));
-        }
-        Err(e) => {
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("{}", e),
-                "error_type": "InternalError"
-            }));
-        }
-    };
-
     let (namespace, repo_name, revision, tree_path) = path.into_inner();
 
     // Get the repo
@@ -220,30 +187,30 @@ async fn handle_tree(
 pub async fn tree_model(
     req: HttpRequest,
     path: web::Path<(String, String, String, String)>,
-    token_store: web::Data<std::sync::Arc<TokenStore>>,
+    auth: AuthUser<AuthAny>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
-    handle_tree(req, path, RepoType::Model, token_store, metadata).await
+    handle_tree(req, path, RepoType::Model, auth, metadata).await
 }
 
 // Dataset tree handler
 pub async fn tree_dataset(
     req: HttpRequest,
     path: web::Path<(String, String, String, String)>,
-    token_store: web::Data<std::sync::Arc<TokenStore>>,
+    auth: AuthUser<AuthAny>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
-    handle_tree(req, path, RepoType::Dataset, token_store, metadata).await
+    handle_tree(req, path, RepoType::Dataset, auth, metadata).await
 }
 
 // Space tree handler
 pub async fn tree_space(
     req: HttpRequest,
     path: web::Path<(String, String, String, String)>,
-    token_store: web::Data<std::sync::Arc<TokenStore>>,
+    auth: AuthUser<AuthAny>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
-    handle_tree(req, path, RepoType::Space, token_store, metadata).await
+    handle_tree(req, path, RepoType::Space, auth, metadata).await
 }
 
 // Generic no-path tree handler
@@ -251,45 +218,46 @@ async fn handle_tree_no_path(
     req: HttpRequest,
     path: web::Path<(String, String, String)>,
     repo_type: RepoType,
-    token_store: web::Data<std::sync::Arc<TokenStore>>,
+    auth: AuthUser<AuthAny>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
     let (ns, repo, rev) = path.into_inner();
     let full_path = web::Path::from((ns, repo, rev, "".to_string()));
-    handle_tree(req, full_path, repo_type, token_store, metadata).await
+    handle_tree(req, full_path, repo_type, auth, metadata).await
 }
 
 pub async fn tree_model_no_path(
     req: HttpRequest,
     path: web::Path<(String, String, String)>,
-    token_store: web::Data<std::sync::Arc<TokenStore>>,
+    auth: AuthUser<AuthAny>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
-    handle_tree_no_path(req, path, RepoType::Model, token_store, metadata).await
+    handle_tree_no_path(req, path, RepoType::Model, auth, metadata).await
 }
 
 pub async fn tree_dataset_no_path(
     req: HttpRequest,
     path: web::Path<(String, String, String)>,
-    token_store: web::Data<std::sync::Arc<TokenStore>>,
+    auth: AuthUser<AuthAny>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
-    handle_tree_no_path(req, path, RepoType::Dataset, token_store, metadata).await
+    handle_tree_no_path(req, path, RepoType::Dataset, auth, metadata).await
 }
 
 pub async fn tree_space_no_path(
     req: HttpRequest,
     path: web::Path<(String, String, String)>,
-    token_store: web::Data<std::sync::Arc<TokenStore>>,
+    auth: AuthUser<AuthAny>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
-    handle_tree_no_path(req, path, RepoType::Space, token_store, metadata).await
+    handle_tree_no_path(req, path, RepoType::Space, auth, metadata).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use actix_web::{test as actix_test, App};
+    use crate::auth::token_store::TokenStore;
     use crate::metadata::{FileEntry, Revision, SqliteMetadataStore};
 
     fn setup_test_env_with_files() -> (std::sync::Arc<TokenStore>, std::sync::Arc<dyn MetadataStore>) {

@@ -1,13 +1,7 @@
 use actix_web::{web, HttpRequest, HttpResponse};
-use crate::auth::token_store::TokenStore;
+use crate::auth::extract::{AuthUser, AuthRead};
 use crate::metadata::{MetadataStore, RepoType};
 use crate::config::HubConfig;
-
-/// Extract Bearer token from Authorization header
-fn extract_bearer(req: &HttpRequest) -> Option<String> {
-    let auth = req.headers().get("Authorization")?;
-    auth.to_str().ok()?.strip_prefix("Bearer ").map(|s| s.to_string())
-}
 
 /// Resolve a revision name/branch to a commit ID
 async fn resolve_revision(
@@ -42,45 +36,10 @@ async fn handle_resolve(
     req: HttpRequest,
     path: web::Path<(String, String, String, String)>,
     repo_type: RepoType,
-    token_store: web::Data<std::sync::Arc<TokenStore>>,
+    _auth: AuthUser<AuthRead>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
     config: web::Data<HubConfig>,
 ) -> HttpResponse {
-    // Extract and validate Bearer token
-    let token = match extract_bearer(&req) {
-        Some(t) => t,
-        None => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Missing authorization",
-                "error_type": "AuthenticationError"
-            }));
-        }
-    };
-
-    let info = match token_store.validate_token(&token) {
-        Ok(Some(i)) => i,
-        Ok(None) => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Invalid token",
-                "error_type": "AuthenticationError"
-            }));
-        }
-        Err(e) => {
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("{}", e),
-                "error_type": "InternalError"
-            }));
-        }
-    };
-
-    // C5: Check that scope is read or write (exact match to prevent compound scope bypass)
-    if info.scope != "read" && info.scope != "write" {
-        return HttpResponse::Forbidden().json(serde_json::json!({
-            "error": "Read scope required",
-            "error_type": "AuthorizationError"
-        }));
-    }
-
     let (namespace, repo_name, revision, file_path) = path.into_inner();
 
     // Get the repo
@@ -178,39 +137,40 @@ async fn handle_resolve(
 pub async fn resolve_model(
     req: HttpRequest,
     path: web::Path<(String, String, String, String)>,
-    token_store: web::Data<std::sync::Arc<TokenStore>>,
+    auth: AuthUser<AuthRead>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
     config: web::Data<HubConfig>,
 ) -> HttpResponse {
-    handle_resolve(req, path, RepoType::Model, token_store, metadata, config).await
+    handle_resolve(req, path, RepoType::Model, auth, metadata, config).await
 }
 
 // Dataset resolve handler
 pub async fn resolve_dataset(
     req: HttpRequest,
     path: web::Path<(String, String, String, String)>,
-    token_store: web::Data<std::sync::Arc<TokenStore>>,
+    auth: AuthUser<AuthRead>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
     config: web::Data<HubConfig>,
 ) -> HttpResponse {
-    handle_resolve(req, path, RepoType::Dataset, token_store, metadata, config).await
+    handle_resolve(req, path, RepoType::Dataset, auth, metadata, config).await
 }
 
 // Space resolve handler
 pub async fn resolve_space(
     req: HttpRequest,
     path: web::Path<(String, String, String, String)>,
-    token_store: web::Data<std::sync::Arc<TokenStore>>,
+    auth: AuthUser<AuthRead>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
     config: web::Data<HubConfig>,
 ) -> HttpResponse {
-    handle_resolve(req, path, RepoType::Space, token_store, metadata, config).await
+    handle_resolve(req, path, RepoType::Space, auth, metadata, config).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use actix_web::{test as actix_test, App};
+    use crate::auth::token_store::TokenStore;
     use crate::metadata::{FileEntry, Revision, SqliteMetadataStore};
 
     fn setup_test_env_with_files() -> (

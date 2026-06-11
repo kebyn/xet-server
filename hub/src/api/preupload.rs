@@ -1,5 +1,5 @@
-use actix_web::{web, HttpRequest, HttpResponse};
-use crate::auth::token_store::TokenStore;
+use actix_web::{web, HttpResponse};
+use crate::auth::extract::{AuthUser, AuthWrite};
 use crate::metadata::{MetadataStore, RepoType};
 use serde::{Deserialize, Serialize};
 
@@ -30,12 +30,6 @@ pub struct PreuploadFileResponse {
     pub should_ignore: bool,
 }
 
-/// Extract Bearer token from Authorization header
-fn extract_bearer(req: &HttpRequest) -> Option<String> {
-    let auth = req.headers().get("Authorization")?;
-    auth.to_str().ok()?.strip_prefix("Bearer ").map(|s| s.to_string())
-}
-
 /// Determine upload mode based on file size
 /// Returns "regular" for small files (<=inline_threshold), "lfs" for larger files
 fn classify_upload_mode(size: u64, inline_threshold: u64) -> String {
@@ -48,49 +42,13 @@ fn classify_upload_mode(size: u64, inline_threshold: u64) -> String {
 
 /// Internal helper for preupload handling
 async fn handle_preupload(
-    req: HttpRequest,
+    _auth: AuthUser<AuthWrite>,
     path: web::Path<(String, String, String)>,
     body: web::Json<PreuploadRequest>,
     repo_type: RepoType,
-    token_store: web::Data<std::sync::Arc<TokenStore>>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
     config: web::Data<crate::config::HubConfig>,
 ) -> HttpResponse {
-    // Extract and validate Bearer token
-    let token = match extract_bearer(&req) {
-        Some(t) => t,
-        None => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Missing authorization",
-                "error_type": "AuthenticationError"
-            }));
-        }
-    };
-
-    let token_info = match token_store.validate_token(&token) {
-        Ok(Some(info)) => info,
-        Ok(None) => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Invalid token",
-                "error_type": "AuthenticationError"
-            }));
-        }
-        Err(e) => {
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("{}", e),
-                "error_type": "InternalError"
-            }));
-        }
-    };
-
-    // I11: Enforce write scope for preupload (semantically a write-path operation)
-    if token_info.scope != "write" {
-        return HttpResponse::Forbidden().json(serde_json::json!({
-            "error": "Write scope required",
-            "error_type": "AuthorizationError"
-        }));
-    }
-
     let (namespace, repo_name, _revision) = path.into_inner();
 
     // Check repo exists
@@ -126,44 +84,42 @@ async fn handle_preupload(
 
 // Model preupload handler
 pub async fn preupload_model(
-    req: HttpRequest,
+    auth: AuthUser<AuthWrite>,
     path: web::Path<(String, String, String)>,
     body: web::Json<PreuploadRequest>,
-    token_store: web::Data<std::sync::Arc<TokenStore>>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
     config: web::Data<crate::config::HubConfig>,
 ) -> HttpResponse {
-    handle_preupload(req, path, body, RepoType::Model, token_store, metadata, config).await
+    handle_preupload(auth, path, body, RepoType::Model, metadata, config).await
 }
 
 // Dataset preupload handler
 pub async fn preupload_dataset(
-    req: HttpRequest,
+    auth: AuthUser<AuthWrite>,
     path: web::Path<(String, String, String)>,
     body: web::Json<PreuploadRequest>,
-    token_store: web::Data<std::sync::Arc<TokenStore>>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
     config: web::Data<crate::config::HubConfig>,
 ) -> HttpResponse {
-    handle_preupload(req, path, body, RepoType::Dataset, token_store, metadata, config).await
+    handle_preupload(auth, path, body, RepoType::Dataset, metadata, config).await
 }
 
 // Space preupload handler
 pub async fn preupload_space(
-    req: HttpRequest,
+    auth: AuthUser<AuthWrite>,
     path: web::Path<(String, String, String)>,
     body: web::Json<PreuploadRequest>,
-    token_store: web::Data<std::sync::Arc<TokenStore>>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
     config: web::Data<crate::config::HubConfig>,
 ) -> HttpResponse {
-    handle_preupload(req, path, body, RepoType::Space, token_store, metadata, config).await
+    handle_preupload(auth, path, body, RepoType::Space, metadata, config).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use actix_web::{test as actix_test, App};
+    use crate::auth::token_store::TokenStore;
     use crate::metadata::SqliteMetadataStore;
 
     fn setup_test_env() -> (std::sync::Arc<TokenStore>, std::sync::Arc<dyn MetadataStore>) {
