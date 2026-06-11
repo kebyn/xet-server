@@ -221,10 +221,11 @@ async fn handle_commit(
         let size = decoded_content.len() as u64;
 
         // Store inline file content in CAS (C1)
-        if let Err(e) = cas_client.proxy_lfs_upload(&oid, bytes::Bytes::from(decoded_content), &internal_token).await {
-            tracing::error!("Failed to store inline file in CAS: {}", e);
-            return HttpResponse::BadGateway().json(serde_json::json!({
-                "error": format!("Failed to store inline file in CAS: {}", e),
+        if let Err((status, error_msg)) = cas_client.proxy_lfs_upload(&oid, bytes::Bytes::from(decoded_content), &internal_token).await {
+            tracing::error!("Failed to store inline file in CAS: status={}, error={}", status, error_msg);
+            let status_code = actix_web::http::StatusCode::from_u16(status).unwrap_or(actix_web::http::StatusCode::BAD_GATEWAY);
+            return HttpResponse::build(status_code).json(serde_json::json!({
+                "error": format!("Failed to store inline file in CAS: {}", error_msg),
                 "error_type": "CasError"
             }));
         }

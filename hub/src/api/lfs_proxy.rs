@@ -299,10 +299,11 @@ pub async fn lfs_upload(
     // Forward to CAS
     match cas_client.proxy_lfs_upload(&oid, body, &internal_token).await {
         Ok(_) => HttpResponse::Ok().finish(),
-        Err(e) => {
-            HttpResponse::BadGateway().json(serde_json::json!({
-                "error": e.to_string(),
-                "error_type": "BadGateway"
+        Err((status, error_msg)) => {
+            let status_code = actix_web::http::StatusCode::from_u16(status).unwrap_or(actix_web::http::StatusCode::BAD_GATEWAY);
+            HttpResponse::build(status_code).json(serde_json::json!({
+                "error": error_msg,
+                "error_type": "CasError"
             }))
         }
     }

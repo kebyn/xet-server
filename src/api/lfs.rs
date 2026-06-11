@@ -623,6 +623,17 @@ async fn reconstruct_from_xet(
         }
     }
 
+    // Check if we actually reconstructed any data
+    if file_data.is_empty() {
+        error!("Shards found for file {} but no data could be reconstructed", file_id);
+        GLOBAL_METRICS.record_request(500);
+        GLOBAL_METRICS.record_error();
+        GLOBAL_METRICS.record_latency(start);
+        return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Shards found but no xorb data could be reconstructed for file: {}", file_id)
+        }));
+    }
+
     info!("Reconstructed file {} from xet storage ({} bytes)", file_id, file_data.len());
 
     GLOBAL_METRICS.record_request(200);

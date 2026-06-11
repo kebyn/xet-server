@@ -11,6 +11,7 @@ use hub_api::cas_client::CasClient;
 use hub_api::config::CasSettings;
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
+use sha2::{Sha256, Digest};
 use std::sync::Arc;
 
 fn setup_lfs_test_env() -> (Arc<XetSigner>, Arc<CasClient>, String) {
@@ -31,6 +32,7 @@ async fn test_streaming_lfs_upload_no_auth() {
 
     let app = test::init_service(
         App::new()
+            .app_data(web::PayloadConfig::default().limit(2 * 1024 * 1024)) // 2MB limit for 1MB payload
             .app_data(web::Data::new(xet_signer.clone()))
             .app_data(web::Data::new(cas_client.clone()))
             .route("/lfs/objects/{oid}", web::put().to(hub_api::api::lfs_proxy::lfs_upload))
@@ -54,6 +56,7 @@ async fn test_streaming_lfs_upload_invalid_oid() {
 
     let app = test::init_service(
         App::new()
+            .app_data(web::PayloadConfig::default().limit(2 * 1024 * 1024)) // 2MB limit for 1MB payload
             .app_data(web::Data::new(xet_signer.clone()))
             .app_data(web::Data::new(cas_client.clone()))
             .route("/lfs/objects/{oid}", web::put().to(hub_api::api::lfs_proxy::lfs_upload))
@@ -80,6 +83,7 @@ async fn test_streaming_lfs_upload_invalid_proxy_token() {
 
     let app = test::init_service(
         App::new()
+            .app_data(web::PayloadConfig::default().limit(2 * 1024 * 1024)) // 2MB limit for 1MB payload
             .app_data(web::Data::new(xet_signer.clone()))
             .app_data(web::Data::new(cas_client.clone()))
             .route("/lfs/objects/{oid}", web::put().to(hub_api::api::lfs_proxy::lfs_upload))
@@ -105,6 +109,7 @@ async fn test_streaming_lfs_upload_wrong_operation() {
 
     let app = test::init_service(
         App::new()
+            .app_data(web::PayloadConfig::default().limit(2 * 1024 * 1024)) // 2MB limit for 1MB payload
             .app_data(web::Data::new(xet_signer.clone()))
             .app_data(web::Data::new(cas_client.clone()))
             .route("/lfs/objects/{oid}", web::put().to(hub_api::api::lfs_proxy::lfs_upload))
@@ -126,19 +131,20 @@ async fn test_streaming_lfs_upload_wrong_operation() {
 #[actix_web::test]
 async fn test_streaming_lfs_upload_cas_unreachable() {
     let (xet_signer, cas_client, _) = setup_lfs_test_env();
-    let oid = "a".repeat(64);
-    let (proxy_token, _) = xet_signer.sign_proxy("testuser", &oid, "upload", "", "");
-
-    let app = test::init_service(
-        App::new()
-            .app_data(web::Data::new(xet_signer.clone()))
-            .app_data(web::Data::new(cas_client.clone()))
-            .route("/lfs/objects/{oid}", web::put().to(hub_api::api::lfs_proxy::lfs_upload))
-    ).await;
 
     // Send a 1MB payload — if this were buffered, it would consume 1MB RAM.
     // With streaming, memory stays bounded and the payload is forwarded to CAS.
     let content = vec![42u8; 1024 * 1024]; // 1MB
+    let oid = hex::encode(Sha256::digest(&content));
+    let (proxy_token, _) = xet_signer.sign_proxy("testuser", &oid, "upload", "", "");
+
+    let app = test::init_service(
+        App::new()
+            .app_data(web::PayloadConfig::default().limit(2 * 1024 * 1024)) // 2MB limit for 1MB payload
+            .app_data(web::Data::new(xet_signer.clone()))
+            .app_data(web::Data::new(cas_client.clone()))
+            .route("/lfs/objects/{oid}", web::put().to(hub_api::api::lfs_proxy::lfs_upload))
+    ).await;
 
     let req = test::TestRequest::put()
         .uri(&format!("/lfs/objects/{}", oid))
@@ -156,11 +162,14 @@ async fn test_streaming_lfs_upload_cas_unreachable() {
 #[actix_web::test]
 async fn test_streaming_lfs_upload_query_token() {
     let (xet_signer, cas_client, _) = setup_lfs_test_env();
-    let oid = "a".repeat(64);
+
+    let content = vec![0u8; 100];
+    let oid = hex::encode(Sha256::digest(&content));
     let (proxy_token, _) = xet_signer.sign_proxy("testuser", &oid, "upload", "", "");
 
     let app = test::init_service(
         App::new()
+            .app_data(web::PayloadConfig::default().limit(2 * 1024 * 1024)) // 2MB limit for 1MB payload
             .app_data(web::Data::new(xet_signer.clone()))
             .app_data(web::Data::new(cas_client.clone()))
             .route("/lfs/objects/{oid}", web::put().to(hub_api::api::lfs_proxy::lfs_upload))
@@ -169,7 +178,7 @@ async fn test_streaming_lfs_upload_query_token() {
     // Token in query parameter instead of Authorization header
     let req = test::TestRequest::put()
         .uri(&format!("/lfs/objects/{}?token={}", oid, proxy_token))
-        .set_payload(vec![0u8; 100])
+        .set_payload(content)
         .to_request();
 
     let resp = test::call_service(&app, req).await;
@@ -245,18 +254,19 @@ async fn test_streaming_lfs_upload_success_via_mock_cas() {
         internal_timeout_seconds: 30,
     }));
 
-    let oid = "a".repeat(64);
+    // Send a 1MB payload through streaming
+    let content = vec![42u8; 1024 * 1024];
+    let oid = hex::encode(Sha256::digest(&content));
     let (proxy_token, _) = xet_signer.sign_proxy("testuser", &oid, "upload", "", "");
 
     let app = test::init_service(
         App::new()
+            .app_data(web::PayloadConfig::default().limit(2 * 1024 * 1024)) // 2MB limit for 1MB payload
             .app_data(web::Data::new(xet_signer.clone()))
             .app_data(web::Data::new(cas_client.clone()))
             .route("/lfs/objects/{oid}", web::put().to(hub_api::api::lfs_proxy::lfs_upload))
     ).await;
 
-    // Send a 1MB payload through streaming
-    let content = vec![42u8; 1024 * 1024];
     let req = test::TestRequest::put()
         .uri(&format!("/lfs/objects/{}", oid))
         .insert_header(("Authorization", format!("Bearer {}", proxy_token)))
@@ -286,6 +296,7 @@ async fn test_streaming_lfs_upload_hash_mismatch_returns_400() {
 
     let app = test::init_service(
         App::new()
+            .app_data(web::PayloadConfig::default().limit(2 * 1024 * 1024)) // 2MB limit for 1MB payload
             .app_data(web::Data::new(xet_signer.clone()))
             .app_data(web::Data::new(cas_client.clone()))
             .route("/lfs/objects/{oid}", web::put().to(hub_api::api::lfs_proxy::lfs_upload))
@@ -322,11 +333,13 @@ async fn test_streaming_lfs_upload_oversized_returns_413() {
         internal_timeout_seconds: 30,
     }));
 
-    let oid = "a".repeat(64);
+    let content = vec![0u8; 100];
+    let oid = hex::encode(Sha256::digest(&content));
     let (proxy_token, _) = xet_signer.sign_proxy("testuser", &oid, "upload", "", "");
 
     let app = test::init_service(
         App::new()
+            .app_data(web::PayloadConfig::default().limit(2 * 1024 * 1024)) // 2MB limit for 1MB payload
             .app_data(web::Data::new(xet_signer.clone()))
             .app_data(web::Data::new(cas_client.clone()))
             .route("/lfs/objects/{oid}", web::put().to(hub_api::api::lfs_proxy::lfs_upload))
@@ -335,7 +348,7 @@ async fn test_streaming_lfs_upload_oversized_returns_413() {
     let req = test::TestRequest::put()
         .uri(&format!("/lfs/objects/{}", oid))
         .insert_header(("Authorization", format!("Bearer {}", proxy_token)))
-        .set_payload(vec![0u8; 100])
+        .set_payload(content)
         .to_request();
 
     let resp = test::call_service(&app, req).await;
