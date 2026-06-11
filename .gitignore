@@ -7,3 +7,17 @@
 
 # OS
 .DS_Store
+
+# Databases (runtime-generated)
+*.db
+*.sqlite
+*.sqlite3
+
+# Test runtime data
+test-data/storage/
+test-data/hub-data/
+test-data/jwt-token.txt
+
+# Generated test reports
+*TEST_REPORT*.md
+*TEST_SUMMARY*.md
