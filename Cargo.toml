@@ -9,6 +9,7 @@ edition = "2024"
 
 [dependencies]
 blake3 = "1.8"
+sha2 = "0.10"
 gearhash = "0.1"
 serde = { version = "1.0", features = ["derive"] }
 thiserror = "2.0"

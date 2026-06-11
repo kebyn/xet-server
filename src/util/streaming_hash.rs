@@ -5,6 +5,7 @@
 
 use crate::hash::DATA_KEY;
 use crate::types::MerkleHash;
+use sha2::{Sha256, Digest};
 
 /// Incremental BLAKE3 hasher for streaming data.
 ///
@@ -38,6 +39,51 @@ impl StreamingHasher {
     /// Number of bytes processed so far.
     pub fn bytes_processed(&self) -> u64 {
         self.bytes_processed
+    }
+}
+
+/// Dual hasher that computes BLAKE3 (keyed) and SHA-256 in parallel.
+///
+/// Used by the LFS upload handler to verify content integrity for both
+/// xet-native clients (BLAKE3 keyed hash OIDs) and Git LFS clients
+/// (SHA-256 OIDs). The OID is checked against both hashes; a match on
+/// either confirms the client sent the content it claimed.
+pub struct DualHasher {
+    blake3: blake3::Hasher,
+    sha256: Sha256,
+    bytes_processed: u64,
+}
+
+impl DualHasher {
+    pub fn new() -> Self {
+        Self {
+            blake3: blake3::Hasher::new_keyed(&DATA_KEY),
+            sha256: Sha256::new(),
+            bytes_processed: 0,
+        }
+    }
+
+    pub fn update(&mut self, data: &[u8]) {
+        self.blake3.update(data);
+        self.sha256.update(data);
+        self.bytes_processed += data.len() as u64;
+    }
+
+    /// Finalize both hashes. Returns (blake3_hex, sha256_hex).
+    pub fn finalize(self) -> (String, String) {
+        let blake3_hex = self.blake3.finalize().to_hex().to_string();
+        let sha256_hex = format!("{:x}", self.sha256.finalize());
+        (blake3_hex, sha256_hex)
+    }
+
+    pub fn bytes_processed(&self) -> u64 {
+        self.bytes_processed
+    }
+}
+
+impl Default for DualHasher {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
