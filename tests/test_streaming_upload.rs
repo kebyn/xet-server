@@ -144,6 +144,59 @@ async fn test_streaming_lfs_upload() {
     assert_eq!(resp.status(), 200, "LFS upload should succeed");
 }
 
+/// Test that Git LFS clients can upload using SHA-256 OIDs.
+/// The server computes both BLAKE3 and SHA-256 during streaming upload
+/// and accepts the upload if either matches the OID.
+#[actix_web::test]
+async fn test_streaming_lfs_upload_sha256_oid() {
+    let storage_dir = tempdir().unwrap();
+    let temp_dir = tempdir().unwrap();
+
+    let ctx = create_test_config_with_temp_dir(temp_dir.path().to_str().unwrap());
+    let token = test_token_for_keypair(&ctx.keypair, "read write");
+
+    let storage: Box<dyn StorageBackend> = Box::new(
+        LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap(),
+    );
+
+    let state_mgr: Arc<dyn StorageStateManager> = Arc::new(
+        SqliteStateManager::new_in_memory().unwrap(),
+    );
+
+    let content = b"hello git lfs sha256 world";
+
+    // Compute SHA-256 hash (what Git LFS clients send as OID)
+    use sha2::{Sha256, Digest};
+    let mut hasher = Sha256::new();
+    hasher.update(content);
+    let sha256_oid = format!("{:x}", hasher.finalize());
+
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(storage))
+            .app_data(web::Data::new(ctx.auth_verifier))
+            .app_data(web::Data::new(state_mgr.clone()))
+            .app_data(web::Data::new(ctx.config))
+            .route(
+                "/lfs/objects/{oid}",
+                web::put().to(xet_server::api::lfs::upload_lfs_object),
+            ),
+    )
+    .await;
+
+    let req = test::TestRequest::put()
+        .uri(&format!("/lfs/objects/{}", sha256_oid))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_payload(Bytes::from(content.to_vec()))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status(), 200,
+        "LFS upload with SHA-256 OID should succeed (Git LFS client compatibility)"
+    );
+}
+
 #[actix_web::test]
 async fn test_streaming_lfs_hash_mismatch() {
     let storage_dir = tempdir().unwrap();
@@ -190,6 +243,13 @@ async fn test_streaming_lfs_hash_mismatch() {
         body["error"].as_str().unwrap().contains("Hash mismatch"),
         "Error should mention hash mismatch: {}",
         body["error"]
+    );
+    // Verify error message contains both computed hashes (BLAKE3 and SHA-256)
+    let error_msg = body["error"].as_str().unwrap();
+    assert!(
+        error_msg.contains("BLAKE3") && error_msg.contains("SHA-256"),
+        "Error should mention both hash algorithms: {}",
+        error_msg
     );
 }
 
