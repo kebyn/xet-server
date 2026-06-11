@@ -55,7 +55,7 @@
 - Create: `/data/hub/src/main.rs`
 - Create: `/data/hub/src/config.rs`
 
-- [ ] **Step 1: Convert to Cargo workspace**
+- [x] **Step 1: Convert to Cargo workspace**
 
 Modify `/data/Cargo.toml` — add workspace section at the top (before `[package]`):
 
@@ -69,7 +69,7 @@ name = "xet-server"
 # ... rest unchanged
 ```
 
-- [ ] **Step 2: Create hub/Cargo.toml**
+- [x] **Step 2: Create hub/Cargo.toml**
 
 ```toml
 [package]
@@ -104,7 +104,7 @@ rand = "0.8"
 tempfile = "3.10"
 ```
 
-- [ ] **Step 3: Create hub/src/main.rs**
+- [x] **Step 3: Create hub/src/main.rs**
 
 ```rust
 use hub_api::config::HubConfig;
@@ -118,7 +118,7 @@ async fn main() -> std::io::Result<()> {
 }
 ```
 
-- [ ] **Step 4: Create hub/src/config.rs**
+- [x] **Step 4: Create hub/src/config.rs**
 
 ```rust
 use serde::{Deserialize, Serialize};
@@ -228,7 +228,7 @@ impl HubConfig {
 }
 ```
 
-- [ ] **Step 5: Create hub/src/lib.rs**
+- [x] **Step 5: Create hub/src/lib.rs**
 
 ```rust
 pub mod config;
@@ -240,7 +240,7 @@ pub mod cas_client;
 pub mod api;
 ```
 
-- [ ] **Step 6: Create stub modules**
+- [x] **Step 6: Create stub modules**
 
 Create empty files so the crate compiles:
 - `hub/src/server.rs`: `pub async fn start_server(_config: crate::config::HubConfig) -> std::io::Result<()> { Ok(()) }`
@@ -253,14 +253,14 @@ Create empty files so the crate compiles:
 - `hub/src/cas_client/mod.rs`: (empty)
 - `hub/src/api/mod.rs`: (empty)
 
-- [ ] **Step 7: Verify workspace compiles**
+- [x] **Step 7: Verify workspace compiles**
 
 Run: `cd /data && cargo check -p hub-api 2>&1 | tail -5`
 Expected: Compiles (may have warnings about unused imports in stubs).
 
 Also verify CAS still compiles: `cargo check -p xet-server 2>&1 | tail -5`
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add Cargo.toml hub/
@@ -274,7 +274,7 @@ git commit -m "feat(hub): scaffold Hub API crate in workspace"
 **Files:**
 - Modify: `hub/src/error.rs`
 
-- [ ] **Step 1: Implement Hub error types**
+- [x] **Step 1: Implement Hub error types**
 
 ```rust
 use actix_web::{HttpResponse, http::StatusCode};
@@ -372,7 +372,7 @@ impl From<reqwest::Error> for HubError {
 }
 ```
 
-- [ ] **Step 2: Commit**
+- [x] **Step 2: Commit**
 
 ```bash
 git add hub/src/error.rs
@@ -388,7 +388,7 @@ git commit -m "feat(hub): add Hub error types with HF-compatible responses"
 - Create: `hub/src/metadata/sqlite.rs`
 - Test: `hub/tests/test_metadata.rs`
 
-- [ ] **Step 1: Define types and trait in hub/src/metadata/mod.rs**
+- [x] **Step 1: Define types and trait in hub/src/metadata/mod.rs**
 
 ```rust
 pub mod sqlite;
@@ -495,7 +495,7 @@ pub trait MetadataStore: Send + Sync {
 }
 ```
 
-- [ ] **Step 2: Implement SQLiteMetadataStore in hub/src/metadata/sqlite.rs**
+- [x] **Step 2: Implement SQLiteMetadataStore in hub/src/metadata/sqlite.rs**
 
 Implement all trait methods using `rusqlite` with `Mutex<Connection>`. Key schema:
 
@@ -549,7 +549,7 @@ Key implementation notes:
 - `get_file_tree_prefix`: WHERE `path LIKE '{prefix}%'`
 - `resolve_file`: Single row lookup by (rev_id, path)
 
-- [ ] **Step 3: Write tests in hub/tests/test_metadata.rs**
+- [x] **Step 3: Write tests in hub/tests/test_metadata.rs**
 
 Test at minimum:
 1. `test_create_and_get_repo`
@@ -562,7 +562,7 @@ Test at minimum:
 8. `test_resolve_file`
 9. `test_commit_log`
 
-- [ ] **Step 4: Verify tests pass and commit**
+- [x] **Step 4: Verify tests pass and commit**
 
 ```bash
 cargo test -p hub-api --test test_metadata
@@ -580,7 +580,7 @@ git commit -m "feat(hub): add MetadataStore trait and SQLite implementation"
 - Create: `hub/src/api/whoami.rs`
 - Test: `hub/tests/test_token_store.rs`
 
-- [ ] **Step 1: Implement TokenStore in hub/src/auth/token_store.rs**
+- [x] **Step 1: Implement TokenStore in hub/src/auth/token_store.rs**
 
 ```rust
 use rusqlite::{Connection, params};
@@ -696,11 +696,11 @@ fn now_secs() -> u64 {
 }
 ```
 
-- [ ] **Step 2: Write tests in hub/tests/test_token_store.rs**
+- [x] **Step 2: Write tests in hub/tests/test_token_store.rs**
 
 Test: create_token, validate_token, expired token, revoked token, invalid token.
 
-- [ ] **Step 3: Implement whoami handler in hub/src/api/whoami.rs**
+- [x] **Step 3: Implement whoami handler in hub/src/api/whoami.rs**
 
 ```rust
 use actix_web::{web, HttpRequest, HttpResponse};
@@ -749,7 +749,7 @@ fn extract_bearer_token(req: &HttpRequest) -> Option<String> {
 }
 ```
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add hub/src/auth/ hub/src/api/whoami.rs hub/tests/test_token_store.rs
@@ -764,7 +764,7 @@ git commit -m "feat(hub): add token store and whoami endpoint"
 - Create: `hub/src/auth/xet_signer.rs`
 - Create: `hub/src/api/token_exchange.rs`
 
-- [ ] **Step 1: Implement XetSigner in hub/src/auth/xet_signer.rs**
+- [x] **Step 1: Implement XetSigner in hub/src/auth/xet_signer.rs**
 
 The signer must produce tokens compatible with CAS verification (same format as Plan 1's `sign_xet_token`).
 
@@ -838,7 +838,7 @@ fn load_private_key_pem(pem_bytes: &[u8]) -> Result<SigningKey, String> {
 }
 ```
 
-- [ ] **Step 2: Implement token_exchange handler in hub/src/api/token_exchange.rs**
+- [x] **Step 2: Implement token_exchange handler in hub/src/api/token_exchange.rs**
 
 Handles `GET /api/{type}s/{ns}/{repo}/xet-{read|write}-token/{rev}` for all three repo types.
 
@@ -951,7 +951,7 @@ Routes in server.rs (Task 11) use explicit paths:
 // same for datasets and spaces
 ```
 
-- [ ] **Step 3: Write tests and commit**
+- [x] **Step 3: Write tests and commit**
 
 Test: sign and verify token format, token exchange returns valid response, wrong scope rejected.
 
@@ -967,7 +967,7 @@ git commit -m "feat(hub): add xet token signer and token exchange endpoint"
 **Files:**
 - Create: `hub/src/cas_client/mod.rs`
 
-- [ ] **Step 1: Implement CAS HTTP client**
+- [x] **Step 1: Implement CAS HTTP client**
 
 ```rust
 use reqwest::Client;
@@ -1102,7 +1102,7 @@ impl CasClient {
 
 Add `bytes = "1.5"` to `hub/Cargo.toml` dependencies.
 
-- [ ] **Step 2: Commit**
+- [x] **Step 2: Commit**
 
 ```bash
 git add hub/src/cas_client/ hub/Cargo.toml
@@ -1116,7 +1116,7 @@ git commit -m "feat(hub): add CAS HTTP client for internal communication"
 **Files:**
 - Create: `hub/src/api/repo.rs`
 
-- [ ] **Step 1: Implement repo CRUD handlers**
+- [x] **Step 1: Implement repo CRUD handlers**
 
 Implement handlers for:
 - `POST /api/models` — create model repo
@@ -1171,7 +1171,7 @@ Register routes for all three types in server.rs:
 
 Each thin wrapper calls the shared handler with the appropriate RepoType.
 
-- [ ] **Step 2: Write tests and commit**
+- [x] **Step 2: Write tests and commit**
 
 Test: create repo, get repo, create duplicate (409), get nonexistent (404), delete repo.
 
@@ -1188,7 +1188,7 @@ git commit -m "feat(hub): add repo CRUD endpoints for models/datasets/spaces"
 - Create: `hub/src/api/commit.rs`
 - Create: `hub/src/api/preupload.rs`
 
-- [ ] **Step 1: Implement commit handler**
+- [x] **Step 1: Implement commit handler**
 
 ```
 POST /api/{type}s/{ns}/{repo}/commit/{revision}
@@ -1224,7 +1224,7 @@ Handler logic:
 
 For the initial implementation, the file_tree is stored per-revision (not inherited). A commit copies all parent entries and applies changes. This is simple but uses more storage. Optimization (pointer-based tree inheritance) can come later.
 
-- [ ] **Step 2: Implement preupload check handler**
+- [x] **Step 2: Implement preupload check handler**
 
 ```
 POST /api/{type}s/{ns}/{repo}/preupload/{revision}
@@ -1238,7 +1238,7 @@ uploadMode:
   size > 10MB → "xet"
 ```
 
-- [ ] **Step 3: Write tests and commit**
+- [x] **Step 3: Write tests and commit**
 
 Test: commit with inline file, commit with lfsFile reference, commit conflict (wrong parent), preupload mode classification.
 
@@ -1255,7 +1255,7 @@ git commit -m "feat(hub): add commit API (NDJSON) and preupload check"
 - Create: `hub/src/api/tree.rs`
 - Create: `hub/src/api/resolve.rs`
 
-- [ ] **Step 1: Implement tree listing handler**
+- [x] **Step 1: Implement tree listing handler**
 
 ```
 GET /api/{type}s/{ns}/{repo}/tree/{revision}/{path}
@@ -1275,7 +1275,7 @@ Handler:
 
 Directories are inferred from paths with `/` separators.
 
-- [ ] **Step 2: Implement file download (resolve) handler**
+- [x] **Step 2: Implement file download (resolve) handler**
 
 ```
 GET /{ns}/{repo}/resolve/{revision}/{path}
@@ -1290,7 +1290,7 @@ Handler:
 
 For simplicity in Phase 1: return 302 redirect to `{cas_base_url}/lfs/objects/{oid}` with auth header.
 
-- [ ] **Step 3: Write tests and commit**
+- [x] **Step 3: Write tests and commit**
 
 Test: tree listing, tree with directories, resolve existing file, resolve missing file (404).
 
@@ -1306,7 +1306,7 @@ git commit -m "feat(hub): add tree listing and file download endpoints"
 **Files:**
 - Create: `hub/src/api/lfs_proxy.rs`
 
-- [ ] **Step 1: Implement LFS proxy handlers**
+- [x] **Step 1: Implement LFS proxy handlers**
 
 The Hub proxies Git LFS operations to CAS, rewriting URLs to point back to the Hub.
 
@@ -1352,7 +1352,7 @@ fn rewrite_batch_urls(response: &mut serde_json::Value, hub_base_url: &str, cas_
 }
 ```
 
-- [ ] **Step 2: Write tests and commit**
+- [x] **Step 2: Write tests and commit**
 
 Test: batch proxy rewrites URLs correctly, LFS upload proxy, LFS download proxy.
 
@@ -1369,7 +1369,7 @@ git commit -m "feat(hub): add Git LFS batch proxy to CAS"
 - Modify: `hub/src/server.rs`
 - Modify: `hub/src/api/mod.rs`
 
-- [ ] **Step 1: Wire everything together in server.rs**
+- [x] **Step 1: Wire everything together in server.rs**
 
 ```rust
 use actix_web::{web, App, HttpServer, HttpResponse, middleware::Logger};
@@ -1464,7 +1464,7 @@ pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
 
 Note: Token exchange routes use explicit paths for each repo type and token type (read/write), matching the handler functions defined in Task 5.
 
-- [ ] **Step 2: Create a CLI admin command for token creation**
+- [x] **Step 2: Create a CLI admin command for token creation**
 
 Add a subcommand to main.rs:
 ```rust
@@ -1473,14 +1473,14 @@ Add a subcommand to main.rs:
 
 This calls `TokenStore::create_token()` and prints the plaintext token.
 
-- [ ] **Step 3: Verify full crate compiles and all tests pass**
+- [x] **Step 3: Verify full crate compiles and all tests pass**
 
 ```bash
 cargo test -p hub-api
 cargo check -p hub-api
 ```
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add hub/src/server.rs hub/src/api/mod.rs hub/src/main.rs
@@ -1494,7 +1494,7 @@ git commit -m "feat(hub): wire up server with all routes and admin token creatio
 **Files:**
 - Create: `hub/tests/test_integration.rs`
 
-- [ ] **Step 1: Write end-to-end integration test**
+- [x] **Step 1: Write end-to-end integration test**
 
 Start both Hub and CAS (using temp dirs), then:
 
@@ -1512,14 +1512,14 @@ This test requires starting both services. Use actix-web test utilities for Hub 
 
 For simplicity, this test can use a mock CAS (just verify Hub calls the right CAS endpoints) or a real CAS if the test infrastructure supports it.
 
-- [ ] **Step 2: Run all tests**
+- [x] **Step 2: Run all tests**
 
 ```bash
 cargo test -p hub-api
 cargo test  # full workspace
 ```
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add hub/tests/test_integration.rs

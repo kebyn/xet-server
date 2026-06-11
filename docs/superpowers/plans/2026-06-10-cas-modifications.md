@@ -53,7 +53,7 @@
 **Files:**
 - Modify: `Cargo.toml`
 
-- [ ] **Step 1: Add ed25519-dalek, rusqlite, uuid dependencies**
+- [x] **Step 1: Add ed25519-dalek, rusqlite, uuid dependencies**
 
 Open `Cargo.toml` and replace `jsonwebtoken = "9.2"` with:
 
@@ -98,12 +98,12 @@ uuid = { version = "1", features = ["v4"] }
 rand = "0.8"
 ```
 
-- [ ] **Step 2: Verify dependencies compile**
+- [x] **Step 2: Verify dependencies compile**
 
 Run: `cargo check 2>&1 | tail -5`
 Expected: Compilation succeeds (may have warnings about unused imports later, but no errors from new deps).
 
-- [ ] **Step 3: Generate test Ed25519 key pair**
+- [x] **Step 3: Generate test Ed25519 key pair**
 
 Run:
 ```bash
@@ -119,7 +119,7 @@ mkdir -p /data/tests/keys
 
 We'll generate keys programmatically in tests. For now, just verify the dep compiles.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add Cargo.toml Cargo.lock
@@ -134,7 +134,7 @@ git commit -m "deps: add ed25519-dalek, rusqlite, uuid for auth rewrite"
 - Create: `src/api/auth.rs` (complete rewrite)
 - Test: `tests/test_auth.rs` (complete rewrite)
 
-- [ ] **Step 1: Write failing tests for Ed25519 auth**
+- [x] **Step 1: Write failing tests for Ed25519 auth**
 
 Replace `tests/test_auth.rs` entirely:
 
@@ -277,12 +277,12 @@ fn test_extract_token_from_request() {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test --test test_auth 2>&1 | tail -10`
 Expected: FAIL — `module xet_server::api::auth` exports don't match (sign_xet_token, verify_xet_token, XetClaims, KeyPair not found).
 
-- [ ] **Step 3: Rewrite `src/api/auth.rs`**
+- [x] **Step 3: Rewrite `src/api/auth.rs`**
 
 Replace the entire file:
 
@@ -510,14 +510,14 @@ pub fn check_scope(claims: &XetClaims, required: &str) -> bool {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test --test test_auth 2>&1 | tail -20`
 Expected: All tests PASS.
 
 Note: Other tests (test_api, etc.) will fail to compile because they reference the old `create_jwt`/`JwtClaims`. That's expected and fixed in Task 3.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/api/auth.rs tests/test_auth.rs
@@ -531,7 +531,7 @@ git commit -m "feat: rewrite auth module with Ed25519 token verification"
 **Files:**
 - Modify: `src/config.rs`
 
-- [ ] **Step 1: Update ServerConfig**
+- [x] **Step 1: Update ServerConfig**
 
 Replace `src/config.rs` with:
 
@@ -686,12 +686,12 @@ impl ServerConfig {
 }
 ```
 
-- [ ] **Step 2: Verify compilation**
+- [x] **Step 2: Verify compilation**
 
 Run: `cargo check 2>&1 | tail -10`
 Expected: Errors in files that reference `config.auth.jwt_secret` (removed). These will be fixed in subsequent tasks.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add src/config.rs
@@ -732,7 +732,7 @@ let claims = match verify_token(&token, &config.auth) {
 if !check_scope(&claims, "write") { ... }
 ```
 
-- [ ] **Step 1: Add verify_token helper to auth.rs**
+- [x] **Step 1: Add verify_token helper to auth.rs**
 
 Add this function to the end of `src/api/auth.rs`:
 
@@ -761,7 +761,7 @@ pub fn verify_token(
 }
 ```
 
-- [ ] **Step 2: Update xorb.rs**
+- [x] **Step 2: Update xorb.rs**
 
 In `src/api/xorb.rs`, replace:
 
@@ -793,7 +793,7 @@ let claims = match verify_token(&token, &config.auth) {
 
 There are 2 occurrences in xorb.rs (upload and download handlers). Use `replace_all` for the pattern `validate_jwt(&token, &config.auth.jwt_secret)` → `verify_token(&token, &config.auth)`.
 
-- [ ] **Step 3: Update shard.rs**
+- [x] **Step 3: Update shard.rs**
 
 Same pattern: replace `validate_jwt` import and calls with `verify_token`.
 
@@ -808,7 +808,7 @@ use crate::api::auth::{check_scope, extract_token_from_request, verify_token};
 
 Replace all: `validate_jwt(&token, &config.auth.jwt_secret)` → `verify_token(&token, &config.auth)`
 
-- [ ] **Step 4: Update batch.rs**
+- [x] **Step 4: Update batch.rs**
 
 Same pattern: replace `validate_jwt` import and calls with `verify_token`.
 
@@ -823,7 +823,7 @@ use crate::api::auth::{extract_token_from_request, verify_token};
 
 Replace all: `validate_jwt(&token, &config.auth.jwt_secret)` → `verify_token(&token, &config.auth)`
 
-- [ ] **Step 5: Update lfs.rs**
+- [x] **Step 5: Update lfs.rs**
 
 Same pattern.
 
@@ -838,12 +838,12 @@ use crate::api::auth::{check_scope, extract_token_from_request, verify_token};
 
 Replace all: `validate_jwt(&token, &config.auth.jwt_secret)` → `verify_token(&token, &config.auth)`
 
-- [ ] **Step 6: Verify compilation**
+- [x] **Step 6: Verify compilation**
 
 Run: `cargo check 2>&1 | tail -10`
 Expected: Errors only in test files (which still reference old auth API). Source files should compile.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/api/auth.rs src/api/xorb.rs src/api/shard.rs src/api/batch.rs src/api/lfs.rs
@@ -863,7 +863,7 @@ git commit -m "feat: update all API handlers to use Ed25519 token verification"
 
 All test files use `create_jwt(&JwtClaims {...}, &config.auth.jwt_secret)` to generate tokens. This needs to change to `sign_xet_token(&XetClaims {...}, &keypair)`.
 
-- [ ] **Step 1: Create a test helper module**
+- [x] **Step 1: Create a test helper module**
 
 Create `tests/common/mod.rs`:
 
@@ -955,11 +955,11 @@ pub fn test_config_with_key(kp: &KeyPair) -> xet_server::config::ServerConfig {
 }
 ```
 
-- [ ] **Step 2: Create tests/common/mod.rs**
+- [x] **Step 2: Create tests/common/mod.rs**
 
 Create `tests/common/mod.rs` with the helper functions shown above.
 
-- [ ] **Step 3: Update test_api.rs**
+- [x] **Step 3: Update test_api.rs**
 
 In `tests/test_api.rs`:
 
@@ -1005,20 +1005,20 @@ let token = sign_xet_token(&claims, &kp).unwrap();
 
 Note: each test function needs its own keypair because `verify_token` reads the public key from the file path in config, and each test may have different keys.
 
-- [ ] **Step 4: Update test_advanced_api.rs, test_e2e.rs, test_streaming_upload.rs**
+- [x] **Step 4: Update test_advanced_api.rs, test_e2e.rs, test_streaming_upload.rs**
 
 Apply the same pattern: replace `create_jwt`/`JwtClaims` with `sign_xet_token`/`XetClaims`/`KeyPair`, and use `common::test_config_with_key(&kp)` to generate configs.
 
-- [ ] **Step 5: Fix test_auth.rs**
+- [x] **Step 5: Fix test_auth.rs**
 
 Remove tests for `validate_jwt`, `create_jwt`, `extract_bearer_token` (functions that no longer exist). Keep only tests for `sign_xet_token`, `verify_xet_token`, `check_scope`. The test file was already rewritten in Task 2.
 
-- [ ] **Step 6: Run all tests**
+- [x] **Step 6: Run all tests**
 
 Run: `cargo test 2>&1 | tail -30`
 Expected: All tests PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add tests/ Cargo.toml
@@ -1035,7 +1035,7 @@ git commit -m "test: update all tests for Ed25519 auth"
 - Modify: `src/lib.rs`
 - Create: `tests/test_state.rs`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Create `tests/test_state.rs`:
 
@@ -1125,12 +1125,12 @@ fn test_idempotent_register() {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test --test test_state 2>&1 | tail -10`
 Expected: FAIL — `xet_server::state` module not found.
 
-- [ ] **Step 3: Create `src/state/mod.rs`**
+- [x] **Step 3: Create `src/state/mod.rs`**
 
 ```rust
 //! Storage state management
@@ -1190,7 +1190,7 @@ pub enum StateError {
 }
 ```
 
-- [ ] **Step 4: Create `src/state/sqlite.rs`**
+- [x] **Step 4: Create `src/state/sqlite.rs`**
 
 ```rust
 //! SQLite implementation of StorageStateManager
@@ -1339,19 +1339,19 @@ impl StorageStateManager for SqliteStateManager {
 }
 ```
 
-- [ ] **Step 5: Add state module to lib.rs**
+- [x] **Step 5: Add state module to lib.rs**
 
 In `src/lib.rs`, add:
 ```rust
 pub mod state;
 ```
 
-- [ ] **Step 6: Run tests**
+- [x] **Step 6: Run tests**
 
 Run: `cargo test --test test_state 2>&1 | tail -20`
 Expected: All tests PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/state/ src/lib.rs tests/test_state.rs
@@ -1368,7 +1368,7 @@ git commit -m "feat: add StorageStateManager trait and SQLite implementation"
 - Modify: `src/server.rs`
 - Create: `tests/test_internal_api.rs`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Create `tests/test_internal_api.rs`:
 
@@ -1555,12 +1555,12 @@ async fn test_internal_rejects_non_internal_scope() {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test --test test_internal_api 2>&1 | tail -10`
 Expected: FAIL — `xet_server::api::internal` not found.
 
-- [ ] **Step 3: Create `src/api/internal.rs`**
+- [x] **Step 3: Create `src/api/internal.rs`**
 
 ```rust
 //! Internal API endpoints for Hub-to-CAS communication
@@ -1688,14 +1688,14 @@ pub async fn head_blob(
 }
 ```
 
-- [ ] **Step 4: Update `src/api/mod.rs`**
+- [x] **Step 4: Update `src/api/mod.rs`**
 
 Add:
 ```rust
 pub mod internal;
 ```
 
-- [ ] **Step 5: Update `src/server.rs` to register internal routes and state manager**
+- [x] **Step 5: Update `src/server.rs` to register internal routes and state manager**
 
 Add to `start_server`:
 
@@ -1714,12 +1714,12 @@ Add to the App builder (before `.route("/health", ...)`):
 .route("/internal/blob/{oid}", web::head().to(crate::api::internal::head_blob))
 ```
 
-- [ ] **Step 6: Run tests**
+- [x] **Step 6: Run tests**
 
 Run: `cargo test --test test_internal_api 2>&1 | tail -20`
 Expected: All tests PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/api/internal.rs src/api/mod.rs src/server.rs tests/test_internal_api.rs
@@ -1735,7 +1735,7 @@ git commit -m "feat: add CAS internal endpoints for Hub communication"
 
 After a successful LFS upload, register the blob as `raw_only` in the state manager.
 
-- [ ] **Step 1: Update upload_lfs_object handler**
+- [x] **Step 1: Update upload_lfs_object handler**
 
 In `src/api/lfs.rs`, after the line:
 
@@ -1761,7 +1761,7 @@ Also add the import at the top of lfs.rs:
 use crate::state::StorageStateManager;
 ```
 
-- [ ] **Step 2: Verify existing tests still pass**
+- [x] **Step 2: Verify existing tests still pass**
 
 Run: `cargo test --test test_streaming_upload 2>&1 | tail -10`
 Expected: PASS (the state manager is optional in tests — if not present in app_data, it will panic. We need to handle this gracefully.)
@@ -1778,7 +1778,7 @@ if let Some(state_mgr) = req.app_data::<web::Data<std::sync::Arc<dyn crate::stat
 }
 ```
 
-- [ ] **Step 3: Write test for state registration**
+- [x] **Step 3: Write test for state registration**
 
 Add to `tests/test_streaming_upload.rs` (or create a new test):
 
@@ -1836,12 +1836,12 @@ async fn test_lfs_upload_registers_state() {
 }
 ```
 
-- [ ] **Step 4: Run all tests**
+- [x] **Step 4: Run all tests**
 
 Run: `cargo test 2>&1 | tail -20`
 Expected: All tests PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/api/lfs.rs tests/test_streaming_upload.rs
@@ -1857,7 +1857,7 @@ git commit -m "feat: register raw_only state on LFS upload"
 
 Modify `download_lfs_object` to check state and serve from raw blob or reconstruction.
 
-- [ ] **Step 1: Write failing test for reconstruction download**
+- [x] **Step 1: Write failing test for reconstruction download**
 
 Add to `tests/test_streaming_upload.rs` or create new test:
 
@@ -1917,7 +1917,7 @@ async fn test_lfs_download_raw_only() {
 }
 ```
 
-- [ ] **Step 2: Modify download_lfs_object**
+- [x] **Step 2: Modify download_lfs_object**
 
 In `src/api/lfs.rs`, modify the `download_lfs_object` function. After auth validation, before fetching from storage, add state check:
 
@@ -2120,7 +2120,7 @@ async fn reconstruct_file(
 
 Note: The exact shard API (`get_file_reconstruction_info`, chunk_info fields) needs to match the existing `MDBShardFile` implementation. Check `src/format/shard.rs` for the actual field names and adjust accordingly.
 
-- [ ] **Step 3: Run tests**
+- [x] **Step 3: Run tests**
 
 Run: `cargo test --test test_streaming_upload 2>&1 | tail -20`
 Expected: `test_lfs_download_raw_only` PASS. Other tests may need adjustment if the handler signature changed (added `state_mgr` parameter — existing tests that don't provide it will fail to initialize the service).
@@ -2136,12 +2136,12 @@ let state_mgr = std::sync::Arc::new(
 .app_data(web::Data::from(state_mgr))
 ```
 
-- [ ] **Step 4: Run full test suite**
+- [x] **Step 4: Run full test suite**
 
 Run: `cargo test 2>&1 | tail -20`
 Expected: All tests PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/api/lfs.rs tests/test_streaming_upload.rs
@@ -2152,17 +2152,17 @@ git commit -m "feat: state-aware LFS download with reconstruction support"
 
 ### Task 10: Final Integration Verification
 
-- [ ] **Step 1: Run full test suite**
+- [x] **Step 1: Run full test suite**
 
 Run: `cargo test 2>&1`
 Expected: All tests PASS.
 
-- [ ] **Step 2: Run clippy**
+- [x] **Step 2: Run clippy**
 
 Run: `cargo clippy 2>&1 | grep -E "error|warning" | head -20`
 Expected: No errors. Fix any new warnings.
 
-- [ ] **Step 3: Verify server starts**
+- [x] **Step 3: Verify server starts**
 
 Generate test keys and start the server:
 
@@ -2189,7 +2189,7 @@ curl http://127.0.0.1:8080/health
 kill %1 2>/dev/null
 ```
 
-- [ ] **Step 4: Commit any fixes**
+- [x] **Step 4: Commit any fixes**
 
 ```bash
 git add -A
