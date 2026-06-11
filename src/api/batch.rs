@@ -92,8 +92,8 @@ pub async fn batch_operation(
     // Validate transfer protocol. This server only supports "basic" transfer.
     // Per Git LFS spec, the client sends preferred transfers in order; the server
     // picks the first supported one. If none are supported, reject the request.
-    if let Some(ref transfers) = body.transfers {
-        if !transfers.is_empty() && !transfers.iter().any(|t| t == "basic") {
+    if let Some(ref transfers) = body.transfers
+        && !transfers.is_empty() && !transfers.iter().any(|t| t == "basic") {
             GLOBAL_METRICS.record_request(400);
             GLOBAL_METRICS.record_latency(start);
             return HttpResponse::BadRequest().json(serde_json::json!({
@@ -103,7 +103,6 @@ pub async fn batch_operation(
                 )
             }));
         }
-    }
 
     // Extract and validate auth token
     let token = match extract_token_from_request(&req) {

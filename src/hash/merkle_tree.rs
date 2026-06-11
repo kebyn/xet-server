@@ -23,8 +23,7 @@ fn next_merge_cut(hashes: &[(MerkleHash, u64)]) -> usize {
     let end = MAX_GROUP_SIZE.min(hashes.len());
 
     // Start from index 2 (minimum 2 children required)
-    for i in MIN_GROUP_SIZE..end {
-        let hash = &hashes[i].0;
+    for (i, (hash, _)) in hashes.iter().enumerate().take(end).skip(MIN_GROUP_SIZE) {
         if is_natural_cut(hash) {
             return i + 1; // Cut after position i
         }
@@ -104,6 +103,7 @@ pub fn file_hash(chunks: &[(MerkleHash, u64)]) -> MerkleHash {
 }
 
 /// Compute file hash with custom salt
+#[allow(dead_code)]
 pub fn file_hash_with_salt(chunks: &[(MerkleHash, u64)], salt: &MerkleHash) -> MerkleHash {
     if chunks.is_empty() {
         return MerkleHash::default();

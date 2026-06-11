@@ -213,7 +213,7 @@ pub fn verify_xorb(data: &[u8]) -> XetResult<()> {
     let mut footer_start = None;
 
     for i in 0..data.len().saturating_sub(7) {
-        if &data[i..i+7] == &hashes_ident {
+        if data[i..i+7] == hashes_ident {
             footer_start = Some(i);
             break;
         }
@@ -287,14 +287,12 @@ pub fn verify_xorb(data: &[u8]) -> XetResult<()> {
 /// 3. Computes the aggregated xorb hash and verifies it matches
 pub fn verify_xorb_from_file(path: &Path) -> XetResult<()> {
     let mut file = File::open(path).map_err(|e| {
-        XetError::IoError(std::io::Error::new(
-            std::io::ErrorKind::Other,
+        XetError::IoError(std::io::Error::other(
             format!("Failed to open xorb file {}: {}", path.display(), e),
         ))
     })?;
     let file_len = file.metadata().map_err(|e| {
-        XetError::IoError(std::io::Error::new(
-            std::io::ErrorKind::Other,
+        XetError::IoError(std::io::Error::other(
             format!("Failed to get file metadata: {}", e),
         ))
     })?.len();
@@ -309,14 +307,12 @@ pub fn verify_xorb_from_file(path: &Path) -> XetResult<()> {
     let scan_size = std::cmp::min(file_len, 64 * 1024) as usize;
     let mut tail_buf = vec![0u8; scan_size];
     file.seek(SeekFrom::End(-(scan_size as i64))).map_err(|e| {
-        XetError::IoError(std::io::Error::new(
-            std::io::ErrorKind::Other,
+        XetError::IoError(std::io::Error::other(
             format!("Failed to seek to file tail: {}", e),
         ))
     })?;
     file.read_exact(&mut tail_buf).map_err(|e| {
-        XetError::IoError(std::io::Error::new(
-            std::io::ErrorKind::Other,
+        XetError::IoError(std::io::Error::other(
             format!("Failed to read file tail: {}", e),
         ))
     })?;
@@ -334,7 +330,7 @@ pub fn verify_xorb_from_file(path: &Path) -> XetResult<()> {
     // Iterate backwards from the last possible start position
     let max_start = tail_buf.len().saturating_sub(7);
     for i in (0..=max_start).rev() {
-        if &tail_buf[i..i + 7] == &hashes_ident {
+        if tail_buf[i..i + 7] == hashes_ident {
             footer_start_in_file = Some(tail_file_offset + i as u64);
             break;
         }
@@ -372,8 +368,7 @@ pub fn verify_xorb_from_file(path: &Path) -> XetResult<()> {
 
         // Seek to chunk start and hash incrementally
         file.seek(SeekFrom::Start(current_offset)).map_err(|e| {
-            XetError::IoError(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            XetError::IoError(std::io::Error::other(
                 format!("Failed to seek to chunk {}: {}", i, e),
             ))
         })?;
@@ -383,8 +378,7 @@ pub fn verify_xorb_from_file(path: &Path) -> XetResult<()> {
         while remaining > 0 {
             let to_read = std::cmp::min(remaining, read_buf.len() as u64) as usize;
             let n = file.read(&mut read_buf[..to_read]).map_err(|e| {
-                XetError::IoError(std::io::Error::new(
-                    std::io::ErrorKind::Other,
+                XetError::IoError(std::io::Error::other(
                     format!("Failed to read chunk {} data: {}", i, e),
                 ))
             })?;
