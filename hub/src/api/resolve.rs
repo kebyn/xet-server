@@ -37,14 +37,6 @@ async fn resolve_revision(
     }
 }
 
-/// File resolve response
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct ResolveResponse {
-    pub oid: String,
-    pub size: u64,
-    pub download_url: String,
-}
-
 /// Internal helper for file resolve/download
 async fn handle_resolve(
     req: HttpRequest,
@@ -145,11 +137,41 @@ async fn handle_resolve(
     let hub_base_url = config.server.base_url();
     let download_url = format!("{}/lfs/objects/{}", hub_base_url, file_entry.cas_hash);
 
-    HttpResponse::Ok().json(ResolveResponse {
-        oid: file_entry.cas_hash,
-        size: file_entry.size,
-        download_url,
-    })
+    // Common HF Hub headers expected by huggingface_hub library
+    // (commit_id is already an owned String from resolve_revision)
+
+    // For small files, return content directly (HF Hub compatible)
+    // For large files, return 302 redirect to LFS download URL
+    if file_entry.size <= config.storage.inline_threshold_bytes {
+        // Try to fetch content from CAS
+        let xet_signer = req.app_data::<web::Data<std::sync::Arc<crate::auth::xet_signer::XetSigner>>>();
+        let cas_client = req.app_data::<web::Data<std::sync::Arc<crate::cas_client::CasClient>>>();
+
+        if let (Some(signer), Some(cas)) = (xet_signer, cas_client) {
+            let (internal_token, _) = signer.sign_internal();
+            match cas.proxy_lfs_download(&file_entry.cas_hash, &internal_token).await {
+                Ok(data) => {
+                    return HttpResponse::Ok()
+                        .content_type("application/octet-stream")
+                        .insert_header(("X-Repo-Commit", commit_id.as_str()))
+                        .insert_header(("ETag", format!("\"{}\"", file_entry.cas_hash)))
+                        .body(data);
+                }
+                Err(e) => {
+                    tracing::warn!("CAS inline fetch failed for {}: {}", file_entry.cas_hash, e);
+                    // Fall through to redirect
+                }
+            }
+        }
+    }
+
+    // Large files or CAS fetch failed - redirect to LFS download URL
+    HttpResponse::Found()
+        .append_header(("Location", download_url))
+        .insert_header(("X-Repo-Commit", commit_id.as_str()))
+        .insert_header(("X-Linked-Size", file_entry.size.to_string()))
+        .insert_header(("X-Linked-Etag", file_entry.cas_hash.as_str()))
+        .finish()
 }
 
 // Model resolve handler
@@ -250,12 +272,14 @@ mod tests {
             .to_request();
 
         let resp = actix_test::call_service(&app, req).await;
-        assert!(resp.status().is_success());
-
-        let body: ResolveResponse = actix_test::read_body_json(resp).await;
-        assert_eq!(body.oid, "hash123");
-        assert_eq!(body.size, 1024);
-        assert!(body.download_url.contains("hash123"));
+        // No CAS client registered, so handler falls through to 302 redirect
+        assert_eq!(resp.status().as_u16(), 302);
+        let location = resp.headers().get("Location").unwrap().to_str().unwrap();
+        assert!(location.contains("hash123"));
+        // Verify HF Hub compatibility headers
+        assert!(resp.headers().get("X-Repo-Commit").is_some());
+        assert!(resp.headers().get("X-Linked-Size").is_some());
+        assert_eq!(resp.headers().get("X-Linked-Size").unwrap().to_str().unwrap(), "1024");
     }
 
     #[actix_web::test]

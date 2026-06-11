@@ -2,6 +2,7 @@ use actix_web::{web, HttpRequest, HttpResponse};
 use crate::auth::token_store::TokenStore;
 use crate::metadata::{MetadataStore, Repo, RepoType};
 use serde::{Deserialize, Serialize};
+use chrono::DateTime;
 
 /// Request body for creating a repo
 #[derive(Debug, Deserialize, Serialize)]
@@ -27,66 +28,17 @@ fn repo_to_json(repo: &Repo) -> serde_json::Value {
         "updatedAt": chrono_datetime(repo.updated_at),
         "tags": [],
         "downloads": 0,
-        "likes": 0
+        "likes": 0,
+        "url": format!("/{}/{}", repo.namespace, repo.name)
     })
 }
 
 /// Convert Unix timestamp to ISO 8601 datetime string
 fn chrono_datetime(timestamp: i64) -> String {
-    // Simple format: YYYY-MM-DDTHH:MM:SSZ
-    // Using UTC time from Unix timestamp
-    let secs = timestamp as u64;
-    let days = secs / 86400;
-    let remaining_secs = secs % 86400;
-    let hours = remaining_secs / 3600;
-    let minutes = (remaining_secs % 3600) / 60;
-    let seconds = remaining_secs % 60;
-
-    // Calculate year, month, day from days since 1970-01-01
-    let (year, month, day) = days_to_date(days);
-
-    format!(
-        "{}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        year, month, day, hours, minutes, seconds
-    )
-}
-
-/// Convert days since 1970-01-01 to year, month, day
-fn days_to_date(days: u64) -> (u64, u64, u64) {
-    // Simplified calculation for years since 1970
-    let mut year = 1970;
-    let mut remaining_days = days;
-
-    loop {
-        let days_in_year = if is_leap_year(year) { 366 } else { 365 };
-        if remaining_days < days_in_year {
-            break;
-        }
-        remaining_days -= days_in_year;
-        year += 1;
-    }
-
-    let mut month = 1;
-    let days_in_months = if is_leap_year(year) {
-        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    } else {
-        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    };
-
-    for days_in_month in days_in_months.iter() {
-        if remaining_days < *days_in_month {
-            break;
-        }
-        remaining_days -= *days_in_month;
-        month += 1;
-    }
-
-    let day = remaining_days + 1;
-    (year, month, day)
-}
-
-fn is_leap_year(year: u64) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+    DateTime::from_timestamp(timestamp, 0)
+        .unwrap_or_default()
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string()
 }
 
 /// Internal helper to create a repo
@@ -145,6 +97,96 @@ async fn create_repo(
                     "error_type": "InternalError"
                 }))
             };
+        }
+    };
+
+    HttpResponse::Ok().json(repo_to_json(&repo))
+}
+
+/// Request body for the unified /api/repos/create endpoint (used by hf CLI)
+#[derive(Debug, Deserialize, Serialize)]
+pub struct CreateRepoUnifiedRequest {
+    pub name: String,
+    #[serde(default)]
+    pub organization: Option<String>,
+    #[serde(default, rename = "type")]
+    pub repo_type: Option<String>, // "model", "dataset", "space"
+    #[serde(default)]
+    pub private: bool,
+}
+
+/// POST /api/repos/create — unified repo creation endpoint used by hf CLI
+pub async fn create_repo_unified(
+    req: HttpRequest,
+    body: web::Json<CreateRepoUnifiedRequest>,
+    token_store: web::Data<std::sync::Arc<TokenStore>>,
+    metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
+) -> HttpResponse {
+    let token = match extract_bearer(&req) {
+        Some(t) => t,
+        None => {
+            return HttpResponse::Unauthorized().json(serde_json::json!({
+                "error": "Missing authorization",
+                "error_type": "AuthenticationError"
+            }));
+        }
+    };
+
+    let info = match token_store.validate_token(&token) {
+        Ok(Some(i)) => i,
+        Ok(None) => {
+            return HttpResponse::Unauthorized().json(serde_json::json!({
+                "error": "Invalid token",
+                "error_type": "AuthenticationError"
+            }));
+        }
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("{}", e),
+                "error_type": "InternalError"
+            }));
+        }
+    };
+
+    let namespace = body.organization.clone().unwrap_or_else(|| info.username.clone());
+
+    // Security: Only allow creating repos in own namespace (no org membership yet)
+    if namespace != info.username {
+        return HttpResponse::Forbidden().json(serde_json::json!({
+            "error": format!("Cannot create repo in namespace '{}': not a member", namespace),
+            "error_type": "AuthorizationError"
+        }));
+    }
+
+    let name = body.name.clone();
+    let private = body.private;
+
+    let repo_type = match body.repo_type.as_deref() {
+        Some("dataset") => RepoType::Dataset,
+        Some("space") => RepoType::Space,
+        _ => RepoType::Model,
+    };
+
+    // If repo already exists, return success (hf upload expects idempotent creation)
+    let repo = match metadata.create_repo(&namespace, &name, repo_type, private).await {
+        Ok(r) => r,
+        Err(crate::metadata::MetadataError::RepoAlreadyExists(_)) => {
+            // Return existing repo info
+            match metadata.get_repo(&namespace, &name, repo_type).await {
+                Ok(r) => r,
+                Err(_) => {
+                    return HttpResponse::Conflict().json(serde_json::json!({
+                        "error": "Repo already exists",
+                        "error_type": "ConflictError"
+                    }));
+                }
+            }
+        }
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": e.to_string(),
+                "error_type": "InternalError"
+            }));
         }
     };
 
@@ -368,6 +410,127 @@ pub async fn delete_repo_space(
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
     delete_repo_info(req, path, RepoType::Space, token_store, metadata).await
+}
+
+/// GET /api/{models,datasets,spaces}/{ns}/{repo}/revision/{rev}
+/// Returns revision info. For new repos with no commits, returns empty revision.
+pub async fn get_revision_model(
+    req: HttpRequest,
+    path: web::Path<(String, String, String)>,
+    token_store: web::Data<std::sync::Arc<TokenStore>>,
+    metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
+) -> HttpResponse {
+    get_revision_handler(req, path, RepoType::Model, token_store, metadata).await
+}
+
+pub async fn get_revision_dataset(
+    req: HttpRequest,
+    path: web::Path<(String, String, String)>,
+    token_store: web::Data<std::sync::Arc<TokenStore>>,
+    metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
+) -> HttpResponse {
+    get_revision_handler(req, path, RepoType::Dataset, token_store, metadata).await
+}
+
+pub async fn get_revision_space(
+    req: HttpRequest,
+    path: web::Path<(String, String, String)>,
+    token_store: web::Data<std::sync::Arc<TokenStore>>,
+    metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
+) -> HttpResponse {
+    get_revision_handler(req, path, RepoType::Space, token_store, metadata).await
+}
+
+async fn get_revision_handler(
+    req: HttpRequest,
+    path: web::Path<(String, String, String)>,
+    repo_type: RepoType,
+    token_store: web::Data<std::sync::Arc<TokenStore>>,
+    metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
+) -> HttpResponse {
+    let token = match extract_bearer(&req) {
+        Some(t) => t,
+        None => {
+            return HttpResponse::Unauthorized().json(serde_json::json!({
+                "error": "Missing authorization",
+                "error_type": "AuthenticationError"
+            }));
+        }
+    };
+
+    match token_store.validate_token(&token) {
+        Ok(Some(_)) => {},
+        Ok(None) => {
+            return HttpResponse::Unauthorized().json(serde_json::json!({
+                "error": "Invalid token",
+                "error_type": "AuthenticationError"
+            }));
+        }
+        Err(_) => {
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Token validation failed",
+                "error_type": "InternalError"
+            }));
+        }
+    };
+
+    let (namespace, repo_name, revision) = path.into_inner();
+
+    // Check repo exists
+    let repo = match metadata.get_repo(&namespace, &repo_name, repo_type).await {
+        Ok(r) => r,
+        Err(_) => {
+            return HttpResponse::NotFound().json(serde_json::json!({
+                "error": "Repository not found",
+                "error_type": "RepositoryNotFoundError"
+            }));
+        }
+    };
+
+    // Try to get the revision
+    match metadata.get_revision(repo.id, &revision).await {
+        Ok(rev) => {
+            HttpResponse::Ok().json(serde_json::json!({
+                "id": format!("{}/{}", namespace, repo_name),
+                "sha": rev.commit_id,
+                "title": rev.message,
+                "author": rev.author,
+                "createdAt": chrono_datetime(rev.created_at),
+                "siblings": [],
+                "tags": [],
+                "private": repo.private,
+                "downloads": 0,
+                "likes": 0,
+                "shaRemote": null
+            }))
+        }
+        Err(_) => {
+            if revision == "main" {
+                // Get the actual HEAD commit hash; null if repo has no commits
+                let head_sha = metadata.get_head(repo.id).await.ok().flatten();
+                let is_empty = head_sha.is_none();
+                HttpResponse::Ok().json(serde_json::json!({
+                    "id": format!("{}/{}", namespace, repo_name),
+                    "sha": head_sha,
+                    "title": if is_empty { "Empty repository" } else { "Initial commit" },
+                    "author": "system",
+                    "createdAt": chrono_datetime(repo.created_at),
+                    "siblings": [],
+                    "tags": [],
+                    "private": repo.private,
+                    "downloads": 0,
+                    "likes": 0,
+                    "shaRemote": null,
+                    "empty": is_empty
+                }))
+            } else {
+                HttpResponse::NotFound().json(serde_json::json!({
+                    "error": format!("Revision not found: {}", revision),
+                    "error_type": "RevisionNotFoundError"
+                }))
+            }
+        }
+    }
 }
 
 #[cfg(test)]

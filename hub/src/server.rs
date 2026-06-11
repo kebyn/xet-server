@@ -39,7 +39,9 @@ pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
     HttpServer::new(move || {
         App::new()
             .wrap(Logger::default())
-            // I13: Configure payload size limit for large commit payloads with inline files
+            // Payload size limit: 50MB default for JSON API endpoints.
+            // Commit API inline files max ~13.6MB (10MB base64-encoded), 50MB is sufficient.
+            // Large LFS files use streaming upload via Git LFS protocol.
             .app_data(web::PayloadConfig::default().limit(50 * 1024 * 1024)) // 50MB
             .app_data(web::Data::new(config.clone()))
             .app_data(web::Data::from(token_store.clone()))
@@ -56,6 +58,7 @@ pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
             .route("/api/spaces/{ns}/{repo}/xet-read-token/{rev}", web::get().to(crate::api::token_exchange::exchange_space_read))
             .route("/api/spaces/{ns}/{repo}/xet-write-token/{rev}", web::get().to(crate::api::token_exchange::exchange_space_write))
             // Repo CRUD
+            .route("/api/repos/create", web::post().to(crate::api::repo::create_repo_unified))
             .route("/api/models", web::post().to(crate::api::repo::create_model))
             .route("/api/datasets", web::post().to(crate::api::repo::create_dataset))
             .route("/api/spaces", web::post().to(crate::api::repo::create_space))
@@ -65,6 +68,10 @@ pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
             .route("/api/models/{ns}/{repo}", web::delete().to(crate::api::repo::delete_repo_model))
             .route("/api/datasets/{ns}/{repo}", web::delete().to(crate::api::repo::delete_repo_dataset))
             .route("/api/spaces/{ns}/{repo}", web::delete().to(crate::api::repo::delete_repo_space))
+            // Revision info (used by hf upload)
+            .route("/api/models/{ns}/{repo}/revision/{rev}", web::get().to(crate::api::repo::get_revision_model))
+            .route("/api/datasets/{ns}/{repo}/revision/{rev}", web::get().to(crate::api::repo::get_revision_dataset))
+            .route("/api/spaces/{ns}/{repo}/revision/{rev}", web::get().to(crate::api::repo::get_revision_space))
             // Commit
             .route("/api/models/{ns}/{repo}/commit/{rev}", web::post().to(crate::api::commit::commit_model))
             .route("/api/datasets/{ns}/{repo}/commit/{rev}", web::post().to(crate::api::commit::commit_dataset))
@@ -75,15 +82,40 @@ pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
             .route("/api/spaces/{ns}/{repo}/preupload/{rev}", web::post().to(crate::api::preupload::preupload_space))
             // Tree
             .route("/api/models/{ns}/{repo}/tree/{rev}/{path:.*}", web::get().to(crate::api::tree::tree_model))
+            .route("/api/models/{ns}/{repo}/tree/{rev}", web::get().to(crate::api::tree::tree_model_no_path))
             .route("/api/datasets/{ns}/{repo}/tree/{rev}/{path:.*}", web::get().to(crate::api::tree::tree_dataset))
+            .route("/api/datasets/{ns}/{repo}/tree/{rev}", web::get().to(crate::api::tree::tree_dataset_no_path))
             .route("/api/spaces/{ns}/{repo}/tree/{rev}/{path:.*}", web::get().to(crate::api::tree::tree_space))
-            // File download/resolve
+            .route("/api/spaces/{ns}/{repo}/tree/{rev}", web::get().to(crate::api::tree::tree_space_no_path))
+            // File download/resolve - Type-prefixed routes MUST come before generic routes
+            .route("/models/{ns}/{repo}/resolve/{rev}/{path:.*}", web::get().to(crate::api::resolve::resolve_model))
+            .route("/models/{ns}/{repo}/resolve/{rev}/{path:.*}", web::head().to(crate::api::resolve::resolve_model))
+            .route("/datasets/{ns}/{repo}/resolve/{rev}/{path:.*}", web::get().to(crate::api::resolve::resolve_dataset))
+            .route("/datasets/{ns}/{repo}/resolve/{rev}/{path:.*}", web::head().to(crate::api::resolve::resolve_dataset))
+            .route("/spaces/{ns}/{repo}/resolve/{rev}/{path:.*}", web::get().to(crate::api::resolve::resolve_space))
+            .route("/spaces/{ns}/{repo}/resolve/{rev}/{path:.*}", web::head().to(crate::api::resolve::resolve_space))
+            // Generic fallback (matches /{ns}/{repo}/resolve/...)
             .route("/{ns}/{repo}/resolve/{rev}/{path:.*}", web::get().to(crate::api::resolve::resolve_model))
+            .route("/{ns}/{repo}/resolve/{rev}/{path:.*}", web::head().to(crate::api::resolve::resolve_model))
             // Git LFS proxy
             .route("/objects/batch", web::post().to(crate::api::lfs_proxy::lfs_batch))
             .route("/lfs/objects/batch", web::post().to(crate::api::lfs_proxy::lfs_batch))
             .route("/lfs/objects/{oid}", web::put().to(crate::api::lfs_proxy::lfs_upload))
             .route("/lfs/objects/{oid}", web::get().to(crate::api::lfs_proxy::lfs_download))
+            // Git-style LFS endpoints - Type-prefixed routes first
+            .route("/models/{ns}/{repo}.git/info/lfs/objects/batch", web::post().to(crate::api::lfs_proxy::lfs_batch))
+            .route("/datasets/{ns}/{repo}.git/info/lfs/objects/batch", web::post().to(crate::api::lfs_proxy::lfs_batch))
+            .route("/spaces/{ns}/{repo}.git/info/lfs/objects/batch", web::post().to(crate::api::lfs_proxy::lfs_batch))
+            .route("/models/{ns}/{repo}.git/info/lfs/objects/{oid}", web::put().to(crate::api::lfs_proxy::lfs_upload))
+            .route("/datasets/{ns}/{repo}.git/info/lfs/objects/{oid}", web::put().to(crate::api::lfs_proxy::lfs_upload))
+            .route("/spaces/{ns}/{repo}.git/info/lfs/objects/{oid}", web::put().to(crate::api::lfs_proxy::lfs_upload))
+            .route("/models/{ns}/{repo}.git/info/lfs/objects/{oid}", web::get().to(crate::api::lfs_proxy::lfs_download))
+            .route("/datasets/{ns}/{repo}.git/info/lfs/objects/{oid}", web::get().to(crate::api::lfs_proxy::lfs_download))
+            .route("/spaces/{ns}/{repo}.git/info/lfs/objects/{oid}", web::get().to(crate::api::lfs_proxy::lfs_download))
+            // Generic fallback
+            .route("/{ns}/{repo}.git/info/lfs/objects/batch", web::post().to(crate::api::lfs_proxy::lfs_batch))
+            .route("/{ns}/{repo}.git/info/lfs/objects/{oid}", web::put().to(crate::api::lfs_proxy::lfs_upload))
+            .route("/{ns}/{repo}.git/info/lfs/objects/{oid}", web::get().to(crate::api::lfs_proxy::lfs_download))
             // Health
             .route("/health", web::get().to(|| async { HttpResponse::Ok().json(serde_json::json!({"status": "ok"})) }))
     })

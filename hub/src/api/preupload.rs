@@ -24,7 +24,10 @@ pub struct PreuploadResponse {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PreuploadFileResponse {
     pub path: String,
+    #[serde(rename = "uploadMode")]
     pub upload_mode: String,
+    #[serde(rename = "shouldIgnore")]
+    pub should_ignore: bool,
 }
 
 /// Extract Bearer token from Authorization header
@@ -34,13 +37,12 @@ fn extract_bearer(req: &HttpRequest) -> Option<String> {
 }
 
 /// Determine upload mode based on file size
-fn classify_upload_mode(size: u64, inline_threshold: u64, lfs_threshold: u64) -> String {
+/// Returns "regular" for small files (<=inline_threshold), "lfs" for larger files
+fn classify_upload_mode(size: u64, inline_threshold: u64) -> String {
     if size <= inline_threshold {
         "regular".to_string()
-    } else if size <= lfs_threshold {
-        "lfs".to_string()
     } else {
-        "xet".to_string()
+        "lfs".to_string()
     }
 }
 
@@ -114,7 +116,8 @@ async fn handle_preupload(
     let file_responses: Vec<PreuploadFileResponse> = body.files.iter()
         .map(|f| PreuploadFileResponse {
             path: f.path.clone(),
-            upload_mode: classify_upload_mode(f.size, config.storage.inline_threshold_bytes, config.storage.lfs_threshold_bytes),
+            upload_mode: classify_upload_mode(f.size, config.storage.inline_threshold_bytes),
+            should_ignore: false,
         })
         .collect();
 
@@ -276,27 +279,24 @@ mod tests {
 
         let body: PreuploadResponse = actix_test::read_body_json(resp).await;
         assert_eq!(body.files.len(), 1);
-        assert_eq!(body.files[0].upload_mode, "xet");
+        assert_eq!(body.files[0].upload_mode, "lfs");
     }
 
     #[test]
     fn test_classify_upload_mode() {
         let inline_threshold = 1 * 1024 * 1024; // 1MB
-        let lfs_threshold = 10 * 1024 * 1024;   // 10MB
 
         // Regular: <= 1MB
-        assert_eq!(classify_upload_mode(0, inline_threshold, lfs_threshold), "regular");
-        assert_eq!(classify_upload_mode(1024, inline_threshold, lfs_threshold), "regular");
-        assert_eq!(classify_upload_mode(1 * 1024 * 1024, inline_threshold, lfs_threshold), "regular");
+        assert_eq!(classify_upload_mode(0, inline_threshold), "regular");
+        assert_eq!(classify_upload_mode(1024, inline_threshold), "regular");
+        assert_eq!(classify_upload_mode(1 * 1024 * 1024, inline_threshold), "regular");
 
-        // LFS: 1MB < size <= 10MB
-        assert_eq!(classify_upload_mode(1 * 1024 * 1024 + 1, inline_threshold, lfs_threshold), "lfs");
-        assert_eq!(classify_upload_mode(5 * 1024 * 1024, inline_threshold, lfs_threshold), "lfs");
-        assert_eq!(classify_upload_mode(10 * 1024 * 1024, inline_threshold, lfs_threshold), "lfs");
-
-        // Xet: > 10MB
-        assert_eq!(classify_upload_mode(10 * 1024 * 1024 + 1, inline_threshold, lfs_threshold), "xet");
-        assert_eq!(classify_upload_mode(100 * 1024 * 1024, inline_threshold, lfs_threshold), "xet");
-        assert_eq!(classify_upload_mode(1024 * 1024 * 1024, inline_threshold, lfs_threshold), "xet");
+        // LFS: > 1MB
+        assert_eq!(classify_upload_mode(1 * 1024 * 1024 + 1, inline_threshold), "lfs");
+        assert_eq!(classify_upload_mode(5 * 1024 * 1024, inline_threshold), "lfs");
+        assert_eq!(classify_upload_mode(10 * 1024 * 1024, inline_threshold), "lfs");
+        assert_eq!(classify_upload_mode(10 * 1024 * 1024 + 1, inline_threshold), "lfs");
+        assert_eq!(classify_upload_mode(100 * 1024 * 1024, inline_threshold), "lfs");
+        assert_eq!(classify_upload_mode(1024 * 1024 * 1024, inline_threshold), "lfs");
     }
 }
