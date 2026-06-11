@@ -124,16 +124,34 @@ pub async fn get_reconstruction_v1(
         };
 
         // Extract xorb information (deduplicated)
+        let mut chunk_index_offset = 0;
         for xorb_entry in &shard.xorb_entries {
             let xorb_hash = xorb_entry.xorb_hash.to_hex();
             let xorb_size = xorb_entry.num_bytes_in_xorb as u64;
             if seen_xorbs.insert(xorb_hash.clone()) {
+                // Collect chunks for this xorb
+                let mut chunks = Vec::new();
+                for i in 0..xorb_entry.num_entries as usize {
+                    if chunk_index_offset + i < shard.xorb_chunk_entries.len() {
+                        let chunk_entry = &shard.xorb_chunk_entries[chunk_index_offset + i];
+                        chunks.push(ChunkInfoV1 {
+                            chunk_hash: chunk_entry.chunk_hash.to_hex(),
+                            offset: chunk_entry.chunk_byte_range_start as u64,
+                            length: chunk_entry.unpacked_segment_bytes as u64,
+                        });
+                    }
+                }
+                chunk_index_offset += xorb_entry.num_entries as usize;
+
                 let xorb_info = XorbInfoV1 {
                     xorb_hash,
                     size: xorb_size,
-                    chunks: Vec::new(), // TODO: Populate with actual chunk info
+                    chunks,
                 };
                 xorbs.push(xorb_info);
+            } else {
+                // Skip chunks for duplicate xorbs
+                chunk_index_offset += xorb_entry.num_entries as usize;
             }
         }
     }

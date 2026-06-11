@@ -299,21 +299,28 @@ pub async fn download_lfs_object(
             }
             StorageState::XetOnly => {
                 // Reconstruct from xorbs/shards
-                // TODO: Full reconstruction implementation
-                // For now, return error indicating xet reconstruction needed
                 let file_id = state.xet_file_id.clone().unwrap_or_else(|| "unknown".to_string());
-                error!(
-                    "XetOnly blob {} requires reconstruction (file_id: {})",
+                info!(
+                    "Reconstructing XetOnly blob {} (file_id: {})",
                     oid,
                     file_id
                 );
-                GLOBAL_METRICS.record_request(501);
-                GLOBAL_METRICS.record_latency(start);
-                HttpResponse::NotImplemented().json(serde_json::json!({
-                    "error": "Xet reconstruction not yet implemented for this blob",
-                    "file_id": file_id,
-                    "oid": oid
-                }))
+
+                // Get metadata index from app data
+                let index = match req.app_data::<web::Data<crate::index::MetadataIndex>>() {
+                    Some(idx) => idx.clone(),
+                    None => {
+                        error!("MetadataIndex not available");
+                        GLOBAL_METRICS.record_request(500);
+                        GLOBAL_METRICS.record_error();
+                        GLOBAL_METRICS.record_latency(start);
+                        return HttpResponse::InternalServerError().json(serde_json::json!({
+                            "error": "Metadata index not available"
+                        }));
+                    }
+                };
+
+                reconstruct_from_xet(&file_id, index, storage, start).await
             }
         },
         None => {
@@ -443,4 +450,186 @@ async fn serve_raw_blob_inmemory(
     HttpResponse::Ok()
         .content_type("application/octet-stream")
         .body(object_data)
+}
+
+/// Reconstruct a file from xorb/shard storage
+///
+/// This function:
+/// 1. Retrieves shard information for the file
+/// 2. Downloads and parses shards to get xorb/chunk metadata
+/// 3. Downloads all required xorbs
+/// 4. Extracts and decompresses chunks
+/// 5. Reassembles chunks into the complete file
+async fn reconstruct_from_xet(
+    file_id: &str,
+    index: web::Data<crate::index::MetadataIndex>,
+    storage: web::Data<Box<dyn StorageBackend>>,
+    start: std::time::Instant,
+) -> HttpResponse {
+    use crate::format::shard::MDBShardFile;
+    use crate::format::xorb::XorbChunkHeader;
+    use crate::format::compression::decompress;
+    use std::collections::HashSet;
+    use std::io::Cursor;
+
+    // Look up shards for this file
+    let shard_ids = match index.get_shards_for_file(file_id) {
+        Some(ids) => ids,
+        None => {
+            GLOBAL_METRICS.record_request(404);
+            GLOBAL_METRICS.record_latency(start);
+            return HttpResponse::NotFound().json(serde_json::json!({
+                "error": format!("File not found in metadata index: {}", file_id)
+            }));
+        }
+    };
+
+    // Collect xorb information from all shards
+    let mut xorbs = Vec::new();
+    let mut seen_xorbs = HashSet::new();
+    let mut file_data = Vec::new();
+
+    for shard_id in shard_ids {
+        let shard_key = format!("shards/{}", shard_id);
+
+        // Fetch shard from storage
+        let shard_data = match storage.get(&shard_key).await {
+            Ok(data) => {
+                GLOBAL_METRICS.record_storage_operation();
+                data
+            }
+            Err(e) => {
+                error!("Failed to fetch shard {}: {}", shard_id, e);
+                GLOBAL_METRICS.record_request(500);
+                GLOBAL_METRICS.record_error();
+                GLOBAL_METRICS.record_latency(start);
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("Failed to fetch shard: {}", e)
+                }));
+            }
+        };
+
+        // Parse shard
+        let shard = match MDBShardFile::parse(&shard_data) {
+            Ok(s) => s,
+            Err(e) => {
+                error!("Failed to parse shard {}: {}", shard_id, e);
+                GLOBAL_METRICS.record_request(500);
+                GLOBAL_METRICS.record_error();
+                GLOBAL_METRICS.record_latency(start);
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("Failed to parse shard: {}", e)
+                }));
+            }
+        };
+
+        // Extract xorb information (deduplicated)
+        let mut chunk_index_offset = 0;
+        for xorb_entry in &shard.xorb_entries {
+            let xorb_hash = xorb_entry.xorb_hash.to_hex();
+            if seen_xorbs.insert(xorb_hash.clone()) {
+                xorbs.push(xorb_hash.clone());
+
+                // Download xorb
+                let xorb_key = format!("xorbs/{}", xorb_hash);
+                let xorb_data = match storage.get(&xorb_key).await {
+                    Ok(data) => {
+                        GLOBAL_METRICS.record_storage_operation();
+                        data
+                    }
+                    Err(e) => {
+                        error!("Failed to fetch xorb {}: {}", xorb_hash, e);
+                        GLOBAL_METRICS.record_request(500);
+                        GLOBAL_METRICS.record_error();
+                        GLOBAL_METRICS.record_latency(start);
+                        return HttpResponse::InternalServerError().json(serde_json::json!({
+                            "error": format!("Failed to fetch xorb: {}", e)
+                        }));
+                    }
+                };
+
+                // Extract chunks from xorb
+                for i in 0..xorb_entry.num_entries as usize {
+                    if chunk_index_offset + i < shard.xorb_chunk_entries.len() {
+                        let chunk_entry = &shard.xorb_chunk_entries[chunk_index_offset + i];
+                        let chunk_offset = chunk_entry.chunk_byte_range_start as usize;
+
+                        // Read chunk header (8 bytes)
+                        if chunk_offset + 8 > xorb_data.len() {
+                            error!("Chunk offset out of bounds");
+                            GLOBAL_METRICS.record_request(500);
+                            GLOBAL_METRICS.record_error();
+                            GLOBAL_METRICS.record_latency(start);
+                            return HttpResponse::InternalServerError().json(serde_json::json!({
+                                "error": "Chunk offset out of bounds"
+                            }));
+                        }
+
+                        let mut chunk_cursor = Cursor::new(&xorb_data[chunk_offset..]);
+                        let chunk_header = match XorbChunkHeader::deserialize(&mut chunk_cursor) {
+                            Ok(h) => h,
+                            Err(e) => {
+                                error!("Failed to parse chunk header: {}", e);
+                                GLOBAL_METRICS.record_request(500);
+                                GLOBAL_METRICS.record_error();
+                                GLOBAL_METRICS.record_latency(start);
+                                return HttpResponse::InternalServerError().json(serde_json::json!({
+                                    "error": format!("Failed to parse chunk header: {}", e)
+                                }));
+                            }
+                        };
+
+                        // Read compressed chunk data
+                        let data_start = chunk_offset + XorbChunkHeader::SIZE;
+                        let data_end = data_start + chunk_header.compressed_length as usize;
+                        if data_end > xorb_data.len() {
+                            error!("Chunk data out of bounds");
+                            GLOBAL_METRICS.record_request(500);
+                            GLOBAL_METRICS.record_error();
+                            GLOBAL_METRICS.record_latency(start);
+                            return HttpResponse::InternalServerError().json(serde_json::json!({
+                                "error": "Chunk data out of bounds"
+                            }));
+                        }
+
+                        let compressed_data = &xorb_data[data_start..data_end];
+
+                        // Decompress chunk
+                        let decompressed = match decompress(
+                            chunk_header.compression_scheme,
+                            compressed_data,
+                            chunk_header.uncompressed_length as usize,
+                        ) {
+                            Ok(d) => d,
+                            Err(e) => {
+                                error!("Failed to decompress chunk: {}", e);
+                                GLOBAL_METRICS.record_request(500);
+                                GLOBAL_METRICS.record_error();
+                                GLOBAL_METRICS.record_latency(start);
+                                return HttpResponse::InternalServerError().json(serde_json::json!({
+                                    "error": format!("Failed to decompress chunk: {}", e)
+                                }));
+                            }
+                        };
+
+                        file_data.extend_from_slice(&decompressed);
+                    }
+                }
+                chunk_index_offset += xorb_entry.num_entries as usize;
+            } else {
+                // Skip chunks for duplicate xorbs
+                chunk_index_offset += xorb_entry.num_entries as usize;
+            }
+        }
+    }
+
+    info!("Reconstructed file {} from xet storage ({} bytes)", file_id, file_data.len());
+
+    GLOBAL_METRICS.record_request(200);
+    GLOBAL_METRICS.record_download_bytes(file_data.len() as u64);
+    GLOBAL_METRICS.record_latency(start);
+
+    HttpResponse::Ok()
+        .content_type("application/octet-stream")
+        .body(file_data)
 }
