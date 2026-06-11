@@ -327,7 +327,9 @@ pub struct MDBShardFile {
     pub header: MDBShardFileHeader,
     pub footer: MDBShardFileFooter,
     pub file_entries: Vec<FileDataSequenceHeader>,
+    pub file_data_entries: Vec<FileDataSequenceEntry>,
     pub xorb_entries: Vec<XorbChunkSequenceHeader>,
+    pub xorb_chunk_entries: Vec<XorbChunkSequenceEntry>,
     pub file_hashes: Vec<MerkleHash>,
     pub chunk_mappings: Vec<(MerkleHash, MerkleHash, u32)>, // (chunk_hash, xorb_hash, chunk_index)
     raw_data: Vec<u8>,
@@ -367,19 +369,87 @@ impl MDBShardFile {
         let mut footer_cursor = Cursor::new(&data[footer_start..]);
         let footer = MDBShardFileFooter::deserialize(&mut footer_cursor)?;
 
-        // For now, we'll do a simplified parse - just extract what we need for indexing
-        // In a full implementation, we would parse all sections using the offsets
+        // Parse file info section
+        let mut file_entries = Vec::new();
+        let mut file_data_entries = Vec::new();
+        let mut file_hashes = Vec::new();
+        if footer.file_info_offset > 0 && footer.file_info_offset < data.len() as u64 {
+            let mut file_cursor = Cursor::new(&data[footer.file_info_offset as usize..]);
 
-        let file_hashes = Vec::new();
-        let chunk_mappings = Vec::new();
-        let file_entries = Vec::new();
-        let xorb_entries = Vec::new();
+            // Parse all file entries
+            loop {
+                let pos = file_cursor.position() as usize;
+                if pos + 48 > data.len() - footer_start {
+                    break; // Reached end of file info section
+                }
+
+                match FileDataSequenceHeader::deserialize(&mut file_cursor) {
+                    Ok(file_header) => {
+                        file_hashes.push(file_header.file_hash.clone());
+
+                        // Parse file entries for this file
+                        for _ in 0..file_header.num_entries {
+                            match FileDataSequenceEntry::deserialize(&mut file_cursor) {
+                                Ok(entry) => file_data_entries.push(entry),
+                                Err(_) => break,
+                            }
+                        }
+
+                        file_entries.push(file_header);
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+
+        // Parse xorb info section
+        let mut xorb_entries = Vec::new();
+        let mut xorb_chunk_entries = Vec::new();
+        let mut chunk_mappings = Vec::new();
+        if footer.xorb_info_offset > 0 && footer.xorb_info_offset < data.len() as u64 {
+            let mut xorb_cursor = Cursor::new(&data[footer.xorb_info_offset as usize..]);
+
+            // Parse all xorb entries
+            loop {
+                let pos = xorb_cursor.position() as usize;
+                if pos + 48 > data.len() - footer_start {
+                    break; // Reached end of xorb info section
+                }
+
+                match XorbChunkSequenceHeader::deserialize(&mut xorb_cursor) {
+                    Ok(xorb_header) => {
+                        let xorb_hash = xorb_header.xorb_hash.clone();
+                        let num_chunks = xorb_header.num_entries;
+                        xorb_entries.push(xorb_header);
+
+                        // Parse chunk entries for this xorb
+                        for chunk_index in 0..num_chunks {
+                            match XorbChunkSequenceEntry::deserialize(&mut xorb_cursor) {
+                                Ok(chunk_entry) => {
+                                    // Add to chunk mappings: (chunk_hash, xorb_hash, chunk_index)
+                                    chunk_mappings.push((
+                                        chunk_entry.chunk_hash.clone(),
+                                        xorb_hash.clone(),
+                                        chunk_index,
+                                    ));
+                                    xorb_chunk_entries.push(chunk_entry);
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
 
         Ok(Self {
             header,
             footer,
             file_entries,
+            file_data_entries,
             xorb_entries,
+            xorb_chunk_entries,
             file_hashes,
             chunk_mappings,
             raw_data: data.to_vec(),
@@ -462,13 +532,17 @@ impl MDBShardFile {
         let file_hashes = Vec::new();
         let chunk_mappings = Vec::new();
         let file_entries = Vec::new();
+        let file_data_entries = Vec::new();
         let xorb_entries = Vec::new();
+        let xorb_chunk_entries = Vec::new();
 
         Ok(Self {
             header,
             footer,
             file_entries,
+            file_data_entries,
             xorb_entries,
+            xorb_chunk_entries,
             file_hashes,
             chunk_mappings,
             raw_data: Vec::new(), // Hash computed externally via streaming

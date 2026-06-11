@@ -413,9 +413,9 @@ async fn test_lfs_download_raw_only() {
     assert_eq!(body.as_ref(), content);
 }
 
-/// Test that LFS download returns 501 for XetOnly blobs.
+/// Test that LFS download returns 500 for XetOnly blobs when metadata index is not available.
 #[actix_web::test]
-async fn test_lfs_download_xet_only_not_implemented() {
+async fn test_lfs_download_xet_only_requires_metadata_index() {
     let storage_dir = tempdir().unwrap();
 
     let ctx = create_test_context();
@@ -450,9 +450,9 @@ async fn test_lfs_download_xet_only_not_implemented() {
         .to_request();
 
     let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), 501);
+    // Should return 500 because MetadataIndex is not available
+    assert_eq!(resp.status(), 500);
 
     let body: serde_json::Value = test::read_body_json(resp).await;
-    assert!(body["error"].as_str().unwrap().contains("reconstruction"));
-    assert_eq!(body["file_id"], "file_002");
+    assert!(body["error"].as_str().unwrap().contains("Metadata index not available"));
 }
