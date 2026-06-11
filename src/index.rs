@@ -44,7 +44,7 @@ impl MetadataIndex {
             for file_hash in file_hashes {
                 file_map
                     .entry(file_hash)
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(shard_id.clone());
             }
         }

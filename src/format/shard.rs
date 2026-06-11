@@ -385,7 +385,7 @@ impl MDBShardFile {
 
                 match FileDataSequenceHeader::deserialize(&mut file_cursor) {
                     Ok(file_header) => {
-                        file_hashes.push(file_header.file_hash.clone());
+                        file_hashes.push(file_header.file_hash);
 
                         // Parse file entries for this file
                         for _ in 0..file_header.num_entries {
@@ -418,7 +418,7 @@ impl MDBShardFile {
 
                 match XorbChunkSequenceHeader::deserialize(&mut xorb_cursor) {
                     Ok(xorb_header) => {
-                        let xorb_hash = xorb_header.xorb_hash.clone();
+                        let xorb_hash = xorb_header.xorb_hash;
                         let num_chunks = xorb_header.num_entries;
                         xorb_entries.push(xorb_header);
 
@@ -428,8 +428,8 @@ impl MDBShardFile {
                                 Ok(chunk_entry) => {
                                     // Add to chunk mappings: (chunk_hash, xorb_hash, chunk_index)
                                     chunk_mappings.push((
-                                        chunk_entry.chunk_hash.clone(),
-                                        xorb_hash.clone(),
+                                        chunk_entry.chunk_hash,
+                                        xorb_hash,
                                         chunk_index,
                                     ));
                                     xorb_chunk_entries.push(chunk_entry);
@@ -465,15 +465,13 @@ impl MDBShardFile {
     /// Use `compute_hash_from_file(path)` or a streaming hasher to get the shard hash.
     pub fn parse_from_file(path: &Path) -> XetResult<Self> {
         let mut file = File::open(path).map_err(|e| {
-            crate::error::XetError::IoError(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            crate::error::XetError::IoError(std::io::Error::other(
                 format!("Failed to open shard file {}: {}", path.display(), e),
             ))
         })?;
 
         let file_len = file.metadata().map_err(|e| {
-            crate::error::XetError::IoError(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            crate::error::XetError::IoError(std::io::Error::other(
                 format!("Failed to get file metadata: {}", e),
             ))
         })?.len();
@@ -488,8 +486,7 @@ impl MDBShardFile {
         // Read enough bytes for the header (48 bytes: 32 tag + 8 version + 8 footer_size)
         let mut header_buf = [0u8; 48];
         file.read_exact(&mut header_buf).map_err(|e| {
-            crate::error::XetError::IoError(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            crate::error::XetError::IoError(std::io::Error::other(
                 format!("Failed to read shard header: {}", e),
             ))
         })?;
@@ -513,15 +510,13 @@ impl MDBShardFile {
 
         // Read footer from end of file
         file.seek(SeekFrom::End(-208)).map_err(|e| {
-            crate::error::XetError::IoError(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            crate::error::XetError::IoError(std::io::Error::other(
                 format!("Failed to seek to shard footer: {}", e),
             ))
         })?;
         let mut footer_buf = [0u8; 208];
         file.read_exact(&mut footer_buf).map_err(|e| {
-            crate::error::XetError::IoError(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            crate::error::XetError::IoError(std::io::Error::other(
                 format!("Failed to read shard footer: {}", e),
             ))
         })?;
@@ -554,8 +549,7 @@ impl MDBShardFile {
     pub fn compute_hash_from_file(path: &Path) -> XetResult<String> {
         use crate::util::StreamingHasher;
         let mut file = File::open(path).map_err(|e| {
-            crate::error::XetError::IoError(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            crate::error::XetError::IoError(std::io::Error::other(
                 format!("Failed to open shard file for hashing: {}", e),
             ))
         })?;
@@ -564,8 +558,7 @@ impl MDBShardFile {
         let mut buf = [0u8; 64 * 1024];
         loop {
             let n = file.read(&mut buf).map_err(|e| {
-                crate::error::XetError::IoError(std::io::Error::new(
-                    std::io::ErrorKind::Other,
+                crate::error::XetError::IoError(std::io::Error::other(
                     format!("Failed to read shard file for hashing: {}", e),
                 ))
             })?;

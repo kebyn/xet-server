@@ -43,7 +43,7 @@ impl LocalStorage {
         // Split on both '/' and '\\' to handle Windows-style separators.
         // This is more precise than key.contains("..") which would also reject
         // legitimate filenames like "file..name" or "..hidden".
-        for component in key.split(|c| c == '/' || c == '\\') {
+        for component in key.split(['/', '\\']) {
             if component == ".." {
                 return Err(StorageError::InvalidArgument(
                     format!("Invalid key: path traversal detected: {}", key)
