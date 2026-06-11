@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 pub mod local;
@@ -48,6 +48,13 @@ pub trait StorageBackend: Send + Sync {
 
     /// Retrieve an object
     async fn get(&self, key: &str) -> StorageResult<Bytes>;
+
+    /// Get the filesystem path for a stored object, if the backend is file-based.
+    /// Returns None for non-file backends (e.g. S3).
+    /// This enables streaming downloads without loading the entire file into memory.
+    async fn get_path(&self, _key: &str) -> StorageResult<Option<PathBuf>> {
+        Ok(None)
+    }
 
     /// Check if object exists
     async fn exists(&self, key: &str) -> StorageResult<bool>;

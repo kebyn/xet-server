@@ -45,7 +45,9 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
             .app_data(web::Data::from(auth_verifier.clone()))
             .app_data(web::Data::from(storage.clone()))
             .app_data(web::Data::from(index.clone()))
-            .app_data(web::Data::from(state_mgr.clone()))
+            .app_data(web::Data::from(state_mgr.clone()))  // Data::from(Arc<T>) = Data<T>
+            // Also register as Data<Arc<T>> for handlers that expect the Arc wrapper
+            .app_data(web::Data::new(state_mgr.clone()))  // Data::new(T) = Data<T> wrapping Arc<T>
             .app_data(web::Data::new(config.clone()))
             // Internal endpoints (Hub-to-CAS communication)
             .route("/internal/state/{oid}", web::get().to(crate::api::internal::get_blob_state))
