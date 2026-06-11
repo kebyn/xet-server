@@ -17,7 +17,8 @@
 test-data/storage/
 test-data/hub-data/
 test-data/jwt-token.txt
+test-data/keys/
 
 # Generated test reports
-*TEST_REPORT*.md
-*TEST_SUMMARY*.md
+*TEST*REPORT*.md
+*TEST*SUMMARY*.md
