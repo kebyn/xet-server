@@ -117,12 +117,11 @@ impl StorageBackend for LocalStorage {
     }
 
     async fn get_path(&self, key: &str) -> StorageResult<Option<PathBuf>> {
+        // Return the path without checking existence. The caller handles
+        // missing files via File::open error, avoiding a TOCTOU race between
+        // the exists() check and the subsequent open().
         let path = self.object_path(key)?;
-        if path.exists() {
-            Ok(Some(path))
-        } else {
-            Err(StorageError::NotFound(key.to_string()))
-        }
+        Ok(Some(path))
     }
 
     async fn exists(&self, key: &str) -> StorageResult<bool> {

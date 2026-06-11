@@ -19,7 +19,7 @@ use crate::config::ServerConfig;
 use crate::metrics::GLOBAL_METRICS;
 use crate::state::{StorageState, StorageStateManager};
 use crate::storage::{StorageBackend, StorageError};
-use crate::util::{StreamingHasher, TempFile};
+use crate::util::{DualHasher, TempFile};
 
 /// Upload an LFS object (raw file) via streaming.
 ///
@@ -95,7 +95,7 @@ pub async fn upload_lfs_object(
         }
     };
 
-    let mut hasher = StreamingHasher::new();
+    let mut hasher = DualHasher::new();
     let max_bytes = config.server.max_body_size_bytes() as u64;
     let mut total_bytes: u64 = 0;
 
@@ -146,14 +146,23 @@ pub async fn upload_lfs_object(
     }
 
     // Content integrity verification:
-    // Git LFS clients send SHA-256 OIDs, while xet-native clients use BLAKE3 keyed hashes.
-    // Compute the BLAKE3 hash for internal tracking, but accept the upload regardless of
-    // whether it matches the OID — Git LFS protocol delegates integrity checking to the client.
-    let internal_hash = hasher.finalize().to_hex();
-    if internal_hash == oid {
-        info!("Upload OID matches BLAKE3 internal hash (xet-native client)");
+    // Git LFS clients send SHA-256 OIDs, xet-native clients use BLAKE3 keyed hashes.
+    // Verify the uploaded content matches the claimed OID using whichever algorithm applies.
+    // This prevents storing arbitrary content under a known hash (defense against buggy/malicious clients).
+    let (blake3_hash, sha256_hash) = hasher.finalize();
+    if blake3_hash == oid {
+        info!("Upload verified: OID matches BLAKE3 keyed hash (xet-native client)");
+    } else if sha256_hash == oid {
+        info!("Upload verified: OID matches SHA-256 hash (Git LFS client)");
     } else {
-        info!("Upload OID does not match BLAKE3 hash — treating as Git LFS SHA-256 OID (oid={}, blake3={})", oid, internal_hash);
+        GLOBAL_METRICS.record_request(400);
+        GLOBAL_METRICS.record_latency(start);
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": format!(
+                "Hash mismatch: OID {} does not match BLAKE3 ({}) or SHA-256 ({})",
+                oid, blake3_hash, sha256_hash
+            )
+        }));
     }
 
     let object_key = format!("lfs/objects/{}", oid);
@@ -354,6 +363,10 @@ async fn serve_raw_blob(
             };
             let file_size = metadata.len();
 
+            // Safety: LFS objects are content-addressed and immutable after upload.
+            // The file size cannot change between metadata() and stream completion
+            // because the object key is derived from the content hash, and the server
+            // never modifies a stored object in place.
             use tokio_util::io::ReaderStream;
             let stream = ReaderStream::new(file);
             let body = actix_web::body::SizedStream::new(file_size, stream);
@@ -381,8 +394,12 @@ async fn serve_raw_blob(
         }
         Err(e) => {
             error!("Failed to get path for {}: {}", oid, e);
-            // Fall back to in-memory
-            serve_raw_blob_inmemory(oid, storage, start).await
+            GLOBAL_METRICS.record_request(500);
+            GLOBAL_METRICS.record_error();
+            GLOBAL_METRICS.record_latency(start);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Storage error: {}", e)
+            }))
         }
     }
 }
