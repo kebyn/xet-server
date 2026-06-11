@@ -36,7 +36,7 @@
 **Files:**
 - Modify: `Cargo.toml`
 
-- [ ] **Step 1: Add base64 dependency to Cargo.toml**
+- [x] **Step 1: Add base64 dependency to Cargo.toml**
 
 ```toml
 [dependencies]
@@ -44,12 +44,12 @@
 base64 = "0.22"
 ```
 
-- [ ] **Step 2: Verify dependency is added**
+- [x] **Step 2: Verify dependency is added**
 
 Run: `cargo check`
 Expected: Compilation succeeds with no errors
 
-- [ ] **Step 3: Commit the change**
+- [x] **Step 3: Commit the change**
 
 ```bash
 git add Cargo.toml Cargo.lock
@@ -64,7 +64,7 @@ git commit -m "deps: add base64 for basic auth support"
 - Modify: `src/api/auth.rs`
 - Test: `tests/test_basic_auth.rs`
 
-- [ ] **Step 1: Write failing test for basic auth extraction**
+- [x] **Step 1: Write failing test for basic auth extraction**
 
 Create `tests/test_basic_auth.rs`:
 
@@ -113,12 +113,12 @@ fn test_extract_token_invalid_basic_auth() {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test test_extract_token_from_request --test test_basic_auth`
 Expected: FAIL with "function `extract_token_from_request` not found"
 
-- [ ] **Step 3: Implement extract_token_from_request function**
+- [x] **Step 3: Implement extract_token_from_request function**
 
 Modify `src/api/auth.rs`:
 
@@ -191,12 +191,12 @@ pub fn check_scope(claims: &JwtClaims, required_scope: &str) -> bool {
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cargo test test_extract_token_from_request --test test_basic_auth`
 Expected: PASS (4 tests)
 
-- [ ] **Step 5: Update API endpoints to use new function**
+- [x] **Step 5: Update API endpoints to use new function**
 
 Modify `src/api/xorb.rs` line 70-78:
 
@@ -226,12 +226,12 @@ let token = match crate::api::auth::extract_token_from_request(&req) {
 
 Modify `src/api/shard.rs` line 51-59 (same pattern as above)
 
-- [ ] **Step 6: Run all tests to ensure nothing broke**
+- [x] **Step 6: Run all tests to ensure nothing broke**
 
 Run: `cargo test`
 Expected: All tests pass
 
-- [ ] **Step 7: Commit the changes**
+- [x] **Step 7: Commit the changes**
 
 ```bash
 git add src/api/auth.rs src/api/xorb.rs src/api/shard.rs tests/test_basic_auth.rs
@@ -245,7 +245,7 @@ git commit -m "feat: add basic auth support for Git LFS compatibility"
 **Files:**
 - Create: `scripts/generate-jwt-token.py`
 
-- [ ] **Step 1: Create JWT token generation script**
+- [x] **Step 1: Create JWT token generation script**
 
 Create `scripts/generate-jwt-token.py`:
 
@@ -284,24 +284,24 @@ if __name__ == "__main__":
     print(token)
 ```
 
-- [ ] **Step 2: Make script executable**
+- [x] **Step 2: Make script executable**
 
 ```bash
 chmod +x scripts/generate-jwt-token.py
 ```
 
-- [ ] **Step 3: Install PyJWT dependency**
+- [x] **Step 3: Install PyJWT dependency**
 
 ```bash
 pip3 install PyJWT
 ```
 
-- [ ] **Step 4: Test the script**
+- [x] **Step 4: Test the script**
 
 Run: `python3 scripts/generate-jwt-token.py test-secret-key 24`
 Expected: Outputs a JWT token string
 
-- [ ] **Step 5: Commit the script**
+- [x] **Step 5: Commit the script**
 
 ```bash
 git add scripts/generate-jwt-token.py
@@ -315,7 +315,7 @@ git commit -m "scripts: add JWT token generation utility"
 **Files:**
 - Create: `scripts/setup-test-env.sh`
 
-- [ ] **Step 1: Create setup script**
+- [x] **Step 1: Create setup script**
 
 Create `scripts/setup-test-env.sh`:
 
@@ -362,18 +362,18 @@ echo "  XET_JWT_SECRET=${XET_JWT_SECRET} \\"
 echo "  ./target/release/xet-server"
 ```
 
-- [ ] **Step 2: Make script executable**
+- [x] **Step 2: Make script executable**
 
 ```bash
 chmod +x scripts/setup-test-env.sh
 ```
 
-- [ ] **Step 3: Test the setup script**
+- [x] **Step 3: Test the setup script**
 
 Run: `./scripts/setup-test-env.sh`
 Expected: Builds server, creates directories, generates JWT token
 
-- [ ] **Step 4: Commit the script**
+- [x] **Step 4: Commit the script**
 
 ```bash
 git add scripts/setup-test-env.sh
@@ -387,7 +387,7 @@ git commit -m "scripts: add test environment setup script"
 **Files:**
 - Create: `scripts/setup-git-repo.sh`
 
-- [ ] **Step 1: Create Git repository setup script**
+- [x] **Step 1: Create Git repository setup script**
 
 Create `scripts/setup-git-repo.sh`:
 
@@ -466,13 +466,13 @@ echo "  2. Copy test files to ${REPO_DIR}"
 echo "  3. Run: ./scripts/run-upload-test.sh"
 ```
 
-- [ ] **Step 2: Make script executable**
+- [x] **Step 2: Make script executable**
 
 ```bash
 chmod +x scripts/setup-git-repo.sh
 ```
 
-- [ ] **Step 3: Commit the script**
+- [x] **Step 3: Commit the script**
 
 ```bash
 git add scripts/setup-git-repo.sh
@@ -486,7 +486,7 @@ git commit -m "scripts: add Git repository setup script"
 **Files:**
 - Create: `scripts/run-upload-test.sh`
 
-- [ ] **Step 1: Create upload test script**
+- [x] **Step 1: Create upload test script**
 
 Create `scripts/run-upload-test.sh`:
 
@@ -549,13 +549,13 @@ echo "  1. Verify files were uploaded to storage"
 echo "  2. Run: ./scripts/run-download-test.sh"
 ```
 
-- [ ] **Step 2: Make script executable**
+- [x] **Step 2: Make script executable**
 
 ```bash
 chmod +x scripts/run-upload-test.sh
 ```
 
-- [ ] **Step 3: Commit the script**
+- [x] **Step 3: Commit the script**
 
 ```bash
 git add scripts/run-upload-test.sh
@@ -569,7 +569,7 @@ git commit -m "scripts: add upload test script"
 **Files:**
 - Create: `scripts/run-download-test.sh`
 
-- [ ] **Step 1: Create download test script**
+- [x] **Step 1: Create download test script**
 
 Create `scripts/run-download-test.sh`:
 
@@ -638,13 +638,13 @@ echo "Next steps:"
 echo "  1. Run: ./scripts/validate-metrics.sh"
 ```
 
-- [ ] **Step 2: Make script executable**
+- [x] **Step 2: Make script executable**
 
 ```bash
 chmod +x scripts/run-download-test.sh
 ```
 
-- [ ] **Step 3: Commit the script**
+- [x] **Step 3: Commit the script**
 
 ```bash
 git add scripts/run-download-test.sh
@@ -658,7 +658,7 @@ git commit -m "scripts: add download test script"
 **Files:**
 - Create: `scripts/validate-metrics.sh`
 
-- [ ] **Step 1: Create metrics validation script**
+- [x] **Step 1: Create metrics validation script**
 
 Create `scripts/validate-metrics.sh`:
 
@@ -760,13 +760,13 @@ else
 fi
 ```
 
-- [ ] **Step 2: Make script executable**
+- [x] **Step 2: Make script executable**
 
 ```bash
 chmod +x scripts/validate-metrics.sh
 ```
 
-- [ ] **Step 3: Commit the script**
+- [x] **Step 3: Commit the script**
 
 ```bash
 git add scripts/validate-metrics.sh
@@ -780,7 +780,7 @@ git commit -m "scripts: add metrics validation script"
 **Files:**
 - Create: `docs/TESTING_GUIDE.md`
 
-- [ ] **Step 1: Create testing guide**
+- [x] **Step 1: Create testing guide**
 
 Create `docs/TESTING_GUIDE.md`:
 
@@ -980,7 +980,7 @@ rm -rf test-data/
 - Add automated test suite
 ```
 
-- [ ] **Step 2: Commit the guide**
+- [x] **Step 2: Commit the guide**
 
 ```bash
 git add docs/TESTING_GUIDE.md
@@ -994,7 +994,7 @@ git commit -m "docs: add testing guide for HF integration"
 **Files:**
 - Test data: `test-data/`
 
-- [ ] **Step 1: Run setup script**
+- [x] **Step 1: Run setup script**
 
 ```bash
 ./scripts/setup-test-env.sh
@@ -1002,7 +1002,7 @@ git commit -m "docs: add testing guide for HF integration"
 
 Expected: Server builds, directories created, JWT token generated
 
-- [ ] **Step 2: Start the server (in background or separate terminal)**
+- [x] **Step 2: Start the server (in background or separate terminal)**
 
 ```bash
 XET_HOST=127.0.0.1 \
@@ -1019,7 +1019,7 @@ curl http://127.0.0.1:8080/health
 # Expected: {"status":"ok"}
 ```
 
-- [ ] **Step 3: Setup Git repository**
+- [x] **Step 3: Setup Git repository**
 
 ```bash
 ./scripts/setup-git-repo.sh
@@ -1027,7 +1027,7 @@ curl http://127.0.0.1:8080/health
 
 Expected: Git repository created and configured
 
-- [ ] **Step 4: Create test file**
+- [x] **Step 4: Create test file**
 
 ```bash
 dd if=/dev/urandom of=test-data/test-repo/test-model.bin bs=1M count=5
@@ -1035,7 +1035,7 @@ dd if=/dev/urandom of=test-data/test-repo/test-model.bin bs=1M count=5
 
 Expected: 5MB test file created
 
-- [ ] **Step 5: Run upload test**
+- [x] **Step 5: Run upload test**
 
 ```bash
 ./scripts/run-upload-test.sh
@@ -1046,7 +1046,7 @@ Expected:
 - Upload metrics incremented
 - No errors
 
-- [ ] **Step 6: Run download test**
+- [x] **Step 6: Run download test**
 
 ```bash
 ./scripts/run-download-test.sh
@@ -1057,7 +1057,7 @@ Expected:
 - Hashes match (data integrity verified)
 - Download metrics incremented
 
-- [ ] **Step 7: Validate metrics**
+- [x] **Step 7: Validate metrics**
 
 ```bash
 ./scripts/validate-metrics.sh
@@ -1067,7 +1067,7 @@ Expected:
 - All key metrics present and non-zero
 - Validation passes
 
-- [ ] **Step 8: Document test results**
+- [x] **Step 8: Document test results**
 
 Create `test-data/TEST_RESULTS.md`:
 
@@ -1098,7 +1098,7 @@ Create `test-data/TEST_RESULTS.md`:
 [Any observations or issues encountered]
 ```
 
-- [ ] **Step 9: Commit test results**
+- [x] **Step 9: Commit test results**
 
 ```bash
 git add test-data/TEST_RESULTS.md

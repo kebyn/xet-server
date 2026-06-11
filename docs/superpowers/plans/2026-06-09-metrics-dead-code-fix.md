@@ -20,7 +20,7 @@
 - Create: `src/middleware.rs`
 - Modify: `src/lib.rs:38-48`
 
-- [ ] **Step 1: Write test for middleware module existence**
+- [x] **Step 1: Write test for middleware module existence**
 
 Create `tests/test_middleware.rs`:
 
@@ -60,12 +60,12 @@ async fn test_middleware_tracks_connections() {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test test_middleware_tracks_connections --test test_middleware -- --nocapture`
 Expected: FAIL with "unresolved import `xet_server::middleware`" or similar
 
-- [ ] **Step 3: Create middleware module**
+- [x] **Step 3: Create middleware module**
 
 Create `src/middleware.rs`:
 
@@ -98,7 +98,7 @@ pub async fn metrics_middleware(
 }
 ```
 
-- [ ] **Step 4: Export middleware module in lib.rs**
+- [x] **Step 4: Export middleware module in lib.rs**
 
 Modify `src/lib.rs` line 48, add after `pub mod metrics;`:
 
@@ -107,12 +107,12 @@ pub mod metrics;
 pub mod middleware;
 ```
 
-- [ ] **Step 5: Run test to verify it passes**
+- [x] **Step 5: Run test to verify it passes**
 
 Run: `cargo test test_middleware_tracks_connections --test test_middleware -- --nocapture`
 Expected: PASS
 
-- [ ] **Step 6: Commit middleware**
+- [x] **Step 6: Commit middleware**
 
 ```bash
 git add src/middleware.rs src/lib.rs tests/test_middleware.rs
@@ -131,7 +131,7 @@ git commit -m "feat: add metrics middleware for connection tracking
 **Files:**
 - Modify: `src/server.rs:3,26,32-37`
 
-- [ ] **Step 1: Write test for middleware registration**
+- [x] **Step 1: Write test for middleware registration**
 
 Add to `tests/test_middleware.rs`:
 
@@ -161,12 +161,12 @@ async fn test_server_has_middleware() {
 }
 ```
 
-- [ ] **Step 2: Run test to verify setup**
+- [x] **Step 2: Run test to verify setup**
 
 Run: `cargo test test_server_has_middleware --test test_middleware -- --nocapture`
 Expected: PASS (test setup is already correct from Task 1)
 
-- [ ] **Step 3: Register middleware in server.rs**
+- [x] **Step 3: Register middleware in server.rs**
 
 Modify `src/server.rs`:
 
@@ -196,12 +196,12 @@ To:
 .wrap(from_fn(metrics_middleware))
 ```
 
-- [ ] **Step 4: Run all tests to verify nothing broke**
+- [x] **Step 4: Run all tests to verify nothing broke**
 
 Run: `cargo test --lib --tests`
 Expected: All tests PASS
 
-- [ ] **Step 5: Commit middleware registration**
+- [x] **Step 5: Commit middleware registration**
 
 ```bash
 git add src/server.rs tests/test_middleware.rs
@@ -219,7 +219,7 @@ git commit -m "feat: register metrics middleware in server
 **Files:**
 - Modify: `src/api/reconstruction.rs:227-237`
 
-- [ ] **Step 1: Write test for V2 download tracking**
+- [x] **Step 1: Write test for V2 download tracking**
 
 Create `tests/test_download_tracking.rs`:
 
@@ -273,12 +273,12 @@ async fn test_v2_reconstruction_tracks_download_bytes() {
 }
 ```
 
-- [ ] **Step 2: Run test to verify current state**
+- [x] **Step 2: Run test to verify current state**
 
 Run: `cargo test test_v2_reconstruction_tracks_download_bytes --test test_download_tracking -- --nocapture`
 Expected: PASS (404 case doesn't increment, which is already correct)
 
-- [ ] **Step 3: Add download tracking to V2 handler**
+- [x] **Step 3: Add download tracking to V2 handler**
 
 Modify `src/api/reconstruction.rs` in `get_reconstruction()` function, before the metrics recording (around line 233):
 
@@ -318,12 +318,12 @@ To:
     HttpResponse::Ok().json(response)
 ```
 
-- [ ] **Step 4: Run test to verify it still passes**
+- [x] **Step 4: Run test to verify it still passes**
 
 Run: `cargo test test_v2_reconstruction_tracks_download_bytes --test test_download_tracking -- --nocapture`
 Expected: PASS
 
-- [ ] **Step 5: Commit V2 download tracking**
+- [x] **Step 5: Commit V2 download tracking**
 
 ```bash
 git add src/api/reconstruction.rs tests/test_download_tracking.rs
@@ -341,7 +341,7 @@ git commit -m "feat: track download bytes in V2 reconstruction endpoint
 **Files:**
 - Modify: `src/api/reconstruction.rs:23-34,119-128`
 
-- [ ] **Step 1: Write test for V1 size field**
+- [x] **Step 1: Write test for V1 size field**
 
 Add to `tests/test_download_tracking.rs`:
 
@@ -380,12 +380,12 @@ async fn test_v1_response_includes_size() {
 }
 ```
 
-- [ ] **Step 2: Run test to verify baseline**
+- [x] **Step 2: Run test to verify baseline**
 
 Run: `cargo test test_v1_response_includes_size --test test_download_tracking -- --nocapture`
 Expected: PASS
 
-- [ ] **Step 3: Add size field to V1 response structures**
+- [x] **Step 3: Add size field to V1 response structures**
 
 Modify `src/api/reconstruction.rs`, change `XorbInfoV1` struct (lines 23-27):
 
@@ -408,7 +408,7 @@ struct XorbInfoV1 {
 }
 ```
 
-- [ ] **Step 4: Populate size field when building V1 response**
+- [x] **Step 4: Populate size field when building V1 response**
 
 Modify `src/api/reconstruction.rs` in `get_reconstruction_v1()`, change the xorb info building (lines 119-128):
 
@@ -444,12 +444,12 @@ To:
         }
 ```
 
-- [ ] **Step 5: Run test to verify it still passes**
+- [x] **Step 5: Run test to verify it still passes**
 
 Run: `cargo test test_v1_response_includes_size --test test_download_tracking -- --nocapture`
 Expected: PASS
 
-- [ ] **Step 6: Commit V1 size field**
+- [x] **Step 6: Commit V1 size field**
 
 ```bash
 git add src/api/reconstruction.rs tests/test_download_tracking.rs
@@ -467,7 +467,7 @@ git commit -m "feat: add size field to V1 reconstruction response
 **Files:**
 - Modify: `src/api/reconstruction.rs:131-140`
 
-- [ ] **Step 1: Extend test for V1 download tracking**
+- [x] **Step 1: Extend test for V1 download tracking**
 
 Add to `tests/test_download_tracking.rs`:
 
@@ -511,12 +511,12 @@ async fn test_v1_reconstruction_tracks_download_bytes() {
 }
 ```
 
-- [ ] **Step 2: Run test to verify current state**
+- [x] **Step 2: Run test to verify current state**
 
 Run: `cargo test test_v1_reconstruction_tracks_download_bytes --test test_download_tracking -- --nocapture`
 Expected: PASS (404 case doesn't increment)
 
-- [ ] **Step 3: Add download tracking to V1 handler**
+- [x] **Step 3: Add download tracking to V1 handler**
 
 Modify `src/api/reconstruction.rs` in `get_reconstruction_v1()` function, before the metrics recording (around line 136):
 
@@ -554,12 +554,12 @@ To:
     HttpResponse::Ok().json(response)
 ```
 
-- [ ] **Step 4: Run test to verify it still passes**
+- [x] **Step 4: Run test to verify it still passes**
 
 Run: `cargo test test_v1_reconstruction_tracks_download_bytes --test test_download_tracking -- --nocapture`
 Expected: PASS
 
-- [ ] **Step 5: Commit V1 download tracking**
+- [x] **Step 5: Commit V1 download tracking**
 
 ```bash
 git add src/api/reconstruction.rs tests/test_download_tracking.rs
@@ -577,32 +577,32 @@ git commit -m "feat: track download bytes in V1 reconstruction endpoint
 **Files:**
 - None (verification only)
 
-- [ ] **Step 1: Run all tests**
+- [x] **Step 1: Run all tests**
 
 Run: `cargo test --lib --tests`
 Expected: All tests PASS
 
-- [ ] **Step 2: Verify metrics endpoint includes new metrics**
+- [x] **Step 2: Verify metrics endpoint includes new metrics**
 
 Run: `cargo test test_metrics_endpoint --test test_metrics -- --nocapture`
 Expected: PASS
 
-- [ ] **Step 3: Verify connection tracking works end-to-end**
+- [x] **Step 3: Verify connection tracking works end-to-end**
 
 Run: `cargo test test_middleware_tracks_connections --test test_middleware -- --nocapture`
 Expected: PASS
 
-- [ ] **Step 4: Verify download tracking works end-to-end**
+- [x] **Step 4: Verify download tracking works end-to-end**
 
 Run: `cargo test test_v1_reconstruction_tracks_download_bytes test_v2_reconstruction_tracks_download_bytes --test test_download_tracking -- --nocapture`
 Expected: PASS
 
-- [ ] **Step 5: Build release to verify no warnings**
+- [x] **Step 5: Build release to verify no warnings**
 
 Run: `cargo build --release 2>&1 | grep -i warning || echo "No warnings"`
 Expected: "No warnings" or no output
 
-- [ ] **Step 6: Final commit (if any test adjustments needed)**
+- [x] **Step 6: Final commit (if any test adjustments needed)**
 
 ```bash
 git add .
