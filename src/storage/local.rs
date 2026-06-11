@@ -116,6 +116,15 @@ impl StorageBackend for LocalStorage {
         }
     }
 
+    async fn get_path(&self, key: &str) -> StorageResult<Option<PathBuf>> {
+        let path = self.object_path(key)?;
+        if path.exists() {
+            Ok(Some(path))
+        } else {
+            Err(StorageError::NotFound(key.to_string()))
+        }
+    }
+
     async fn exists(&self, key: &str) -> StorageResult<bool> {
         let path = self.object_path(key)?;
         Ok(path.exists())

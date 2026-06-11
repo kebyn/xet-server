@@ -15,6 +15,7 @@ thiserror = "2.0"
 hex = "0.4"
 lz4_flex = "0.11"
 tokio = { version = "1.36", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io"] }
 actix-web = "4.5"
 serde_json = "1.0"
 async-trait = "0.1"
