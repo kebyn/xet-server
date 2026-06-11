@@ -159,10 +159,7 @@ impl XetSigner {
         }
 
         // Parse JWT
-        let token_body = match token.strip_prefix("proxy_") {
-            Some(body) => body,
-            None => return None,
-        };
+        let token_body = token.strip_prefix("proxy_")?;
 
         let parts: Vec<&str> = token_body.split('.').collect();
         if parts.len() != 3 {
@@ -195,10 +192,7 @@ impl XetSigner {
             Err(_) => return None,
         };
 
-        match serde_json::from_slice(&claims_json) {
-            Ok(claims) => Some(claims),
-            Err(_) => None,
-        }
+        serde_json::from_slice(&claims_json).ok()
     }
 
     /// Get the key ID

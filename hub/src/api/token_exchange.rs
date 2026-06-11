@@ -15,6 +15,7 @@ pub struct TokenExchangeResponse {
 }
 
 /// Internal helper to handle token exchange
+#[allow(clippy::too_many_arguments)]
 async fn do_exchange(
     info: &TokenInfo,
     path_namespace: &str,

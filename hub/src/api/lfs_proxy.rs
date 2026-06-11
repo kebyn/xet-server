@@ -21,27 +21,24 @@ fn extract_token(req: &HttpRequest) -> Option<String> {
         // Try Basic auth (username:password where password is the token)
         if let Some(encoded) = auth_str.strip_prefix("Basic ") {
             use base64::{engine::general_purpose::STANDARD, Engine as _};
-            if let Ok(decoded) = STANDARD.decode(encoded) {
-                if let Ok(creds) = String::from_utf8(decoded) {
-                    if let Some((_user, pass)) = creds.split_once(':') {
+            if let Ok(decoded) = STANDARD.decode(encoded)
+                && let Ok(creds) = String::from_utf8(decoded)
+                    && let Some((_user, pass)) = creds.split_once(':') {
                         return Some(pass.to_string());
                     }
-                }
-            }
         }
     }
 
     // Fall back to query parameter token (?token=...)
     if let Some(query) = req.uri().query() {
         for pair in query.split('&') {
-            if let Some((key, value)) = pair.split_once('=') {
-                if key == "token" {
+            if let Some((key, value)) = pair.split_once('=')
+                && key == "token" {
                     // URL-decode the token value to handle special characters
                     if let Ok(decoded) = percent_encoding::percent_decode_str(value).decode_utf8() {
                         return Some(decoded.into_owned());
                     }
                 }
-            }
         }
     }
 
@@ -64,8 +61,8 @@ fn rewrite_batch_urls(
         Err(_) => return, // Invalid hub URL, skip rewriting
     };
 
-    if let Some(objects) = response.get_mut("objects") {
-        if let Some(arr) = objects.as_array_mut() {
+    if let Some(objects) = response.get_mut("objects")
+        && let Some(arr) = objects.as_array_mut() {
             for obj in arr {
                 // Clone oid to avoid borrow conflict
                 let oid = obj.get("oid").and_then(|o| o.as_str()).unwrap_or("").to_string();
@@ -90,7 +87,6 @@ fn rewrite_batch_urls(
                 }
             }
         }
-    }
 }
 
 /// Rewrite a single action's URL and auth header with proxy token
@@ -115,22 +111,20 @@ fn rewrite_action_url(action: &mut serde_json::Value, hub_url: &url::Url, proxy_
             url.to_string()
         });
 
-    if let Some(href) = new_href {
-        if let Some(action_obj) = action.as_object_mut() {
+    if let Some(href) = new_href
+        && let Some(action_obj) = action.as_object_mut() {
             action_obj.insert("href".to_string(), serde_json::Value::String(href));
         }
-    }
 
     // Always replace Authorization header with proxy token if present
     // This ensures internal CAS tokens are never leaked to clients
-    if action.get("header").and_then(|h| h.get("Authorization")).is_some() {
-        if let Some(header_obj) = action.get_mut("header").and_then(|h| h.as_object_mut()) {
+    if action.get("header").and_then(|h| h.get("Authorization")).is_some()
+        && let Some(header_obj) = action.get_mut("header").and_then(|h| h.as_object_mut()) {
             header_obj.insert(
                 "Authorization".to_string(),
                 serde_json::Value::String(format!("Bearer {}", proxy_token)),
             );
         }
-    }
 }
 
 /// Validate OID format (64 hex characters)
