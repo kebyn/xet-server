@@ -86,7 +86,7 @@ impl Default for StorageSettings {
     fn default() -> Self {
         StorageSettings {
             data_dir: "./data".to_string(),
-            inline_threshold_bytes: 1 * 1024 * 1024, // 1MB
+            inline_threshold_bytes: 1024 * 1024, // 1MB
             lfs_threshold_bytes: 10 * 1024 * 1024,   // 10MB
         }
     }
@@ -94,6 +94,7 @@ impl Default for StorageSettings {
 
 /// Main configuration for the Hub API
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct HubConfig {
     pub server: ServerSettings,
     pub auth: AuthSettings,
@@ -102,17 +103,6 @@ pub struct HubConfig {
     pub storage: StorageSettings,
 }
 
-impl Default for HubConfig {
-    fn default() -> Self {
-        HubConfig {
-            server: ServerSettings::default(),
-            auth: AuthSettings::default(),
-            metadata: MetadataSettings::default(),
-            cas: CasSettings::default(),
-            storage: StorageSettings::default(),
-        }
-    }
-}
 
 impl HubConfig {
     /// Load configuration from environment variables
@@ -154,7 +144,7 @@ impl HubConfig {
                 inline_threshold_bytes: env::var("HUB_INLINE_THRESHOLD")
                     .ok()
                     .and_then(|t| t.parse().ok())
-                    .unwrap_or(1 * 1024 * 1024),
+                    .unwrap_or(1024 * 1024),
                 lfs_threshold_bytes: env::var("HUB_LFS_THRESHOLD")
                     .ok()
                     .and_then(|t| t.parse().ok())

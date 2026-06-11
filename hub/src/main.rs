@@ -64,10 +64,10 @@ fn create_token_command(args: &[String]) -> std::io::Result<()> {
     let db_path = db_path.unwrap_or("hub.db");
 
     let token_store = TokenStore::new(db_path)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        .map_err(std::io::Error::other)?;
 
     let token = token_store.create_token(username, name, scope)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        .map_err(std::io::Error::other)?;
 
     println!("Token created successfully!");
     println!("Username: {}", username);

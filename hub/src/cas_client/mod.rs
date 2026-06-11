@@ -165,7 +165,7 @@ impl CasClient {
                     .limit(512 * 1024 * 1024) // 512MB
                     .await
                     .map_err(|e| HubError::CasError(e.to_string()))?;
-                Ok(body.into())
+                Ok(body)
             }
             404 => Err(HubError::NotFound(format!("Object not found: {}", oid))),
             code => Err(HubError::CasError(format!("CAS returned {}", code))),

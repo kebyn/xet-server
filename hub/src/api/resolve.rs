@@ -24,7 +24,7 @@ async fn resolve_revision(
         let head = metadata.get_head(repo_id).await.ok().flatten();
         match head {
             Some(h) => Ok(h),
-            None => Err(format!("No HEAD found for repo")),
+            None => Err("No HEAD found for repo".to_string()),
         }
     } else {
         Err(format!("Revision not found: {} (only 'main' branch or commit hashes are supported)", revision))

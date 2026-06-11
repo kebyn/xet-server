@@ -110,11 +110,10 @@ impl TokenStore {
                 if revoked_at.is_some() {
                     return Ok(None);
                 }
-                if let Some(exp) = expires_at {
-                    if (exp as u64) < now_secs() {
+                if let Some(exp) = expires_at
+                    && (exp as u64) < now_secs() {
                         return Ok(None);
                     }
-                }
                 Ok(Some(TokenInfo {
                     user_id,
                     username,

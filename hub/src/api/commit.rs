@@ -76,11 +76,7 @@ fn generate_commit_id(repo_id: i64, parent: Option<&str>, message: &str, timesta
 
 /// Decode base64 content (handles "base64:" prefix or raw base64)
 fn decode_base64_content(content: &str) -> Result<Vec<u8>, String> {
-    let content_to_decode = if content.starts_with("base64:") {
-        &content[7..]
-    } else {
-        content
-    };
+    let content_to_decode = content.strip_prefix("base64:").unwrap_or(content);
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     STANDARD.decode(content_to_decode).map_err(|e| format!("Base64 decode error: {}", e))
 }
