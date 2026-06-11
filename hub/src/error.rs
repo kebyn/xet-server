@@ -69,9 +69,3 @@ impl From<rusqlite::Error> for HubError {
         HubError::Internal(format!("Database error: {}", e))
     }
 }
-
-impl From<reqwest::Error> for HubError {
-    fn from(e: reqwest::Error) -> Self {
-        HubError::CasError(format!("CAS request failed: {}", e))
-    }
-}

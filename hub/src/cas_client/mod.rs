@@ -1,7 +1,9 @@
-use reqwest::Client;
 use serde::Deserialize;
+use std::sync::Once;
 use crate::config::CasSettings;
 use crate::error::HubError;
+
+static RUSTLS_INIT: Once = Once::new();
 
 /// Blob state from CAS
 #[derive(Debug, Deserialize)]
@@ -12,35 +14,48 @@ pub struct BlobState {
     pub sha256: String,
 }
 
-/// CAS HTTP client for communicating with the content addressable storage
+/// CAS HTTP client for communicating with the content addressable storage.
+/// Uses awc (actix-web client) to avoid runtime conflicts with actix-web.
+/// Note: awc::Client uses Rc internally and is not Send+Sync, so we create
+/// a new client per request. For high-throughput scenarios, consider switching
+/// to reqwest or using a connection pool with a Send-safe client.
 pub struct CasClient {
-    http: Client,
     base_url: String,
+    timeout: std::time::Duration,
 }
 
 impl CasClient {
     /// Create a new CAS client from settings
     pub fn new(settings: &CasSettings) -> Self {
-        let http = Client::builder()
-            .timeout(std::time::Duration::from_secs(settings.internal_timeout_seconds))
-            .build()
-            .expect("Failed to build HTTP client");
         Self {
-            http,
             base_url: settings.base_url.trim_end_matches('/').to_string(),
+            timeout: std::time::Duration::from_secs(settings.internal_timeout_seconds),
         }
+    }
+
+    /// Create an awc client for a single request.
+    fn client(&self) -> awc::Client {
+        // Ensure rustls crypto provider is installed (needed for HTTPS connections)
+        RUSTLS_INIT.call_once(|| {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+        });
+        awc::Client::builder()
+            .timeout(self.timeout)
+            .finish()
     }
 
     /// HEAD a blob to check existence and state
     pub async fn head_blob(&self, oid: &str, internal_token: &str) -> Result<BlobState, HubError> {
         let url = format!("{}/internal/blob/{}", self.base_url, oid);
-        let resp = self.http
+        let resp = self.client()
             .head(&url)
-            .header("Authorization", format!("Bearer {}", internal_token))
+            .insert_header(("Authorization", format!("Bearer {}", internal_token)))
             .send()
-            .await?;
+            .await
+            .map_err(|e| HubError::CasError(format!("CAS request failed: {}", e)))?;
 
-        match resp.status().as_u16() {
+        let status = resp.status().as_u16();
+        match status {
             200 => {
                 let state = resp
                     .headers()
@@ -68,18 +83,24 @@ impl CasClient {
     /// Get full blob state via internal API
     pub async fn get_state(&self, oid: &str, internal_token: &str) -> Result<Option<BlobState>, HubError> {
         let url = format!("{}/internal/state/{}", self.base_url, oid);
-        let resp = self.http
+        let mut resp = self.client()
             .get(&url)
-            .header("Authorization", format!("Bearer {}", internal_token))
+            .insert_header(("Authorization", format!("Bearer {}", internal_token)))
             .send()
-            .await?;
+            .await
+            .map_err(|e| HubError::CasError(format!("CAS request failed: {}", e)))?;
 
-        match resp.status().as_u16() {
-            200 => Ok(Some(
-                resp.json()
+        let status = resp.status().as_u16();
+        match status {
+            200 => {
+                let body: serde_json::Value = resp
+                    .json()
                     .await
-                    .map_err(|e| HubError::CasError(e.to_string()))?
-            )),
+                    .map_err(|e| HubError::CasError(e.to_string()))?;
+                let state: BlobState = serde_json::from_value(body)
+                    .map_err(|e| HubError::CasError(e.to_string()))?;
+                Ok(Some(state))
+            }
             404 => Ok(None),
             code => Err(HubError::CasError(format!("CAS returned {}", code))),
         }
@@ -88,36 +109,37 @@ impl CasClient {
     /// Proxy a Git LFS batch request to CAS
     pub async fn proxy_batch(&self, body: &serde_json::Value, token: &str) -> Result<serde_json::Value, HubError> {
         let url = format!("{}/objects/batch", self.base_url);
-        let resp = self.http
+        let mut resp = self.client()
             .post(&url)
-            .header("Authorization", format!("Bearer {}", token))
-            .json(body)
-            .send()
-            .await?;
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .insert_header(("Content-Type", "application/vnd.git-lfs+json"))
+            .send_json(&body)
+            .await
+            .map_err(|e| HubError::CasError(format!("CAS request failed: {}", e)))?;
 
         let status = resp.status().as_u16();
-        let body: serde_json::Value = resp
+        let resp_body: serde_json::Value = resp
             .json()
             .await
             .map_err(|e| HubError::CasError(e.to_string()))?;
 
         if status >= 400 {
-            return Err(HubError::CasError(format!("CAS batch error: {}", body)));
+            return Err(HubError::CasError(format!("CAS batch error: {}", resp_body)));
         }
 
-        Ok(body)
+        Ok(resp_body)
     }
 
     /// Upload a blob to CAS via LFS endpoint
     pub async fn proxy_lfs_upload(&self, oid: &str, data: bytes::Bytes, token: &str) -> Result<(), HubError> {
         let url = format!("{}/lfs/objects/{}", self.base_url, oid);
-        let resp = self.http
+        let resp = self.client()
             .put(&url)
-            .header("Authorization", format!("Bearer {}", token))
-            .header("Content-Type", "application/octet-stream")
-            .body(data)
-            .send()
-            .await?;
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .insert_header(("Content-Type", "application/octet-stream"))
+            .send_body(data)
+            .await
+            .map_err(|e| HubError::CasError(format!("CAS request failed: {}", e)))?;
 
         if resp.status().is_success() {
             Ok(())
@@ -129,17 +151,22 @@ impl CasClient {
     /// Download a blob from CAS via LFS endpoint
     pub async fn proxy_lfs_download(&self, oid: &str, token: &str) -> Result<bytes::Bytes, HubError> {
         let url = format!("{}/lfs/objects/{}", self.base_url, oid);
-        let resp = self.http
+        let mut resp = self.client()
             .get(&url)
-            .header("Authorization", format!("Bearer {}", token))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
             .send()
-            .await?;
+            .await
+            .map_err(|e| HubError::CasError(format!("CAS request failed: {}", e)))?;
 
         match resp.status().as_u16() {
-            200 => Ok(resp
-                .bytes()
-                .await
-                .map_err(|e| HubError::CasError(e.to_string()))?),
+            200 => {
+                let body = resp
+                    .body()
+                    .limit(512 * 1024 * 1024) // 512MB
+                    .await
+                    .map_err(|e| HubError::CasError(e.to_string()))?;
+                Ok(body.into())
+            }
             404 => Err(HubError::NotFound(format!("Object not found: {}", oid))),
             code => Err(HubError::CasError(format!("CAS returned {}", code))),
         }
@@ -150,10 +177,6 @@ impl CasClient {
 mod tests {
     use super::*;
     use crate::config::CasSettings;
-
-    fn create_test_client() -> CasClient {
-        CasClient::new(&CasSettings::default())
-    }
 
     #[test]
     fn test_client_creation() {

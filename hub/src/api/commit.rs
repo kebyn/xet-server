@@ -49,7 +49,14 @@ pub struct DeletedEntryOperation {
 /// Commit response
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CommitResponse {
+    #[serde(rename = "commitOid")]
     pub commit_oid: String,
+    #[serde(rename = "commitUrl")]
+    pub commit_url: String,
+    #[serde(rename = "prUrl")]
+    pub pr_url: Option<String>,
+    #[serde(rename = "prNum")]
+    pub pr_num: Option<u64>,
 }
 
 /// Extract Bearer token from Authorization header
@@ -368,7 +375,12 @@ async fn handle_commit(
         }
     }
 
-    HttpResponse::Ok().json(CommitResponse { commit_oid: commit_id })
+    HttpResponse::Ok().json(CommitResponse {
+        commit_oid: commit_id.clone(),
+        commit_url: format!("/{}/{}/commit/{}", namespace, repo_name, commit_id),
+        pr_url: None,
+        pr_num: None,
+    })
 }
 
 // Model commit handler

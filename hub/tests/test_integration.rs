@@ -288,7 +288,8 @@ async fn test_preupload_endpoint() {
     assert!(resp.status().is_success());
 
     let body: serde_json::Value = test::read_body_json(resp).await;
-    assert_eq!(body["files"][0]["upload_mode"], "regular");
+    // Response uses camelCase (uploadMode) for HF CLI compatibility
+    assert_eq!(body["files"][0]["uploadMode"], "regular");
 }
 
 #[actix_web::test]

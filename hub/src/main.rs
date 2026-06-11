@@ -5,6 +5,10 @@ use hub_api::auth::token_store::TokenStore;
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     tracing_subscriber::fmt::init();
+
+    // Note: rustls crypto provider is initialized in CasClient::client()
+    // using std::sync::Once to ensure it's only done once.
+
     let args: Vec<String> = std::env::args().collect();
 
     if args.len() > 1 && args[1] == "create-token" {

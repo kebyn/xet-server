@@ -151,37 +151,62 @@ async fn handle_tree(
     // Build response
     let mut tree_entries: Vec<TreeEntry> = Vec::new();
 
-    // Add directories
-    let dirs = infer_directories(&entries, &tree_path);
-    for dir in dirs {
-        tree_entries.push(TreeEntry {
-            entry_type: "directory".to_string(),
-            oid: None,
-            size: 0,
-            path: if tree_path.is_empty() {
-                dir
+    // Check for recursive query parameter (proper parsing, not substring match)
+    let recursive = req.uri().query()
+        .map(|q| {
+            q.split('&').any(|pair| {
+                pair.split_once('=')
+                    .map(|(k, v)| k == "recursive" && v == "true")
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false);
+
+    if recursive {
+        // Recursive mode: return all files with full paths, no directory inference
+        for entry in entries.iter() {
+            let rel_path = if tree_path.is_empty() {
+                entry.path.clone()
             } else {
-                format!("{}{}", tree_path, dir)
-            },
-        });
-    }
-
-    // Add files (only files at the current level, not in subdirectories)
-    for entry in entries.iter() {
-        let rel_path = if tree_path.is_empty() {
-            entry.path.clone()
-        } else {
-            entry.path.strip_prefix(&tree_path).unwrap_or(&entry.path).to_string()
-        };
-
-        // Only include files at the current level (no '/' in rel_path)
-        if !rel_path.contains('/') {
+                entry.path.strip_prefix(&tree_path).unwrap_or(&entry.path).to_string()
+            };
             tree_entries.push(TreeEntry {
                 entry_type: "file".to_string(),
                 oid: Some(entry.cas_hash.clone()),
                 size: entry.size,
-                path: entry.path.clone(),
+                path: rel_path,
             });
+        }
+    } else {
+        // Non-recursive: add directories and current-level files
+        let dirs = infer_directories(&entries, &tree_path);
+        for dir in dirs {
+            tree_entries.push(TreeEntry {
+                entry_type: "directory".to_string(),
+                oid: None,
+                size: 0,
+                path: if tree_path.is_empty() {
+                    dir
+                } else {
+                    format!("{}{}", tree_path, dir)
+                },
+            });
+        }
+
+        for entry in entries.iter() {
+            let rel_path = if tree_path.is_empty() {
+                entry.path.clone()
+            } else {
+                entry.path.strip_prefix(&tree_path).unwrap_or(&entry.path).to_string()
+            };
+            if !rel_path.contains('/') {
+                tree_entries.push(TreeEntry {
+                    entry_type: "file".to_string(),
+                    oid: Some(entry.cas_hash.clone()),
+                    size: entry.size,
+                    path: entry.path.clone(),
+                });
+            }
         }
     }
 
@@ -219,6 +244,46 @@ pub async fn tree_space(
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
     handle_tree(req, path, RepoType::Space, token_store, metadata).await
+}
+
+// Generic no-path tree handler
+async fn handle_tree_no_path(
+    req: HttpRequest,
+    path: web::Path<(String, String, String)>,
+    repo_type: RepoType,
+    token_store: web::Data<std::sync::Arc<TokenStore>>,
+    metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
+) -> HttpResponse {
+    let (ns, repo, rev) = path.into_inner();
+    let full_path = web::Path::from((ns, repo, rev, "".to_string()));
+    handle_tree(req, full_path, repo_type, token_store, metadata).await
+}
+
+pub async fn tree_model_no_path(
+    req: HttpRequest,
+    path: web::Path<(String, String, String)>,
+    token_store: web::Data<std::sync::Arc<TokenStore>>,
+    metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
+) -> HttpResponse {
+    handle_tree_no_path(req, path, RepoType::Model, token_store, metadata).await
+}
+
+pub async fn tree_dataset_no_path(
+    req: HttpRequest,
+    path: web::Path<(String, String, String)>,
+    token_store: web::Data<std::sync::Arc<TokenStore>>,
+    metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
+) -> HttpResponse {
+    handle_tree_no_path(req, path, RepoType::Dataset, token_store, metadata).await
+}
+
+pub async fn tree_space_no_path(
+    req: HttpRequest,
+    path: web::Path<(String, String, String)>,
+    token_store: web::Data<std::sync::Arc<TokenStore>>,
+    metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
+) -> HttpResponse {
+    handle_tree_no_path(req, path, RepoType::Space, token_store, metadata).await
 }
 
 #[cfg(test)]
