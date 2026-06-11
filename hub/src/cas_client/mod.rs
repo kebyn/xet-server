@@ -131,20 +131,23 @@ impl CasClient {
     }
 
     /// Upload a blob to CAS via LFS endpoint (buffered version)
-    pub async fn proxy_lfs_upload(&self, oid: &str, data: bytes::Bytes, token: &str) -> Result<(), HubError> {
+    pub async fn proxy_lfs_upload(&self, oid: &str, data: bytes::Bytes, token: &str) -> Result<(), (u16, String)> {
         let url = format!("{}/lfs/objects/{}", self.base_url, oid);
-        let resp = self.client()
+        let mut resp = self.client()
             .put(&url)
             .insert_header(("Authorization", format!("Bearer {}", token)))
             .insert_header(("Content-Type", "application/octet-stream"))
             .send_body(data)
             .await
-            .map_err(|e| HubError::CasError(format!("CAS request failed: {}", e)))?;
+            .map_err(|e| (502u16, format!("CAS request failed: {}", e)))?;
 
+        let status = resp.status().as_u16();
         if resp.status().is_success() {
             Ok(())
         } else {
-            Err(HubError::CasError(format!("CAS upload failed: {}", resp.status())))
+            let body = resp.body().await.map_err(|e| (status, format!("Failed to read CAS response: {}", e)))?;
+            let error_msg = String::from_utf8_lossy(&body).to_string();
+            Err((status, error_msg))
         }
     }
 

@@ -1,5 +1,5 @@
 use actix_web::{web, HttpRequest, HttpResponse};
-use crate::auth::extract::{AuthUser, AuthAny};
+use crate::auth::extract::{AuthUser, AuthRead};
 use crate::metadata::{FileEntry, MetadataStore, RepoType};
 use serde::Serialize;
 use std::collections::HashSet;
@@ -69,7 +69,7 @@ async fn handle_tree(
     req: HttpRequest,
     path: web::Path<(String, String, String, String)>,
     repo_type: RepoType,
-    _auth: AuthUser<AuthAny>,
+    _auth: AuthUser<AuthRead>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
     let (namespace, repo_name, revision, tree_path) = path.into_inner();
@@ -187,7 +187,7 @@ async fn handle_tree(
 pub async fn tree_model(
     req: HttpRequest,
     path: web::Path<(String, String, String, String)>,
-    auth: AuthUser<AuthAny>,
+    auth: AuthUser<AuthRead>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
     handle_tree(req, path, RepoType::Model, auth, metadata).await
@@ -197,7 +197,7 @@ pub async fn tree_model(
 pub async fn tree_dataset(
     req: HttpRequest,
     path: web::Path<(String, String, String, String)>,
-    auth: AuthUser<AuthAny>,
+    auth: AuthUser<AuthRead>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
     handle_tree(req, path, RepoType::Dataset, auth, metadata).await
@@ -207,7 +207,7 @@ pub async fn tree_dataset(
 pub async fn tree_space(
     req: HttpRequest,
     path: web::Path<(String, String, String, String)>,
-    auth: AuthUser<AuthAny>,
+    auth: AuthUser<AuthRead>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
     handle_tree(req, path, RepoType::Space, auth, metadata).await
@@ -218,7 +218,7 @@ async fn handle_tree_no_path(
     req: HttpRequest,
     path: web::Path<(String, String, String)>,
     repo_type: RepoType,
-    auth: AuthUser<AuthAny>,
+    auth: AuthUser<AuthRead>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
     let (ns, repo, rev) = path.into_inner();
@@ -229,7 +229,7 @@ async fn handle_tree_no_path(
 pub async fn tree_model_no_path(
     req: HttpRequest,
     path: web::Path<(String, String, String)>,
-    auth: AuthUser<AuthAny>,
+    auth: AuthUser<AuthRead>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
     handle_tree_no_path(req, path, RepoType::Model, auth, metadata).await
@@ -238,7 +238,7 @@ pub async fn tree_model_no_path(
 pub async fn tree_dataset_no_path(
     req: HttpRequest,
     path: web::Path<(String, String, String)>,
-    auth: AuthUser<AuthAny>,
+    auth: AuthUser<AuthRead>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
     handle_tree_no_path(req, path, RepoType::Dataset, auth, metadata).await
@@ -247,7 +247,7 @@ pub async fn tree_dataset_no_path(
 pub async fn tree_space_no_path(
     req: HttpRequest,
     path: web::Path<(String, String, String)>,
-    auth: AuthUser<AuthAny>,
+    auth: AuthUser<AuthRead>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
     handle_tree_no_path(req, path, RepoType::Space, auth, metadata).await

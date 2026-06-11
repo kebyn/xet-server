@@ -1,5 +1,5 @@
 use actix_web::{web, HttpResponse};
-use crate::auth::extract::{AuthUser, AuthAny, AuthWrite};
+use crate::auth::extract::{AuthUser, AuthRead, AuthWrite};
 use crate::metadata::{MetadataStore, Repo, RepoType};
 use serde::{Deserialize, Serialize};
 use chrono::DateTime;
@@ -134,7 +134,7 @@ pub async fn create_repo_unified(
 
 /// Internal helper to get repo info
 async fn get_repo_info(
-    _auth: AuthUser<AuthAny>,
+    _auth: AuthUser<AuthRead>,
     path: web::Path<(String, String)>,
     repo_type: RepoType,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
@@ -221,7 +221,7 @@ pub async fn create_model(
 }
 
 pub async fn get_repo_model(
-    auth: AuthUser<AuthAny>,
+    auth: AuthUser<AuthRead>,
     path: web::Path<(String, String)>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
@@ -246,7 +246,7 @@ pub async fn create_dataset(
 }
 
 pub async fn get_repo_dataset(
-    auth: AuthUser<AuthAny>,
+    auth: AuthUser<AuthRead>,
     path: web::Path<(String, String)>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
@@ -271,7 +271,7 @@ pub async fn create_space(
 }
 
 pub async fn get_repo_space(
-    auth: AuthUser<AuthAny>,
+    auth: AuthUser<AuthRead>,
     path: web::Path<(String, String)>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
@@ -289,7 +289,7 @@ pub async fn delete_repo_space(
 /// GET /api/{models,datasets,spaces}/{ns}/{repo}/revision/{rev}
 /// Returns revision info. For new repos with no commits, returns empty revision.
 pub async fn get_revision_model(
-    auth: AuthUser<AuthAny>,
+    auth: AuthUser<AuthRead>,
     path: web::Path<(String, String, String)>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
@@ -297,7 +297,7 @@ pub async fn get_revision_model(
 }
 
 pub async fn get_revision_dataset(
-    auth: AuthUser<AuthAny>,
+    auth: AuthUser<AuthRead>,
     path: web::Path<(String, String, String)>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
@@ -305,7 +305,7 @@ pub async fn get_revision_dataset(
 }
 
 pub async fn get_revision_space(
-    auth: AuthUser<AuthAny>,
+    auth: AuthUser<AuthRead>,
     path: web::Path<(String, String, String)>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
@@ -313,7 +313,7 @@ pub async fn get_revision_space(
 }
 
 async fn get_revision_handler(
-    _auth: AuthUser<AuthAny>,
+    _auth: AuthUser<AuthRead>,
     path: web::Path<(String, String, String)>,
     repo_type: RepoType,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
