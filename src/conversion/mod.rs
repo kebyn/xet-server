@@ -18,6 +18,26 @@ pub use converting_oids::ConvertingOids;
 /// Memory usage is bounded to this + max_chunk_size (128 KB).
 const CONVERSION_BLOCK_SIZE: usize = 1024 * 1024;
 
+/// RAII guard that deletes a file path when dropped.
+/// I2: Ensures temporary files are cleaned up even on error paths.
+struct PathGuard {
+    path: std::path::PathBuf,
+}
+
+impl PathGuard {
+    fn new(path: std::path::PathBuf) -> Self {
+        Self { path }
+    }
+}
+
+impl Drop for PathGuard {
+    fn drop(&mut self) {
+        if let Err(e) = std::fs::remove_file(&self.path) {
+            tracing::warn!("Failed to cleanup temp file {}: {}", self.path.display(), e);
+        }
+    }
+}
+
 /// Result of a successful conversion from raw blob to xorb+shard format.
 pub struct ConversionResult {
     pub xorb_hash: String,
@@ -299,14 +319,14 @@ impl ConversionPipeline {
 
     /// Open a blob for streaming reads.
     ///
-    /// Returns (path_to_file, optional_temp_guard).
+    /// Returns (path_to_file, optional_path_guard).
     /// - For local storage: returns the existing file path directly (no copy).
     /// - For remote backends (S3): downloads to a temp file, returns that path.
-    ///   The temp guard ensures cleanup when dropped.
+    ///   The path guard ensures cleanup when dropped (I2: RAII temp file cleanup).
     async fn open_blob_for_streaming(
         &self,
         object_key: &str,
-    ) -> Result<(std::path::PathBuf, Option<tokio::fs::File>), ConversionError> {
+    ) -> Result<(std::path::PathBuf, Option<PathGuard>), ConversionError> {
         // Try local path first (zero-copy for local storage)
         if let Ok(Some(path)) = self.storage.get_path(object_key).await {
             return Ok((path, None));
@@ -317,17 +337,31 @@ impl ConversionPipeline {
         tokio::fs::create_dir_all(&temp_dir).await
             .map_err(|e| ConversionError::StorageError(format!("Failed to create temp dir: {}", e)))?;
 
-        let temp_path = temp_dir.join(format!("blob-{}", std::process::id()));
+        // Generate unique filename to avoid conflicts
+        let unique_id = format!(
+            "{}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos(),
+            {
+                use std::sync::atomic::{AtomicU64, Ordering};
+                static COUNTER: AtomicU64 = AtomicU64::new(0);
+                COUNTER.fetch_add(1, Ordering::Relaxed)
+            }
+        );
+        let temp_path = temp_dir.join(format!("blob-{}.tmp", unique_id));
+
         let data = self.storage.get(object_key).await
             .map_err(|e| ConversionError::StorageError(e.to_string()))?;
 
         tokio::fs::write(&temp_path, &data).await
             .map_err(|e| ConversionError::StorageError(format!("Failed to write temp blob: {}", e)))?;
 
-        // Note: we keep the temp file open to prevent premature cleanup.
-        // In a production system, use a proper RAII temp file guard here.
-        let guard = tokio::fs::File::open(&temp_path).await.ok();
+        // I2: Return a RAII guard that will delete the temp file when dropped
+        let guard = PathGuard::new(temp_path.clone());
 
-        Ok((temp_path, guard))
+        Ok((temp_path, Some(guard)))
     }
 }

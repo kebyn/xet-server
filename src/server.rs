@@ -55,8 +55,10 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
     let gc_for_app = gc.clone();
     let stats_for_app = last_gc_stats.clone();
 
-    // Configure rate limiting for public endpoints
-    // Allow 60 requests per minute per IP address
+    // Configure rate limiting for public endpoints only.
+    // Internal endpoints (/internal/*) bypass rate limiting to avoid
+    // disrupting Hub-to-CAS communication.
+    // Allow 60 requests per minute per IP address.
     let governor_conf = GovernorConfigBuilder::default()
         .per_second(60)  // 60 seconds window
         .burst_size(60)   // 60 requests per window
@@ -64,14 +66,12 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
         .finish()
         .expect("Failed to configure rate limiter");
 
-    tracing::info!("Rate limiting: 60 requests/minute per IP for public endpoints");
+    tracing::info!("Rate limiting: 60 requests/minute per IP for public endpoints (internal endpoints excluded)");
 
     HttpServer::new(move || {
         App::new()
             .wrap(Logger::default())
             .wrap(from_fn(metrics_middleware))
-            // Rate limiting for public API endpoints
-            .wrap(Governor::new(&governor_conf))
             // PayloadConfig bounds non-upload routes (web::Bytes, web::Json).
             // Upload handlers use web::Payload which bypasses this limit and
             // enforce max_body_size_bytes manually via streaming byte counting.
@@ -83,26 +83,38 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
             .app_data(web::Data::new(config.clone()))
             .app_data(web::Data::new(gc_for_app.clone()))
             .app_data(web::Data::new(stats_for_app.clone()))
-            // Internal endpoints (Hub-to-CAS communication) - no rate limiting
+            // =============================================================
+            // Internal endpoints (Hub-to-CAS communication) - NO rate limiting
+            // These are registered at App level, BEFORE the public scope,
+            // so they match first and bypass the Governor middleware.
+            // =============================================================
             .route("/internal/state/{oid}", web::get().to(crate::api::internal::get_blob_state))
             .route("/internal/blob/{oid}", web::head().to(crate::api::internal::head_blob))
             // GC endpoints (CAS internal) - no rate limiting
             .route("/internal/gc/run", web::post().to(crate::api::gc::trigger_gc))
             .route("/internal/gc/status", web::get().to(crate::api::gc::gc_status))
-            // Public API routes - rate limited
-            .route("/v1/xorbs/{prefix}/{hash}", web::post().to(crate::api::xorb::upload_xorb))
-            .route("/v1/xorbs/{prefix}/{hash}", web::put().to(crate::api::xorb::upload_xorb))
-            .route("/v1/xorbs/{prefix}/{hash}/download", web::get().to(crate::api::xorb::download_xorb))
-            .route("/lfs/objects/{oid}", web::put().to(crate::api::lfs::upload_lfs_object))
-            .route("/lfs/objects/{oid}", web::get().to(crate::api::lfs::download_lfs_object))
-            .route("/v1/shards", web::post().to(crate::api::shard::upload_shard))
-            .route("/v1/reconstructions/{file_id}", web::get().to(crate::api::reconstruction::get_reconstruction_v1))
-            .route("/v2/reconstructions/{file_id}", web::get().to(crate::api::reconstruction::get_reconstruction))
-            .route("/v1/chunks/{prefix}/{hash}", web::get().to(crate::api::global_dedup::query_chunk_dedup))
-            .route("/objects/batch", web::post().to(crate::api::batch::batch_operation))
-            .route("/lfs/objects/batch", web::post().to(crate::api::batch::batch_operation))
+            // Health and metrics endpoints - no rate limiting
             .route("/health", web::get().to(health_check))
             .route("/metrics", web::get().to(metrics_endpoint))
+            // =============================================================
+            // Public API routes - rate limited via Governor middleware.
+            // The scope wraps all public routes with rate limiting.
+            // =============================================================
+            .service(
+                web::scope("")
+                    .wrap(Governor::new(&governor_conf))
+                    .route("/v1/xorbs/{prefix}/{hash}", web::post().to(crate::api::xorb::upload_xorb))
+                    .route("/v1/xorbs/{prefix}/{hash}", web::put().to(crate::api::xorb::upload_xorb))
+                    .route("/v1/xorbs/{prefix}/{hash}/download", web::get().to(crate::api::xorb::download_xorb))
+                    .route("/lfs/objects/{oid}", web::put().to(crate::api::lfs::upload_lfs_object))
+                    .route("/lfs/objects/{oid}", web::get().to(crate::api::lfs::download_lfs_object))
+                    .route("/v1/shards", web::post().to(crate::api::shard::upload_shard))
+                    .route("/v1/reconstructions/{file_id}", web::get().to(crate::api::reconstruction::get_reconstruction_v1))
+                    .route("/v2/reconstructions/{file_id}", web::get().to(crate::api::reconstruction::get_reconstruction))
+                    .route("/v1/chunks/{prefix}/{hash}", web::get().to(crate::api::global_dedup::query_chunk_dedup))
+                    .route("/objects/batch", web::post().to(crate::api::batch::batch_operation))
+                    .route("/lfs/objects/batch", web::post().to(crate::api::batch::batch_operation))
+            )
     })
     .bind(&bind_addr)?
     .run()

@@ -64,8 +64,10 @@ impl GarbageCollector {
     /// Run a full GC cycle
     pub async fn run(&self) -> Result<GcStats, String> {
         let start = Instant::now();
-        let mut stats = GcStats::default();
-        stats.dry_run = self.config.dry_run;
+        let mut stats = GcStats {
+            dry_run: self.config.dry_run,
+            ..Default::default()
+        };
 
         info!("GC started (dry_run={})", self.config.dry_run);
 
@@ -226,14 +228,13 @@ impl GarbageCollector {
         all_blobs
             .iter()
             .filter(|(key, mtime)| {
-                // Extract OID from key (e.g., "lfs/objects/ab/cd/abcd1234..." -> "abcd1234...")
-                // LFS blobs are stored as lfs/objects/{prefix}/{hash}
-                // We need to extract the full hash by removing the prefix directories
+                // Extract OID from key
+                // Supports both formats: "lfs/objects/{oid}" and "lfs/objects/{prefix}/{oid}"
                 let oid = key
                     .strip_prefix("lfs/objects/")
                     .unwrap_or(key)
                     .split('/')
-                    .last()
+                    .next_back()
                     .unwrap_or(key);
 
                 let is_orphaned = !referenced.contains(oid);

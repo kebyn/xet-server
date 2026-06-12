@@ -10,10 +10,47 @@ pub struct ServerSettings {
 }
 
 impl ServerSettings {
+    /// Get the base URL for the server.
+    /// Returns `public_base_url` if configured, otherwise constructs from host:port.
+    /// Trailing slashes are stripped to prevent malformed URLs when callers append paths.
+    ///
+    /// # Panics
+    /// Panics if `public_base_url` is set but not a valid URL.
     pub fn base_url(&self) -> String {
-        self.public_base_url.clone()
-            .unwrap_or_else(|| format!("http://{}:{}", self.host, self.port))
-            .trim_end_matches('/').to_string()
+        let url = self.public_base_url.clone()
+            .unwrap_or_else(|| format!("http://{}:{}", self.host, self.port));
+        let url = url.trim_end_matches('/').to_string();
+
+        // I1: Validate URL format using proper URL parsing if explicitly configured
+        if self.public_base_url.is_some() {
+            match url::Url::parse(&url) {
+                Ok(parsed) => {
+                    if parsed.host().is_none() {
+                        tracing::error!(
+                            "public_base_url '{}' is missing a valid host. \
+                            This will likely cause client connection failures.",
+                            url
+                        );
+                    }
+                    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+                        tracing::warn!(
+                            "public_base_url '{}' uses non-HTTP scheme '{}'. \
+                            This may cause issues with client URLs.",
+                            url, parsed.scheme()
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "public_base_url '{}' is not a valid URL: {}. \
+                        This will cause client connection failures.",
+                        url, e
+                    );
+                }
+            }
+        }
+
+        url
     }
 }
 

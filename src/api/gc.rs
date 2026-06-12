@@ -1,6 +1,6 @@
 //! GC API endpoints for manual trigger and status queries
 
-use crate::api::auth::AuthVerifier;
+use crate::api::auth::{check_scope, extract_token_from_request, AuthVerifier};
 use crate::gc::{GarbageCollector, GcStats};
 use actix_web::{web, HttpRequest, HttpResponse};
 use std::sync::Arc;
@@ -15,8 +15,8 @@ pub async fn trigger_gc(
     gc: web::Data<Arc<GarbageCollector>>,
     auth: web::Data<Arc<AuthVerifier>>,
 ) -> HttpResponse {
-    // Verify internal token
-    let token = match extract_internal_token(&req) {
+    // I6: Use standard auth extraction for consistency with other internal endpoints
+    let token = match extract_token_from_request(&req) {
         Some(t) => t,
         None => {
             return HttpResponse::Unauthorized().json(serde_json::json!({
@@ -36,7 +36,8 @@ pub async fn trigger_gc(
         }
     };
 
-    if claims.scope != "internal" {
+    // I6: Use check_scope for consistent scope validation
+    if !check_scope(&claims, "internal") {
         return HttpResponse::Forbidden().json(serde_json::json!({
             "error": "Internal endpoint requires internal scope",
             "error_type": "AuthorizationError"
@@ -73,8 +74,8 @@ pub async fn gc_status(
     auth: web::Data<Arc<AuthVerifier>>,
     last_stats: web::Data<Arc<RwLock<Option<GcStats>>>>,
 ) -> HttpResponse {
-    // Verify internal token
-    let token = match extract_internal_token(&req) {
+    // I6: Use standard auth extraction for consistency with other internal endpoints
+    let token = match extract_token_from_request(&req) {
         Some(t) => t,
         None => {
             return HttpResponse::Unauthorized().json(serde_json::json!({
@@ -94,7 +95,8 @@ pub async fn gc_status(
         }
     };
 
-    if claims.scope != "internal" {
+    // I6: Use check_scope for consistent scope validation
+    if !check_scope(&claims, "internal") {
         return HttpResponse::Forbidden().json(serde_json::json!({
             "error": "Internal endpoint requires internal scope",
             "error_type": "AuthorizationError"
@@ -130,14 +132,3 @@ pub async fn gc_status(
     }
 }
 
-/// Extract Bearer token from Authorization header
-fn extract_internal_token(req: &HttpRequest) -> Option<String> {
-    let auth_header = req.headers().get("Authorization")?;
-    let auth_str = auth_header.to_str().ok()?;
-
-    if let Some(token) = auth_str.strip_prefix("Bearer ") {
-        Some(token.to_string())
-    } else {
-        None
-    }
-}

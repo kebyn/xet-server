@@ -83,10 +83,7 @@ pub async fn get_blob_state(
         GLOBAL_METRICS.record_request(200);
         GLOBAL_METRICS.record_latency(start);
         // Get actual blob size from storage
-        let size = match storage.get_size(&format!("lfs/objects/{}", oid)).await {
-            Ok(s) => s,
-            Err(_) => 0, // Fallback to 0 if size lookup fails
-        };
+        let size = storage.get_size(&format!("lfs/objects/{}", oid)).await.unwrap_or(0);
         return HttpResponse::Ok().json(serde_json::json!({
             "state": "xet_only",
             "xet_file_id": oid,
@@ -104,13 +101,7 @@ pub async fn get_blob_state(
             GLOBAL_METRICS.record_request(200);
             GLOBAL_METRICS.record_latency(start);
             // Get actual blob size from storage
-            let size = match storage.get_size(&object_key).await {
-                Ok(s) => s,
-                Err(e) => {
-                    warn!("Failed to get size for {}: {}", oid, e);
-                    0 // Fallback to 0 if size lookup fails
-                }
-            };
+            let size = storage.get_size(&object_key).await.unwrap_or(0);
             HttpResponse::Ok().json(serde_json::json!({
                 "state": "raw_only",
                 "xet_file_id": null,

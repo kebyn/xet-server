@@ -581,17 +581,15 @@ mod tests {
 
         // -- Chunk mappings --
         assert_eq!(parsed.chunk_mappings.len(), 5);
-        for i in 0..2 {
-            let (ch, xh, idx) = parsed.chunk_mappings[i];
-            assert_eq!(ch, chunks_1[i].chunk_hash);
-            assert_eq!(xh, xorb_hash_1);
-            assert_eq!(idx, i as u32);
+        for (i, (ch, xh, idx)) in parsed.chunk_mappings[..2].iter().enumerate() {
+            assert_eq!(*ch, chunks_1[i].chunk_hash);
+            assert_eq!(*xh, xorb_hash_1);
+            assert_eq!(*idx, i as u32);
         }
-        for i in 0..3 {
-            let (ch, xh, idx) = parsed.chunk_mappings[2 + i];
-            assert_eq!(ch, chunks_2[i].chunk_hash);
-            assert_eq!(xh, xorb_hash_2);
-            assert_eq!(idx, i as u32);
+        for (i, (ch, xh, idx)) in parsed.chunk_mappings[2..].iter().enumerate() {
+            assert_eq!(*ch, chunks_2[i].chunk_hash);
+            assert_eq!(*xh, xorb_hash_2);
+            assert_eq!(*idx, i as u32);
         }
     }
 

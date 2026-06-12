@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use rand::Rng;
+use rand::{Rng, SeedableRng};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
@@ -47,7 +47,7 @@ fn sha256_hex(data: &[u8]) -> String {
 
 /// Build deterministic test data of `size` bytes from a seeded RNG.
 fn make_test_data(seed: u64, size: usize) -> Vec<u8> {
-    let mut rng = rand::rngs::StdRng::from(rand::SeedableRng::seed_from_u64(seed));
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
     let mut data = vec![0u8; size];
     rng.fill(&mut data[..]);
     data
