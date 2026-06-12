@@ -129,9 +129,9 @@ pub async fn upload_shard(
         }));
     }
 
-    // Parse shard from temp file on disk
+    // Parse shard from temp file on disk (header+footer only for upload verification)
     let temp_path = temp_file.path().to_path_buf();
-    let shard = match MDBShardFile::parse_from_file(&temp_path) {
+    let shard = match MDBShardFile::parse_header_footer_from_file(&temp_path) {
         Ok(s) => s,
         Err(e) => {
             error!("Failed to parse shard: {}", e);
@@ -143,7 +143,7 @@ pub async fn upload_shard(
         }
     };
 
-    // Use streaming-computed hash as shard ID (raw_data is empty in parse_from_file)
+    // Use streaming-computed hash as shard ID (raw_data is empty in parse_header_footer_from_file)
     let shard_id = hasher.finalize().to_hex();
     let shard_key = format!("shards/{}", shard_id);
 
