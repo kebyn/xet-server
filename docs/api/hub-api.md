@@ -326,72 +326,103 @@ Content-Type: application/x-ndjson
 
 **请求体** (NDJSON 格式，每行一个 JSON 对象)：
 ```
-{"key": "header"}
-{"key": "file", "path": "config.json", "size": 1234, "mode": "100644"}
-<base64-encoded-content-of-config.json>
-{"key": "file", "path": "model.safetensors", "size": 104857600, "mode": "100644"}
-<base64-encoded-content-of-model.safetensors>
-{"key": "status"}
+{"key":"header","value":{"summary":"Add model files"}}
+{"key":"file","value":{"path":"config.json","content":"eyJtb2RlbF90eXBlIjoicXdlbiJ9"}}
+{"key":"lfsFile","value":{"path":"model.safetensors","oid":"sha256:abc123...","size":104857600}}
 ```
 
-**NDJSON 行格式**：
+**NDJSON 操作类型**：
 
-1. **Header 行**（必需）：
+1. **Header**（必需，第一行）：
    ```json
-   {"key": "header"}
+   {
+     "key": "header",
+     "value": {
+       "summary": "Add model files",
+       "parentRevision": "abc123..."  // 可选
+     }
+   }
    ```
+   - `summary`: 提交信息（必需）
+   - `parentRevision`: 父版本（可选）
 
-2. **File 行**（每个文件一行）：
+2. **File**（内联文件，最大 10MB）：
    ```json
    {
      "key": "file",
-     "path": "model.safetensors",
-     "size": 104857600,
-     "mode": "100644",
-     "encoding": "base64"
+     "value": {
+       "path": "config.json",
+       "content": "eyJtb2RlbF90eXBlIjoicXdlbiJ9"
+     }
    }
    ```
-   - `path`: 文件路径
-   - `size`: 文件大小（字节）
-   - `mode`: 文件模式（`"100644"` 普通文件，`"100755"` 可执行文件）
-   - `encoding`: 编码方式（`"base64"` 或 `"raw"`）
+   - `path`: 文件路径（必需）
+   - `content`: Base64 编码的文件内容（必需）
+   - 可以带 `base64:` 前缀，也可以不带
 
-3. **文件内容**（紧跟 File 行）：
-   - Base64 编码的文件内容（单行）
-   - 或原始二进制内容
-
-4. **Status 行**（必需，最后一行）：
+3. **LfsFile**（LFS 文件，已上传到 CAS）：
    ```json
-   {"key": "status"}
+   {
+     "key": "lfsFile",
+     "value": {
+       "path": "model.safetensors",
+       "oid": "sha256:abc123...",
+       "size": 104857600
+     }
+   }
    ```
+   - `path`: 文件路径（必需）
+   - `oid`: LFS 对象 ID（SHA256 哈希，必需）
+   - `size`: 文件大小（字节，必需）
+
+4. **DeletedEntry**（删除文件）：
+   ```json
+   {
+     "key": "deletedEntry",
+     "value": {
+       "path": "old-file.txt"
+     }
+   }
+   ```
+   - `path`: 要删除的文件路径（必需）
 
 **响应**：
 ```json
 {
-  "commit": {
-    "id": "abc123...",
-    "title": "Add model files",
-    "message": "Add model files",
-    "date": "2026-06-12T10:00:00Z"
-  },
-  "files": [
-    {"path": "config.json", "size": 1234},
-    {"path": "model.safetensors", "size": 104857600}
-  ]
+  "commitOid": "abc123...",
+  "commitUrl": "http://localhost:8080/models/my-org/my-model/commit/abc123...",
+  "prUrl": null,
+  "prNum": null
 }
 ```
 
 **示例**：
 ```bash
-# 使用 NDJSON 流式上传
+# 提交内联文件
 cat <<EOF | curl -X POST "http://localhost:8080/api/models/my-org/my-model/commit/main" \
   -H "Authorization: Bearer hf_xxx" \
   -H "Content-Type: application/x-ndjson" \
   --data-binary @-
-{"key": "header"}
-{"key": "file", "path": "config.json", "size": 1234, "mode": "100644"}
-eyJtb2RlbF90eXBlIjoicXdlbiJ9
-{"key": "status"}
+{"key":"header","value":{"summary":"Update config"}}
+{"key":"file","value":{"path":"config.json","content":"eyJtb2RlbF90eXBlIjoicXdlbiJ9"}}
+EOF
+
+# 提交 LFS 文件（需要先上传到 CAS）
+cat <<EOF | curl -X POST "http://localhost:8080/api/models/my-org/my-model/commit/main" \
+  -H "Authorization: Bearer hf_xxx" \
+  -H "Content-Type: application/x-ndjson" \
+  --data-binary @-
+{"key":"header","value":{"summary":"Add model"}}
+{"key":"lfsFile","value":{"path":"model.safetensors","oid":"sha256:abc123...","size":104857600}}
+EOF
+
+# 删除文件
+cat <<EOF | curl -X POST "http://localhost:8080/api/models/my-org/my-model/commit/main" \
+  -H "Authorization: Bearer hf_xxx" \
+  -H "Content-Type: application/x-ndjson" \
+  --data-binary @-
+{"key":"header","value":{"summary":"Remove old file"}}
+{"key":"deletedEntry","value":{"path":"old-file.txt"}}
 EOF
 ```
 
