@@ -134,34 +134,32 @@ fn validate_oid(oid: &str) -> bool {
 
 /// Validate a proxy token (short-lived LFS token)
 /// Returns true if the token is valid, false otherwise
+///
+/// This function performs business-level validation (OID, operation, expiration, token type).
+/// Cryptographic verification (signature, prefix format) is handled by `signer.verify_proxy_token`.
 fn validate_proxy_token(
     token: &str,
     expected_oid: &str,
     expected_operation: &str,
     signer: &XetSigner,
 ) -> bool {
-    // Check if it's a proxy token
-    if !token.starts_with("proxy_") {
-        return false;
-    }
-
-    // Verify signature and decode claims in one pass
+    // Verify signature, decode claims, and check proxy_ prefix (all in one pass)
     let claims = match signer.verify_proxy_token(token) {
         Some(claims) => claims,
         None => return false,
     };
 
-    // Check token type
+    // Check token type (not checked by verify_proxy_token)
     if claims.token_type != "proxy" {
         return false;
     }
 
-    // Check key ID matches (defense-in-depth for key rotation)
+    // Check key ID matches (defense-in-depth for key rotation scenarios)
     if claims.kid != signer.kid() {
         return false;
     }
 
-    // Check expiration
+    // Check expiration (not checked by verify_proxy_token)
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()

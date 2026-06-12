@@ -73,7 +73,10 @@ impl SqliteMetadataStore {
         })
     }
 
-    /// Create an in-memory SQLite metadata store (for testing)
+    /// Create an in-memory SQLite metadata store.
+    ///
+    /// **Warning:** This is intended for testing only. In-memory stores do not persist
+    /// data across restarts and should not be used in production deployments.
     pub fn in_memory() -> Result<Self, MetadataError> {
         let conn = rusqlite::Connection::open_in_memory()
             .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
