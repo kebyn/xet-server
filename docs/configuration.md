@@ -147,7 +147,8 @@ export HUB_PUBLIC_BASE_URL=https://hub.example.com
 **说明**：
 - `HUB_PRIVATE_KEY_PATH` 指向 Hub 的私钥文件（PEM 格式）
 - `HUB_KID` 用于标识签名密钥，支持密钥轮换
-- `HUB_TOKEN_TTL_SECONDS` 控制用户令牌的有效期（CAS 令牌固定为 5 分钟）
+- `HUB_TOKEN_TTL_SECONDS` 控制 CAS 令牌（xet_xxx）的有效期（默认 3600 秒 = 1 小时）
+- Proxy 令牌（proxy_xxx）固定为 5 分钟（不可配置）
 
 **示例**：
 ```bash

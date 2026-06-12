@@ -235,7 +235,7 @@ export XET_S3_ENDPOINT=https://s3.amazonaws.com
    - 管理仓库、提交文件
 
 2. **CAS Tokens** (`xet_xxx`)：
-   - 短期有效（5 分钟）
+   - 短期有效（默认 1 小时，由 `HUB_TOKEN_TTL_SECONDS` 配置）
    - 绑定到特定仓库和修订版本
    - 由 Hub 签发，CAS 验证
 
@@ -319,10 +319,9 @@ export XET_S3_ENDPOINT=https://s3.amazonaws.com
 └────┬─────┘
      │
      │ 2. POST /api/models/{ns}/{repo}/commit/{rev} (NDJSON)
-     │    {"key": "header"}
-     │    {"key": "file", "path": "model.bin", "size": ...}
-     │    <base64-content>
-     │    {"key": "status"}
+     │    {"key":"header","value":{"summary":"..."}}
+     │    {"key":"file","value":{"path":"model.bin","content":"..."}}
+     │    {"key":"lfsFile","value":{"path":"large.bin","oid":"...","size":...}}
      ▼
 ┌──────────────────┐
 │ Hub API          │
@@ -616,7 +615,7 @@ LFS 对象是原始文件的直接存储，使用 SHA-256 哈希标识。
    - 管理仓库和文件
 
 2. **CAS 层**：CAS 令牌 (xet_xxx)
-   - 短期有效（5 分钟）
+   - 短期有效（默认 1 小时，由 `HUB_TOKEN_TTL_SECONDS` 配置）
    - 绑定到特定仓库和修订版本
    - 由 Hub 签发，CAS 验证
 

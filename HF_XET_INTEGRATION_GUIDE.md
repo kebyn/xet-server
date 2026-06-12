@@ -82,11 +82,12 @@ export HUB_SQLITE_PATH=/data/hub-metadata.db
 ```bash
 # 生成用户令牌
 ./target/release/hub-api create-token \
-  --name "admin" \
-  --private-key private_key.pem \
-  --kid "hub-key-1"
+  --username admin \
+  --name "admin-token" \
+  --scope "read write" \
+  --db hub.db
 
-# 输出: hf_eyJhbGciOiJFZDI1NTE5Iiwia2lkIjoiaHViLWtleS0xIiwidHlwIjoiSldUIn0...
+# 输出: hf_a1b2c3d4e5f678901234567890123456
 ```
 
 #### 创建仓库
@@ -118,9 +119,8 @@ cat <<EOF | curl -X POST "$HF_ENDPOINT/api/models/my-org/my-model/commit/main" \
   -H "Authorization: Bearer $HF_TOKEN" \
   -H "Content-Type: application/x-ndjson" \
   --data-binary @-
-{"key": "header"}
-{"key": "file", "path": "model.safetensors", "size": 100663296}
-<base64-encoded-content>
+{"key":"header","value":{"summary":"Upload model"}}
+{"key":"lfsFile","value":{"path":"model.safetensors","oid":"sha256:abc123...","size":100663296}}
 EOF
 ```
 
@@ -293,14 +293,15 @@ Xet Server 使用两层认证系统：
 
 **Hub Tokens (`hf_xxx`)**
 - 用于 Hub API 认证
-- 长期有效（可配置 TTL）
-- 格式：`hf_{header}.{payload}.{signature}`
+- 永久有效（无过期时间）
+- 格式：`hf_{uuid_without_dashes}`（不透明 UUID）
+- 存储在 SQLite 中，通过 SHA256 哈希验证
 
 **CAS Tokens (`xet_xxx`)**
 - 用于 CAS 服务器认证
-- 短期有效（5 分钟）
+- 短期有效（默认 1 小时）
 - 由 Hub 签发，CAS 验证
-- 格式：`xet_{header}.{payload}.{signature}`
+- 格式：`xet_{header}.{payload}.{signature}`（Ed25519 JWT）
 
 ### 令牌交换流程
 

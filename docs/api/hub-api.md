@@ -4,7 +4,7 @@ Hub API 提供 HuggingFace Hub 兼容的 REST API，支持使用 `hf` CLI 工具
 
 **端口**：8080（默认）  
 **协议**：HTTP/REST  
-**认证**：Ed25519 JWT (hf_xxx tokens)
+**认证**：Hub tokens (`hf_xxx`) - 不透明 UUID，通过 SQLite 存储和 SHA256 哈希验证
 
 ## 端点概览
 
@@ -866,10 +866,8 @@ cat <<EOF | curl -X POST "$HF_ENDPOINT/api/models/my-org/my-model/commit/main" \
   -H "Authorization: Bearer $HF_TOKEN" \
   -H "Content-Type: application/x-ndjson" \
   --data-binary @-
-{"key": "header"}
-{"key": "file", "path": "config.json", "size": 1234, "mode": "100644"}
-eyJtb2RlbF90eXBlIjoicXdlbiJ9
-{"key": "status"}
+{"key":"header","value":{"summary":"Add config"}}
+{"key":"file","value":{"path":"config.json","content":"eyJtb2RlbF90eXBlIjoicXdlbiJ9"}}
 EOF
 
 # 3. 列出文件
