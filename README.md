@@ -146,7 +146,7 @@ export HUB_PRIVATE_KEY_PATH=/path/to/private_key.pem
 export HUB_KID=hub-key-1
 export HUB_TOKEN_TTL_SECONDS=3600
 
-# CAS 客户端设置
+# CAS 客户端设置（注意：覆盖默认值 3000，与上面 CAS 端口 8081 保持一致）
 export CAS_BASE_URL=http://localhost:8081
 
 # 元数据数据库
