@@ -1,5 +1,9 @@
 # Metrics Dead Code Fix Implementation Plan
 
+**Status:** ✅ Completed  
+**Date:** 2026-06-09  
+**Implemented:** 2026-06-11  
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Activate unused metrics API methods (`connection_opened/closed`, `record_download_bytes`) by adding connection tracking middleware and download byte recording in reconstruction endpoints.
