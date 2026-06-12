@@ -29,6 +29,9 @@ impl S3Storage {
         region: Option<&str>,
         endpoint: Option<&str>,
     ) -> StorageResult<Self> {
+        // M-1: Region defaults to us-east-1 (AWS default) as it's a safe fallback.
+        // Unlike credentials (which must be explicit for security), region is not
+        // security-sensitive and us-east-1 is the most common default region.
         let region = region.unwrap_or("us-east-1");
 
         let mut config_builder = Config::builder()
