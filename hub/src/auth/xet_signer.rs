@@ -150,6 +150,7 @@ impl XetSigner {
 
     /// Verify a proxy token's signature and decode its claims
     /// Returns Some(claims) if the signature is valid and claims can be decoded, None otherwise
+    #[must_use = "the result of token verification should be checked"]
     pub fn verify_proxy_token(&self, token: &str) -> Option<XetClaims> {
         use ed25519_dalek::{Signature, Verifier};
 

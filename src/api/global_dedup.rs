@@ -102,7 +102,7 @@ mod tests {
         assert_eq!(resp.status(), 200);
 
         let body: ChunkDedupResponse = test::read_body_json(resp).await;
-        assert_eq!(body.found, false);
+        assert!(!body.found);
         assert_eq!(body.hash, hash);
     }
 

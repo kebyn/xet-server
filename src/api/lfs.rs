@@ -15,6 +15,7 @@ use std::sync::Arc;
 use tracing::{error, info, warn};
 
 use crate::api::auth::{check_scope, extract_token_from_request, AuthVerifier};
+use crate::api::reconstruction::fetch_and_parse_shard;
 use crate::config::ServerConfig;
 use crate::metrics::GLOBAL_METRICS;
 use crate::state::{StorageState, StorageStateManager};
@@ -460,17 +461,12 @@ async fn serve_raw_blob_inmemory(
 /// 3. Downloads all required xorbs
 /// 4. Extracts and decompresses chunks
 /// 5. Reassembles chunks into the complete file
-// TODO(I4): This function shares ~35 lines of shard fetch/parse/xorb iteration logic
-// with get_reconstruction_v1 in src/api/reconstruction.rs. Consider extracting a shared
-// helper like `fetch_and_parse_shards(shard_ids, storage)` to reduce duplication.
-// Current duplication is isolated and low-risk, so deferring refactoring is acceptable.
 async fn reconstruct_from_xet(
     file_id: &str,
     index: web::Data<crate::index::MetadataIndex>,
     storage: web::Data<Box<dyn StorageBackend>>,
     start: std::time::Instant,
 ) -> HttpResponse {
-    use crate::format::shard::MDBShardFile;
     use crate::format::xorb::XorbChunkHeader;
     use crate::format::compression::decompress;
     use std::collections::HashSet;
@@ -494,35 +490,16 @@ async fn reconstruct_from_xet(
     let mut file_data = Vec::new();
 
     for shard_id in shard_ids {
-        let shard_key = format!("shards/{}", shard_id);
-
-        // Fetch shard from storage
-        let shard_data = match storage.get(&shard_key).await {
-            Ok(data) => {
-                GLOBAL_METRICS.record_storage_operation();
-                data
-            }
-            Err(e) => {
-                error!("Failed to fetch shard {}: {}", shard_id, e);
-                GLOBAL_METRICS.record_request(500);
-                GLOBAL_METRICS.record_error();
-                GLOBAL_METRICS.record_latency(start);
-                return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": format!("Failed to fetch shard: {}", e)
-                }));
-            }
-        };
-
-        // Parse shard
-        let shard = match MDBShardFile::parse(&shard_data) {
+        // Fetch and parse shard using shared helper
+        let shard = match fetch_and_parse_shard(&shard_id, &***storage).await {
             Ok(s) => s,
             Err(e) => {
-                error!("Failed to parse shard {}: {}", shard_id, e);
+                error!("{}", e);
                 GLOBAL_METRICS.record_request(500);
                 GLOBAL_METRICS.record_error();
                 GLOBAL_METRICS.record_latency(start);
                 return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": format!("Failed to parse shard: {}", e)
+                    "error": e
                 }));
             }
         };
