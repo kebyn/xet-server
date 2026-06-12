@@ -581,7 +581,9 @@ impl MetadataStore for SqliteMetadataStore {
             .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
         let result = (|| -> Result<(), MetadataError> {
-            // Check HEAD matches expected parent
+            // Authoritative HEAD check (I3): this is the race-safe check under
+            // BEGIN IMMEDIATE lock. The handler also does a pre-check for better
+            // error messages, but this one is the source of truth.
             let current_head: Option<String> = conn
                 .query_row(
                     "SELECT commit_id FROM heads WHERE repo_id = ?1",
