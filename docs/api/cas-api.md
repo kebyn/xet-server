@@ -451,9 +451,7 @@ curl -I "http://localhost:8081/internal/state/abc123..." \
 **响应**：
 ```json
 {
-  "status": "healthy",
-  "version": "0.1.0",
-  "uptime_seconds": 86400
+  "status": "ok"
 }
 ```
 
