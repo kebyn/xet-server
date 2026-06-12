@@ -4,6 +4,7 @@
 //! being persisted, the underlying file is removed from disk.
 
 use std::path::{Path, PathBuf};
+use std::mem::ManuallyDrop;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
@@ -96,12 +97,16 @@ impl TempFile {
 
     /// Consume the TempFile and return its path, without cleanup.
     /// The caller takes responsibility for the file.
-    pub fn into_path(mut self) -> PathBuf {
+    pub fn into_path(self) -> PathBuf {
+        // Use ManuallyDrop to prevent Drop from running, which is safer than mem::forget
+        // because it makes the intent explicit and avoids potential issues with
+        // partially moved values.
+        let mut this = ManuallyDrop::new(self);
         // Close the file handle
-        self.file.take();
-        let path = self.path.clone();
-        std::mem::forget(self);
-        path
+        this.file.take();
+        // Clone the path before the ManuallyDrop wrapper is dropped
+        // (ManuallyDrop doesn't run Drop, so the path stays valid)
+        this.path.clone()
     }
 }
 

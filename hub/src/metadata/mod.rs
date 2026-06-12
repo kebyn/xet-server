@@ -172,4 +172,8 @@ pub trait MetadataStore: Send + Sync {
         entries: &[FileEntry],
         expected_parent: Option<&str>,
     ) -> Result<(), MetadataError>;
+
+    /// Get all referenced CAS hashes from file_tree (for GC)
+    /// Returns distinct cas_hash values where is_lfs = 1
+    async fn get_all_referenced_hashes(&self) -> Result<std::collections::HashSet<String>, MetadataError>;
 }

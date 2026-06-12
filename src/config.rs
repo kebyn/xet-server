@@ -9,7 +9,8 @@ pub struct ServerConfig {
     pub server: ServerSettings,
     pub storage: StorageConfig,
     pub auth: AuthConfig,
-    pub state: StateConfig,
+    pub conversion: ConversionConfig,
+    pub gc: GcConfig,
 }
 
 /// HTTP server settings
@@ -33,10 +34,51 @@ impl ServerSettings {
     /// Get the base URL for the server.
     /// Returns `public_base_url` if configured, otherwise constructs from host:port.
     /// Trailing slashes are stripped to prevent malformed URLs when callers append paths.
+    ///
+    /// # Panics
+    /// Panics if `public_base_url` is set but not a valid URL.
     pub fn base_url(&self) -> String {
         let url = self.public_base_url.clone()
             .unwrap_or_else(|| format!("http://{}:{}", self.host, self.port));
-        url.trim_end_matches('/').to_string()
+        let url = url.trim_end_matches('/').to_string();
+
+        // Validate URL format if explicitly configured
+        if self.public_base_url.is_some() {
+            // Check scheme
+            if !url.starts_with("http://") && !url.starts_with("https://") {
+                tracing::warn!(
+                    "public_base_url '{}' does not start with http:// or https://. \
+                    This may cause issues with client URLs.",
+                    url
+                );
+            }
+
+            // Basic validation: extract host part
+            let after_scheme = url
+                .strip_prefix("http://")
+                .or_else(|| url.strip_prefix("https://"))
+                .unwrap_or(&url);
+
+            // Check if there's a host (contains a dot or is localhost)
+            let host_part = after_scheme.split('/').next().unwrap_or("");
+            let has_host = host_part.contains('.') || host_part.starts_with("localhost") || host_part.contains(':');
+
+            if !has_host && !host_part.is_empty() {
+                tracing::error!(
+                    "public_base_url '{}' appears to be missing a valid host. \
+                    This will likely cause client connection failures.",
+                    url
+                );
+            } else if host_part.is_empty() {
+                tracing::error!(
+                    "public_base_url '{}' is missing a host. \
+                    This will likely cause client connection failures.",
+                    url
+                );
+            }
+        }
+
+        url
     }
 
     /// Get the maximum request body size in bytes.
@@ -86,11 +128,85 @@ pub struct AuthConfig {
     pub trusted_kids: Vec<String>,
 }
 
-/// State management configuration
+/// Conversion pipeline configuration
+///
+/// Controls automatic conversion of raw blobs (uploaded via Git LFS / HF CLI)
+/// to Xorb+Shard format for global chunk-level deduplication.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StateConfig {
-    /// Path to the SQLite database for state tracking
-    pub sqlite_path: String,
+pub struct ConversionConfig {
+    /// Enable automatic conversion of raw blobs to xorb/shard format.
+    pub enabled: bool,
+    /// Compression scheme: "none", "lz4", "bg4lz4"
+    pub compression_scheme: String,
+    /// Delete raw blob after successful conversion (saves 2x storage).
+    /// If false, raw blob is kept alongside xorb/shard copies.
+    pub delete_raw_after_conversion: bool,
+    /// Minimum file size (bytes) to trigger conversion.
+    /// Files smaller than this stay as raw blobs permanently.
+    pub min_conversion_size: u64,
+    /// Maximum file size (bytes) eligible for conversion.
+    /// Files larger than this stay as raw blobs permanently to prevent OOM
+    /// (conversion loads the entire blob into memory for CDC chunking).
+    pub max_conversion_size: u64,
+}
+
+impl Default for ConversionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            compression_scheme: "lz4".to_string(),
+            delete_raw_after_conversion: true,
+            min_conversion_size: 1024,           // 1KB — skip tiny files
+            max_conversion_size: 500 * 1024 * 1024, // 500MB — prevent OOM on large blobs
+        }
+    }
+}
+
+impl ConversionConfig {
+    /// Parse compression scheme string into enum
+    pub fn scheme(&self) -> crate::format::compression::CompressionScheme {
+        match self.compression_scheme.to_lowercase().as_str() {
+            "none" => crate::format::compression::CompressionScheme::None,
+            "lz4" => crate::format::compression::CompressionScheme::LZ4,
+            "bg4lz4" => crate::format::compression::CompressionScheme::ByteGrouping4LZ4,
+            _ => crate::format::compression::CompressionScheme::LZ4,
+        }
+    }
+}
+
+/// Garbage collection configuration for cleaning up orphaned blobs
+///
+/// GC runs as a background task that periodically scans storage for blobs
+/// that are no longer referenced by any file_tree entry in the Hub metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GcConfig {
+    /// Enable background GC task
+    pub enabled: bool,
+    /// GC run interval in seconds
+    pub interval_seconds: u64,
+    /// Grace period in seconds for newly uploaded blobs.
+    /// Blobs younger than this are never deleted, preventing race conditions
+    /// where a blob is uploaded but the commit hasn't been written to file_tree yet.
+    pub grace_period_seconds: u64,
+    /// Dry-run mode: report stats but don't actually delete
+    pub dry_run: bool,
+    /// Hub API base URL (for querying referenced hashes)
+    pub hub_base_url: String,
+    /// Internal token for authenticating with Hub's /internal/* endpoints
+    pub hub_internal_token: String,
+}
+
+impl Default for GcConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,             // Disabled by default, must opt-in
+            interval_seconds: 3600,     // Every hour
+            grace_period_seconds: 600,  // 10 minutes grace period
+            dry_run: true,              // Dry-run by default for safety
+            hub_base_url: "http://localhost:8080".to_string(),
+            hub_internal_token: String::new(),
+        }
+    }
 }
 
 impl Default for ServerConfig {
@@ -114,9 +230,8 @@ impl Default for ServerConfig {
                 public_key_path: "/tmp/xet-test-public-key.pem".to_string(),
                 trusted_kids: vec!["test-kid".to_string()],
             },
-            state: StateConfig {
-                sqlite_path: "/tmp/xet-state.db".to_string(),
-            },
+            conversion: ConversionConfig::default(),
+            gc: GcConfig::default(),
         }
     }
 }
@@ -148,11 +263,52 @@ impl ServerConfig {
         let trusted_kids = std::env::var("CAS_TRUSTED_KIDS")
             .ok()
             .map(|s| s.split(',').map(|kid| kid.trim().to_string()).collect())
-            .unwrap_or_else(|| vec!["test-kid".to_string()]);
+            .unwrap_or_else(|| {
+                tracing::warn!("CAS_TRUSTED_KIDS not set, using test default 'test-kid'. Set this explicitly in production.");
+                vec!["test-kid".to_string()]
+            });
 
-        // State database configuration
-        let sqlite_path = std::env::var("CAS_STATE_DB_PATH")
-            .unwrap_or_else(|_| "/tmp/xet-state.db".to_string());
+        // Conversion pipeline configuration
+        let conversion_enabled = std::env::var("XET_CONVERSION_ENABLED")
+            .ok()
+            .map(|v| v.to_lowercase() != "false" && v != "0")
+            .unwrap_or(true);
+        let conversion_scheme = std::env::var("XET_CONVERSION_SCHEME")
+            .unwrap_or_else(|_| "lz4".to_string());
+        let delete_raw = std::env::var("XET_DELETE_RAW_AFTER_CONVERSION")
+            .ok()
+            .map(|v| v.to_lowercase() != "false" && v != "0")
+            .unwrap_or(true);
+        let min_conversion_size = std::env::var("XET_MIN_CONVERSION_SIZE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1024);
+        let max_conversion_size = std::env::var("XET_MAX_CONVERSION_SIZE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(500 * 1024 * 1024);
+
+        // GC configuration
+        let gc_enabled = std::env::var("GC_ENABLED")
+            .ok()
+            .map(|v| v.to_lowercase() == "true" || v == "1")
+            .unwrap_or(false);
+        let gc_interval = std::env::var("GC_INTERVAL_SECONDS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3600);
+        let gc_grace_period = std::env::var("GC_GRACE_PERIOD_SECONDS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(600);
+        let gc_dry_run = std::env::var("GC_DRY_RUN")
+            .ok()
+            .map(|v| v.to_lowercase() != "false" && v != "0")
+            .unwrap_or(true);
+        let gc_hub_base_url = std::env::var("GC_HUB_BASE_URL")
+            .unwrap_or_else(|_| "http://localhost:8080".to_string());
+        let gc_hub_internal_token = std::env::var("GC_HUB_INTERNAL_TOKEN")
+            .unwrap_or_default();
 
         Self {
             server: ServerSettings { host, port, public_base_url, max_body_size_mb },
@@ -168,8 +324,20 @@ impl ServerConfig {
                 public_key_path,
                 trusted_kids,
             },
-            state: StateConfig {
-                sqlite_path,
+            conversion: ConversionConfig {
+                enabled: conversion_enabled,
+                compression_scheme: conversion_scheme,
+                delete_raw_after_conversion: delete_raw,
+                min_conversion_size,
+                max_conversion_size,
+            },
+            gc: GcConfig {
+                enabled: gc_enabled,
+                interval_seconds: gc_interval,
+                grace_period_seconds: gc_grace_period,
+                dry_run: gc_dry_run,
+                hub_base_url: gc_hub_base_url,
+                hub_internal_token: gc_hub_internal_token,
             },
         }
     }

@@ -82,6 +82,13 @@ fn decode_base64_content(content: &str) -> Result<Vec<u8>, String> {
 }
 
 /// Internal helper for commit handling
+///
+/// **Known tradeoff:** Inline files are uploaded to CAS *before* the atomic metadata commit.
+/// If the metadata commit fails (conflict), the inline file blob remains in CAS as an orphaned
+/// object with no metadata reference. This is acceptable because:
+/// 1. Blobs are content-addressed and deduplicated, so re-uploads of the same content are free
+/// 2. Orphaned blobs don't affect correctness, only storage efficiency
+/// 3. A background GC job could clean up orphaned blobs in the future if needed
 async fn handle_commit(
     auth: AuthUser<AuthWrite>,
     path: web::Path<(String, String, String)>,
@@ -91,6 +98,15 @@ async fn handle_commit(
     cas_client: web::Data<std::sync::Arc<CasClient>>,
     signer: web::Data<std::sync::Arc<XetSigner>>,
 ) -> HttpResponse {
+    // Check body size limit (20MB) to prevent memory exhaustion
+    const MAX_COMMIT_BODY_SIZE: usize = 20 * 1024 * 1024;
+    if body.len() > MAX_COMMIT_BODY_SIZE {
+        return HttpResponse::PayloadTooLarge().json(serde_json::json!({
+            "error": format!("Commit body too large ({} bytes), max allowed: {} bytes", body.len(), MAX_COMMIT_BODY_SIZE),
+            "error_type": "PayloadTooLarge"
+        }));
+    }
+
     let (namespace, repo_name, _revision) = path.into_inner();
 
     // Get the repo
@@ -221,11 +237,11 @@ async fn handle_commit(
         let size = decoded_content.len() as u64;
 
         // Store inline file content in CAS (C1)
-        if let Err((status, error_msg)) = cas_client.proxy_lfs_upload(&oid, bytes::Bytes::from(decoded_content), &internal_token).await {
-            tracing::error!("Failed to store inline file in CAS: status={}, error={}", status, error_msg);
-            let status_code = actix_web::http::StatusCode::from_u16(status).unwrap_or(actix_web::http::StatusCode::BAD_GATEWAY);
+        if let Err(e) = cas_client.proxy_lfs_upload(&oid, bytes::Bytes::from(decoded_content), &internal_token).await {
+            tracing::error!("Failed to store inline file in CAS: status={}, error={}", e.status, e.message);
+            let status_code = actix_web::http::StatusCode::from_u16(e.status).unwrap_or(actix_web::http::StatusCode::BAD_GATEWAY);
             return HttpResponse::build(status_code).json(serde_json::json!({
-                "error": format!("Failed to store inline file in CAS: {}", error_msg),
+                "error": format!("Failed to store inline file in CAS: {}", e.message),
                 "error_type": "CasError"
             }));
         }

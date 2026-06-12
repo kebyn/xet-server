@@ -5,9 +5,11 @@ use crate::cas_client::CasClient;
 use crate::config::HubConfig;
 
 /// Extract token from Authorization header (Bearer/Basic) or query parameter (?token=...).
-/// Security note: Query parameter tokens leak in server logs and proxy logs.
-/// We support them as a fallback because some LFS clients (e.g. huggingface_hub's python-httpx)
-/// do not forward Authorization headers from batch responses.
+///
+/// **Security note:** Query parameter tokens leak in server logs, proxy logs (nginx/CloudFlare),
+/// browser history, and referrer headers. We support them as a fallback because some LFS clients
+/// (e.g. huggingface_hub's python-httpx) do not forward Authorization headers from batch responses.
+/// This is an acceptable tradeoff because proxy tokens are short-lived (5 min) and OID-bound.
 fn extract_token(req: &HttpRequest) -> Option<String> {
     // Try Authorization header first
     if let Some(auth) = req.headers().get("Authorization") {
@@ -30,10 +32,17 @@ fn extract_token(req: &HttpRequest) -> Option<String> {
     }
 
     // Fall back to query parameter token (?token=...)
+    // WARNING: Query parameter tokens leak in server logs, proxy logs, browser history,
+    // and referrer headers. Log a warning for security auditing.
     if let Some(query) = req.uri().query() {
         for pair in query.split('&') {
             if let Some((key, value)) = pair.split_once('=')
                 && key == "token" {
+                    tracing::warn!(
+                        "Token received via query parameter - this leaks in logs. \
+                        Client should use Authorization header instead. URI: {}",
+                        req.uri().path()
+                    );
                     // URL-decode the token value to handle special characters
                     if let Ok(decoded) = percent_encoding::percent_decode_str(value).decode_utf8() {
                         return Some(decoded.into_owned());
@@ -182,6 +191,10 @@ fn validate_proxy_token(
 }
 
 /// Handle Git LFS batch request
+///
+/// **Known tradeoff:** The entire CAS batch response is buffered in memory before URL rewriting.
+/// For large batches (up to MAX_BATCH_SIZE=1000 objects), this can consume significant memory.
+/// This is acceptable given the batch size limit, but should be monitored in production.
 pub async fn lfs_batch(
     req: HttpRequest,
     body: web::Json<serde_json::Value>,
@@ -239,12 +252,21 @@ pub async fn lfs_batch(
 }
 
 /// Handle LFS object upload
-/// Note: Currently uses buffered upload with 512MB limit.
-/// Future improvement: Implement true streaming with awc send_stream.
+/// Proxy LFS upload from client to CAS — streaming version
+///
+/// Memory usage: O(chunk_size) instead of O(file_size)
+///
+/// Flow:
+/// 1. Receive web::Payload stream
+/// 2. Write to temp file while computing SHA256 incrementally
+/// 3. Verify hash == OID
+/// 4. Stream temp file to CAS
+/// 5. Clean up temp file
 pub async fn lfs_upload(
     req: HttpRequest,
     path: web::Path<String>,
-    body: web::Bytes,
+    mut payload: web::Payload,
+    config: web::Data<crate::config::HubConfig>,
     xet_signer: web::Data<std::sync::Arc<XetSigner>>,
     cas_client: web::Data<std::sync::Arc<CasClient>>,
 ) -> HttpResponse {
@@ -261,7 +283,7 @@ pub async fn lfs_upload(
 
     let oid = path.into_inner();
 
-    // I7: Validate OID format
+    // Validate OID format
     if !validate_oid(&oid) {
         return HttpResponse::BadRequest().json(serde_json::json!({
             "error": "Invalid OID format",
@@ -277,30 +299,131 @@ pub async fn lfs_upload(
         }));
     }
 
-    // Verify content hash matches OID (SHA256)
+    // Create temp directory if it doesn't exist
+    let temp_dir = std::path::Path::new(&config.storage.upload_temp_dir);
+    if let Err(e) = tokio::fs::create_dir_all(temp_dir).await {
+        tracing::error!("Failed to create temp dir {}: {}", config.storage.upload_temp_dir, e);
+        return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": "Failed to initialize upload",
+            "error_type": "InternalError"
+        }));
+    }
+
+    // Create temporary file
+    let temp_file = match tempfile::Builder::new()
+        .prefix("upload-")
+        .tempfile_in(temp_dir)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::error!("Failed to create temp file: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Failed to create temporary file",
+                "error_type": "InternalError"
+            }));
+        }
+    };
+
+    let temp_path = temp_file.path().to_path_buf();
+
+    // Stream payload to temp file while computing hash
     use sha2::{Sha256, Digest};
-    let computed_hash = hex::encode(Sha256::digest(&body));
+    use tokio::io::AsyncWriteExt;
+    use futures_util::StreamExt;
+
+    let mut hasher = Sha256::new();
+    let mut file_writer = match tokio::fs::File::create(&temp_path).await {
+        Ok(f) => tokio::io::BufWriter::new(f),
+        Err(e) => {
+            tracing::error!("Failed to open temp file for writing: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Failed to write upload data",
+                "error_type": "InternalError"
+            }));
+        }
+    };
+
+    let mut total_bytes: u64 = 0;
+    const MAX_UPLOAD_SIZE: u64 = 512 * 1024 * 1024; // 512MB
+
+    while let Some(chunk_result) = payload.next().await {
+        let chunk = match chunk_result {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!("Error reading payload: {}", e);
+                // Temp file will be cleaned up by Drop
+                return HttpResponse::BadRequest().json(serde_json::json!({
+                    "error": "Error reading upload data",
+                    "error_type": "ClientError"
+                }));
+            }
+        };
+
+        total_bytes += chunk.len() as u64;
+        if total_bytes > MAX_UPLOAD_SIZE {
+            tracing::warn!("Upload too large: {} bytes (max {})", total_bytes, MAX_UPLOAD_SIZE);
+            // Temp file will be cleaned up by Drop
+            return HttpResponse::PayloadTooLarge().json(serde_json::json!({
+                "error": format!("Upload too large ({} bytes), max allowed: {} bytes", total_bytes, MAX_UPLOAD_SIZE),
+                "error_type": "PayloadTooLarge"
+            }));
+        }
+
+        hasher.update(&chunk);
+        if let Err(e) = file_writer.write_all(&chunk).await {
+            tracing::error!("Failed to write to temp file: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Failed to write upload data",
+                "error_type": "InternalError"
+            }));
+        }
+    }
+
+    // Flush and close file
+    if let Err(e) = file_writer.flush().await {
+        tracing::error!("Failed to flush temp file: {}", e);
+        return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": "Failed to finalize upload data",
+            "error_type": "InternalError"
+        }));
+    }
+    drop(file_writer);
+
+    // Verify hash
+    let computed_hash = hex::encode(hasher.finalize());
     if computed_hash != oid {
         tracing::warn!(
             "Hash mismatch for OID {}: computed {} ({} bytes)",
-            oid, computed_hash, body.len()
+            oid, computed_hash, total_bytes
         );
+        // Clean up temp file
+        let _ = tokio::fs::remove_file(&temp_path).await;
         return HttpResponse::BadRequest().json(serde_json::json!({
             "error": "Hash mismatch: uploaded content does not match OID",
             "error_type": "ValidationError"
         }));
     }
 
-    // Generate internal token for CAS
+    // Stream temp file to CAS
     let (internal_token, _) = xet_signer.sign_internal();
+    let file_size = total_bytes;
 
-    // Forward to CAS
-    match cas_client.proxy_lfs_upload(&oid, body, &internal_token).await {
+    let result = cas_client.proxy_lfs_upload_from_path(
+        &oid,
+        &temp_path,
+        file_size,
+        &internal_token,
+    ).await;
+
+    // Clean up temp file
+    let _ = tokio::fs::remove_file(&temp_path).await;
+
+    match result {
         Ok(_) => HttpResponse::Ok().finish(),
-        Err((status, error_msg)) => {
-            let status_code = actix_web::http::StatusCode::from_u16(status).unwrap_or(actix_web::http::StatusCode::BAD_GATEWAY);
+        Err(e) => {
+            let status_code = actix_web::http::StatusCode::from_u16(e.status).unwrap_or(actix_web::http::StatusCode::BAD_GATEWAY);
             HttpResponse::build(status_code).json(serde_json::json!({
-                "error": error_msg,
+                "error": e.message,
                 "error_type": "CasError"
             }))
         }

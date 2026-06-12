@@ -169,7 +169,7 @@ fn test_check_scope() {
 }
 
 #[test]
-fn test_check_scope_internal_supersedes() {
+fn test_check_scope_internal_restricted() {
     let claims = XetClaims {
         sub: "internal-user".to_string(),
         scope: "internal".to_string(),
@@ -181,11 +181,12 @@ fn test_check_scope_internal_supersedes() {
         kid: "test-kid".to_string(),
     };
 
-    // "internal" scope grants all permissions
-    assert!(check_scope(&claims, "read"));
-    assert!(check_scope(&claims, "write"));
-    assert!(check_scope(&claims, "admin"));
-    assert!(check_scope(&claims, "any-random-scope"));
+    // "internal" scope ONLY grants access to internal endpoints
+    assert!(check_scope(&claims, "internal"));
+    // Internal tokens are rejected for non-internal endpoints (least privilege)
+    assert!(!check_scope(&claims, "read"));
+    assert!(!check_scope(&claims, "write"));
+    assert!(!check_scope(&claims, "admin"));
 }
 
 #[test]

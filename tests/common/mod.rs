@@ -4,7 +4,7 @@
 //! using Ed25519 authentication.
 
 use xet_server::api::auth::{sign_xet_token, KeyPair, XetClaims, AuthVerifier};
-use xet_server::config::{AuthConfig, ServerConfig, ServerSettings, StateConfig, StorageConfig};
+use xet_server::config::{AuthConfig, ConversionConfig, ServerConfig, ServerSettings, StorageConfig};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
 
@@ -94,9 +94,8 @@ pub fn test_config_with_key(kp: &KeyPair) -> TestContext {
             upload_temp_dir: None,
         },
         auth: auth_config,
-        state: StateConfig {
-            sqlite_path: "/tmp/xet-test-state.db".to_string(),
-        },
+        conversion: ConversionConfig::default(),
+        gc: xet_server::config::GcConfig::default(),
     };
 
     TestContext {
@@ -142,9 +141,8 @@ pub fn test_config_with_new_key() -> TestContext {
             upload_temp_dir: None,
         },
         auth: auth_config,
-        state: StateConfig {
-            sqlite_path: "/tmp/xet-test-state.db".to_string(),
-        },
+        conversion: ConversionConfig::default(),
+        gc: xet_server::config::GcConfig::default(),
     };
 
     TestContext {

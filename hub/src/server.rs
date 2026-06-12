@@ -12,21 +12,21 @@ pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
     // Initialize token store (uses same DB as metadata for simplicity)
     let token_store = Arc::new(
         TokenStore::new(&config.metadata.sqlite_path)
-            .expect("Failed to create token store")
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to create token store: {}", e)))?
     );
 
     // Initialize metadata store
     let metadata: Arc<dyn MetadataStore> = Arc::new(
         SqliteMetadataStore::new(&config.metadata.sqlite_path)
-            .expect("Failed to create metadata store")
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to create metadata store: {}", e)))?
     );
 
     // Initialize xet signer
     let private_key_pem = std::fs::read(&config.auth.private_key_path)
-        .expect("Failed to read private key");
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to read private key from '{}': {}", config.auth.private_key_path, e)))?;
     let signer = Arc::new(
         XetSigner::from_pem(&private_key_pem, &config.auth.kid, config.auth.token_ttl_seconds)
-            .expect("Failed to create xet signer")
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to create xet signer: {}", e)))?
     );
 
     // Initialize CAS client
@@ -116,6 +116,8 @@ pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
             .route("/{ns}/{repo}.git/info/lfs/objects/batch", web::post().to(crate::api::lfs_proxy::lfs_batch))
             .route("/{ns}/{repo}.git/info/lfs/objects/{oid}", web::put().to(crate::api::lfs_proxy::lfs_upload))
             .route("/{ns}/{repo}.git/info/lfs/objects/{oid}", web::get().to(crate::api::lfs_proxy::lfs_download))
+            // Internal API (for CAS GC)
+            .route("/internal/referenced-hashes", web::get().to(crate::api::internal::get_referenced_hashes))
             // Health
             .route("/health", web::get().to(|| async { HttpResponse::Ok().json(serde_json::json!({"status": "ok"})) }))
     })

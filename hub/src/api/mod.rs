@@ -6,6 +6,7 @@ pub mod preupload;
 pub mod tree;
 pub mod resolve;
 pub mod lfs_proxy;
+pub mod internal;
 
 pub use whoami::whoami;
 pub use token_exchange::{

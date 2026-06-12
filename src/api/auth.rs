@@ -216,11 +216,14 @@ pub fn verify_xet_token(
 }
 
 /// Check if claims contain a required scope.
-/// The "internal" scope supersedes all other scope checks.
+///
+/// The "internal" scope is ONLY valid for /internal/* endpoints.
+/// Non-internal endpoints must explicitly reject internal tokens.
 pub fn check_scope(claims: &XetClaims, required_scope: &str) -> bool {
-    // "internal" scope grants all permissions
-    if claims.scope.split_whitespace().any(|s| s == "internal") {
-        return true;
+    // "internal" scope is NOT a wildcard - it only grants access to internal endpoints
+    if required_scope != "internal" && claims.scope.split_whitespace().any(|s| s == "internal") {
+        // Reject internal tokens for non-internal endpoints
+        return false;
     }
     // Check for the specific required scope
     claims.scope.split_whitespace().any(|s| s == required_scope)

@@ -313,4 +313,125 @@ impl StorageBackend for S3Storage {
 
         Ok(())
     }
+
+    async fn list_objects(&self, prefix: &str) -> StorageResult<Vec<String>> {
+        let mut keys = Vec::new();
+        let mut continuation_token: Option<String> = None;
+
+        loop {
+            let mut req = self
+                .client
+                .list_objects_v2()
+                .bucket(&self.bucket)
+                .prefix(prefix);
+
+            if let Some(ref token) = continuation_token {
+                req = req.continuation_token(token);
+            }
+
+            let resp = req.send().await.map_err(|e| {
+                StorageError::Internal(format!("S3 list_objects_v2 failed: {}", e))
+            })?;
+
+            for obj in resp.contents() {
+                if let Some(key) = obj.key() {
+                    keys.push(key.to_string());
+                }
+            }
+
+            match resp.next_continuation_token() {
+                Some(token) => continuation_token = Some(token.to_string()),
+                None => break,
+            }
+        }
+
+        Ok(keys)
+    }
+
+    async fn list_objects_with_mtime(&self, prefix: &str) -> StorageResult<Vec<(String, u64)>> {
+        let mut entries = Vec::new();
+        let mut continuation_token: Option<String> = None;
+
+        loop {
+            let mut req = self
+                .client
+                .list_objects_v2()
+                .bucket(&self.bucket)
+                .prefix(prefix);
+
+            if let Some(ref token) = continuation_token {
+                req = req.continuation_token(token);
+            }
+
+            let resp = req.send().await.map_err(|e| {
+                StorageError::Internal(format!("S3 list_objects_v2 failed: {}", e))
+            })?;
+
+            for obj in resp.contents() {
+                if let Some(key) = obj.key() {
+                    // Convert S3 DateTime to Unix timestamp seconds
+                    let mtime = obj.last_modified()
+                        .map(|dt| dt.secs() as u64)
+                        .unwrap_or(0);
+                    entries.push((key.to_string(), mtime));
+                }
+            }
+
+            match resp.next_continuation_token() {
+                Some(token) => continuation_token = Some(token.to_string()),
+                None => break,
+            }
+        }
+
+        Ok(entries)
+    }
+
+    async fn get_mtime(&self, key: &str) -> StorageResult<u64> {
+        let result = self
+            .client
+            .head_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await
+            .map_err(|e| {
+                if e.to_string().contains("NotFound") {
+                    StorageError::NotFound(key.to_string())
+                } else {
+                    StorageError::Internal(format!("S3 head_object failed: {}", e))
+                }
+            })?;
+
+        // Convert S3 DateTime to Unix timestamp seconds
+        let mtime = result
+            .last_modified()
+            .map(|dt| dt.secs() as u64)
+            .unwrap_or(0);
+
+        Ok(mtime)
+    }
+
+    async fn get_size(&self, key: &str) -> StorageResult<u64> {
+        let result = self
+            .client
+            .head_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await
+            .map_err(|e| {
+                if e.to_string().contains("NotFound") {
+                    StorageError::NotFound(key.to_string())
+                } else {
+                    StorageError::Internal(format!("S3 head_object failed: {}", e))
+                }
+            })?;
+
+        // Get content length from HEAD response
+        let size = result
+            .content_length()
+            .unwrap_or(0) as u64;
+
+        Ok(size)
+    }
 }

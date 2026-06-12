@@ -283,6 +283,35 @@ hf download my-org/my-repo model.bin --local-dir ./downloaded
 | `XET_S3_BUCKET` | S3 存储桶名称（使用 s3 后端时必需） | - |
 | `XET_S3_REGION` | S3 区域 | - |
 | `XET_S3_ENDPOINT` | S3 端点 URL | - |
+
+> **⚠️ 重要：S3 Lifecycle Rules 配置**
+>
+> 使用 S3 存储后端时，**必须**配置 S3 Lifecycle Rules 来自动中止未完成的 multipart 上传，否则会产生持续的存储费用。
+>
+> **配置步骤：**
+> 1. 在 AWS S3 控制台或使用 AWS CLI 编辑存储桶的 Lifecycle 规则
+> 2. 添加规则：中止未完成的 multipart 上传
+> 3. 建议设置：7 天后中止未完成的上传
+>
+> **AWS CLI 示例：**
+> ```bash
+> aws s3api put-bucket-lifecycle-configuration \
+>   --bucket your-bucket-name \
+>   --lifecycle-configuration '{
+>     "Rules": [
+>       {
+>         "ID": "AbortIncompleteMultipartUploads",
+>         "Status": "Enabled",
+>         "Filter": {"Prefix": ""},
+>         "AbortIncompleteMultipartUpload": {
+>           "DaysAfterInitiation": 7
+>         }
+>       }
+>     ]
+>   }'
+> ```
+>
+> 如果不配置此规则，进程崩溃或网络中断会导致孤立的 multipart 上传，持续产生存储费用。
 | `CAS_PUBLIC_KEY_PATH` | Ed25519 公钥路径 | `/tmp/xet-public-key.pem` |
 | `CAS_TRUSTED_KIDS` | 受信任的密钥 ID 列表 | `test-kid` |
 | `CAS_STATE_DB_PATH` | 状态数据库路径 | `/tmp/xet-state.db` |

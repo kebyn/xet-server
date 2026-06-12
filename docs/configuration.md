@@ -294,6 +294,43 @@ export HUB_PORT=8080
 # ... 其他 Hub 配置
 ```
 
+> **⚠️ 重要：S3 Lifecycle Rules 配置**
+>
+> 使用 S3 存储后端时，**必须**配置 S3 Lifecycle Rules 来自动中止未完成的 multipart 上传。
+>
+> **为什么需要配置？**
+> - 大文件（≥5MB）使用 multipart 上传
+> - 如果进程崩溃或网络中断，multipart 上传会保持未完成状态
+> - 未完成的 multipart 上传会产生持续的存储费用
+> - 这些孤立的上传不会被自动清理
+>
+> **配置步骤：**
+> 1. 在 AWS S3 控制台编辑存储桶的 Lifecycle 规则
+> 2. 添加规则：中止未完成的 multipart 上传
+> 3. 建议设置：7 天后中止未完成的上传
+>
+> **AWS CLI 示例：**
+> ```bash
+> aws s3api put-bucket-lifecycle-configuration \
+>   --bucket my-xet-bucket \
+>   --lifecycle-configuration '{
+>     "Rules": [
+>       {
+>         "ID": "AbortIncompleteMultipartUploads",
+>         "Status": "Enabled",
+>         "Filter": {"Prefix": ""},
+>         "AbortIncompleteMultipartUpload": {
+>           "DaysAfterInitiation": 7
+>         }
+>       }
+>     ]
+>   }'
+> ```
+>
+> **MinIO 用户：** MinIO 也支持 lifecycle 配置，使用 `mc ilm` 命令配置。
+>
+> 如果不配置此规则，会导致存储费用持续增加。
+
 ---
 
 ## 密钥生成

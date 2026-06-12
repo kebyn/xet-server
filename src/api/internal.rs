@@ -5,23 +5,12 @@
 
 use actix_web::{web, HttpResponse};
 use serde::Serialize;
-use std::sync::Arc;
 use tracing::{info, warn};
 
 use crate::api::auth::{check_scope, extract_token_from_request, AuthVerifier};
+use crate::index::MetadataIndex;
 use crate::metrics::GLOBAL_METRICS;
-use crate::state::{StorageState, StorageStateManager};
 use crate::storage::StorageBackend;
-
-/// Response for GET /internal/state/{oid}
-#[derive(Serialize)]
-struct StateResponse {
-    state: String,
-    xet_file_id: Option<String>,
-    size: u64,
-    sha256: String,
-    converted_at: Option<u64>,
-}
 
 /// Error response for internal endpoints
 #[derive(Serialize)]
@@ -31,14 +20,17 @@ struct ErrorResponse {
 
 /// Get storage state for a blob by OID.
 ///
-/// Returns JSON with state, xet_file_id, size, sha256, and converted_at.
-/// Returns 404 if no state record exists.
+/// Stateless logic:
+/// - Check MetadataIndex for xet data → return xet_only
+/// - Check raw blob in storage → return raw_only
+/// - Not found → 404
 ///
 /// Requires "internal" scope.
 pub async fn get_blob_state(
     path: web::Path<String>,
     auth: web::Data<AuthVerifier>,
-    state_mgr: web::Data<Arc<dyn StorageStateManager>>,
+    storage: web::Data<Box<dyn StorageBackend>>,
+    index: web::Data<MetadataIndex>,
     req: actix_web::HttpRequest,
 ) -> HttpResponse {
     let start = std::time::Instant::now();
@@ -85,63 +77,80 @@ pub async fn get_blob_state(
         });
     }
 
-    // Query state from state manager
-    let file_state = match state_mgr.get_state(&oid).await {
-        Ok(Some(state)) => state,
-        Ok(None) => {
+    // Check MetadataIndex first
+    if index.get_shards_for_file(&oid).is_some() {
+        info!("Internal state query for {}: xet_only", oid);
+        GLOBAL_METRICS.record_request(200);
+        GLOBAL_METRICS.record_latency(start);
+        // Get actual blob size from storage
+        let size = match storage.get_size(&format!("lfs/objects/{}", oid)).await {
+            Ok(s) => s,
+            Err(_) => 0, // Fallback to 0 if size lookup fails
+        };
+        return HttpResponse::Ok().json(serde_json::json!({
+            "state": "xet_only",
+            "xet_file_id": oid,
+            "size": size,
+            "sha256": oid,
+            "converted_at": null
+        }));
+    }
+
+    // Check raw blob
+    let object_key = format!("lfs/objects/{}", oid);
+    match storage.exists(&object_key).await {
+        Ok(true) => {
+            info!("Internal state query for {}: raw_only", oid);
+            GLOBAL_METRICS.record_request(200);
+            GLOBAL_METRICS.record_latency(start);
+            // Get actual blob size from storage
+            let size = match storage.get_size(&object_key).await {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!("Failed to get size for {}: {}", oid, e);
+                    0 // Fallback to 0 if size lookup fails
+                }
+            };
+            HttpResponse::Ok().json(serde_json::json!({
+                "state": "raw_only",
+                "xet_file_id": null,
+                "size": size,
+                "sha256": oid,
+                "converted_at": null
+            }))
+        }
+        Ok(false) => {
             GLOBAL_METRICS.record_request(404);
             GLOBAL_METRICS.record_latency(start);
-            return HttpResponse::NotFound().json(ErrorResponse {
-                error: format!("No state found for oid: {}", oid),
-            });
+            HttpResponse::NotFound().json(ErrorResponse {
+                error: format!("Blob not found: {}", oid),
+            })
         }
         Err(e) => {
-            warn!("Failed to get state for {}: {}", oid, e);
+            warn!("Failed to check storage for {}: {}", oid, e);
             GLOBAL_METRICS.record_request(500);
             GLOBAL_METRICS.record_error();
             GLOBAL_METRICS.record_latency(start);
-            return HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("State manager error: {}", e),
-            });
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Storage error: {}", e),
+            })
         }
-    };
-
-    // Build response
-    let state_str = match file_state.state {
-        StorageState::RawOnly => "raw_only",
-        StorageState::XetOnly => "xet_only",
-    };
-
-    let response = StateResponse {
-        state: state_str.to_string(),
-        xet_file_id: file_state.xet_file_id,
-        size: file_state.size,
-        sha256: file_state.sha256,
-        converted_at: file_state.converted_at,
-    };
-
-    info!("Internal state query for {}: {}", oid, response.state);
-
-    GLOBAL_METRICS.record_request(200);
-    GLOBAL_METRICS.record_latency(start);
-
-    HttpResponse::Ok().json(response)
+    }
 }
 
 /// Check if blob is accessible via HEAD request.
 ///
-/// Returns:
-/// - 200 with X-Storage-State: xet_only and X-File-Id header if XetOnly
-/// - 200 with X-Storage-State: raw_only if RawOnly
-/// - 200 with X-Storage-State: raw_only if raw blob exists in storage (no state record)
-/// - 404 if blob not found anywhere
+/// Stateless logic:
+/// - Check MetadataIndex for xet data → X-Storage-State: xet_only
+/// - Check raw blob in storage → X-Storage-State: raw_only
+/// - Not found → 404
 ///
 /// Requires "internal" scope.
 pub async fn head_blob(
     path: web::Path<String>,
     auth: web::Data<AuthVerifier>,
-    state_mgr: web::Data<Arc<dyn StorageStateManager>>,
     storage: web::Data<Box<dyn StorageBackend>>,
+    index: web::Data<MetadataIndex>,
     req: actix_web::HttpRequest,
 ) -> HttpResponse {
     let start = std::time::Instant::now();
@@ -188,65 +197,35 @@ pub async fn head_blob(
         });
     }
 
-    // Query state from state manager
-    let file_state = match state_mgr.get_state(&oid).await {
-        Ok(state) => state,
-        Err(e) => {
-            warn!("Failed to get state for {}: {}", oid, e);
-            GLOBAL_METRICS.record_request(500);
-            GLOBAL_METRICS.record_error();
-            GLOBAL_METRICS.record_latency(start);
-            return HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("State manager error: {}", e),
-            });
-        }
-    };
+    // Check MetadataIndex first
+    if index.get_shards_for_file(&oid).is_some() {
+        GLOBAL_METRICS.record_request(200);
+        GLOBAL_METRICS.record_latency(start);
+        return HttpResponse::Ok()
+            .insert_header(("X-Storage-State", "xet_only"))
+            .insert_header(("X-File-Id", oid.as_str()))
+            .finish();
+    }
 
-    // Build response based on state
-    if let Some(state) = file_state {
-        match state.state {
-            StorageState::XetOnly => {
-                GLOBAL_METRICS.record_request(200);
-                GLOBAL_METRICS.record_latency(start);
-                HttpResponse::Ok()
-                    .insert_header(("X-Storage-State", "xet_only"))
-                    .insert_header(("X-File-Id", state.xet_file_id.unwrap_or_default()))
-                    .finish()
-            }
-            StorageState::RawOnly => {
-                GLOBAL_METRICS.record_request(200);
-                GLOBAL_METRICS.record_latency(start);
-                HttpResponse::Ok()
-                    .insert_header(("X-Storage-State", "raw_only"))
-                    .finish()
-            }
-        }
-    } else {
-        // No state record - check if raw blob exists in storage
-        let object_key = format!("lfs/objects/{}", oid);
-        let exists = match storage.exists(&object_key).await {
-            Ok(exists) => exists,
-            Err(e) => {
-                warn!("Failed to check storage for {}: {}", oid, e);
-                GLOBAL_METRICS.record_request(500);
-                GLOBAL_METRICS.record_error();
-                GLOBAL_METRICS.record_latency(start);
-                return HttpResponse::InternalServerError().json(ErrorResponse {
-                    error: format!("Storage error: {}", e),
-                });
-            }
-        };
-
-        if exists {
+    // Check raw blob
+    let object_key = format!("lfs/objects/{}", oid);
+    match storage.exists(&object_key).await {
+        Ok(true) => {
             GLOBAL_METRICS.record_request(200);
             GLOBAL_METRICS.record_latency(start);
             HttpResponse::Ok()
                 .insert_header(("X-Storage-State", "raw_only"))
                 .finish()
-        } else {
+        }
+        Ok(false) => {
             GLOBAL_METRICS.record_request(404);
             GLOBAL_METRICS.record_latency(start);
             HttpResponse::NotFound().finish()
+        }
+        Err(_) => {
+            GLOBAL_METRICS.record_request(500);
+            GLOBAL_METRICS.record_latency(start);
+            HttpResponse::InternalServerError().finish()
         }
     }
 }

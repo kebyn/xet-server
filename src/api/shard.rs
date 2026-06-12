@@ -215,7 +215,7 @@ pub async fn upload_shard(
 mod tests {
     use super::*;
     use crate::api::auth::{KeyPair, XetClaims, sign_xet_token, AuthVerifier};
-    use crate::config::{AuthConfig, StateConfig};
+    use crate::config::AuthConfig;
     use crate::storage::local::LocalStorage;
     use actix_web::{test, web, App};
     use tempfile::tempdir;
@@ -243,9 +243,6 @@ mod tests {
 
         let config = ServerConfig {
             auth: auth_config,
-            state: StateConfig {
-                sqlite_path: "/tmp/xet-test-state.db".to_string(),
-            },
             ..Default::default()
         };
         (kp, auth_verifier, config)
