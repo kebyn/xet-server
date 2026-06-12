@@ -42,39 +42,32 @@ impl ServerSettings {
             .unwrap_or_else(|| format!("http://{}:{}", self.host, self.port));
         let url = url.trim_end_matches('/').to_string();
 
-        // Validate URL format if explicitly configured
+        // M1: Validate URL format using proper URL parsing if explicitly configured
         if self.public_base_url.is_some() {
-            // Check scheme
-            if !url.starts_with("http://") && !url.starts_with("https://") {
-                tracing::warn!(
-                    "public_base_url '{}' does not start with http:// or https://. \
-                    This may cause issues with client URLs.",
-                    url
-                );
-            }
-
-            // Basic validation: extract host part
-            let after_scheme = url
-                .strip_prefix("http://")
-                .or_else(|| url.strip_prefix("https://"))
-                .unwrap_or(&url);
-
-            // Check if there's a host (contains a dot or is localhost)
-            let host_part = after_scheme.split('/').next().unwrap_or("");
-            let has_host = host_part.contains('.') || host_part.starts_with("localhost") || host_part.contains(':');
-
-            if !has_host && !host_part.is_empty() {
-                tracing::error!(
-                    "public_base_url '{}' appears to be missing a valid host. \
-                    This will likely cause client connection failures.",
-                    url
-                );
-            } else if host_part.is_empty() {
-                tracing::error!(
-                    "public_base_url '{}' is missing a host. \
-                    This will likely cause client connection failures.",
-                    url
-                );
+            match url::Url::parse(&url) {
+                Ok(parsed) => {
+                    if parsed.host().is_none() {
+                        tracing::error!(
+                            "public_base_url '{}' is missing a valid host. \
+                            This will likely cause client connection failures.",
+                            url
+                        );
+                    }
+                    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+                        tracing::warn!(
+                            "public_base_url '{}' uses non-HTTP scheme '{}'. \
+                            This may cause issues with client URLs.",
+                            url, parsed.scheme()
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "public_base_url '{}' is not a valid URL: {}. \
+                        This will cause client connection failures.",
+                        url, e
+                    );
+                }
             }
         }
 
