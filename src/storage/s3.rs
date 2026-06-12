@@ -34,8 +34,10 @@ impl S3Storage {
         let mut config_builder = Config::builder()
             .region(aws_sdk_s3::config::Region::new(region.to_string()))
             .credentials_provider(Credentials::new(
-                std::env::var("AWS_ACCESS_KEY_ID").unwrap_or_else(|_| "minioadmin".to_string()),
-                std::env::var("AWS_SECRET_ACCESS_KEY").unwrap_or_else(|_| "minioadmin".to_string()),
+                std::env::var("AWS_ACCESS_KEY_ID")
+                    .expect("AWS_ACCESS_KEY_ID must be set for S3 storage backend"),
+                std::env::var("AWS_SECRET_ACCESS_KEY")
+                    .expect("AWS_SECRET_ACCESS_KEY must be set for S3 storage backend"),
                 None,
                 None,
                 "test",
