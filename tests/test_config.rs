@@ -1,6 +1,6 @@
 //! Tests for configuration module
 
-use xet_server::config::{ServerConfig, StorageConfig, AuthConfig, StateConfig};
+use xet_server::config::{ServerConfig, StorageConfig, AuthConfig};
 
 #[test]
 fn test_config_default() {
@@ -10,7 +10,6 @@ fn test_config_default() {
     assert_eq!(config.storage.backend, "local");
     assert!(!config.auth.trusted_kids.is_empty());
     assert!(!config.auth.public_key_path.is_empty());
-    assert!(!config.state.sqlite_path.is_empty());
 }
 
 #[test]
@@ -44,18 +43,6 @@ fn test_config_auth_settings() {
 
     assert_eq!(config.auth.public_key_path, "/path/to/key.pem");
     assert_eq!(config.auth.trusted_kids.len(), 2);
-}
-
-#[test]
-fn test_config_state_settings() {
-    let config = ServerConfig {
-        state: StateConfig {
-            sqlite_path: "/custom/path/state.db".to_string(),
-        },
-        ..Default::default()
-    };
-
-    assert_eq!(config.state.sqlite_path, "/custom/path/state.db");
 }
 
 #[test]

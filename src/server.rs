@@ -1,12 +1,15 @@
 //! HTTP server implementation
 
 use actix_web::{web, App, HttpServer, HttpResponse, middleware::{Logger, from_fn}};
+use actix_governor::{Governor, GovernorConfigBuilder, GlobalKeyExtractor};
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 use crate::api::auth::AuthVerifier;
 use crate::config::ServerConfig;
+use crate::conversion::ConvertingOids;
+use crate::gc::{GarbageCollector, GcStats, start_gc_background_task};
 use crate::storage::{create_storage, StorageBackend};
-use crate::state::SqliteStateManager;
 use crate::middleware::metrics_middleware;
 
 pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
@@ -21,23 +24,54 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
 
     let index = Arc::new(crate::index::MetadataIndex::new());
 
-    // Create state manager for tracking blob storage state
-    let state_mgr: Arc<dyn crate::state::StorageStateManager> = Arc::new(
-        SqliteStateManager::new(&config.state.sqlite_path)
-            .expect("Failed to create state manager")
-    );
+    // Rebuild MetadataIndex from stored shards (stateless server)
+    match index.rebuild_from_storage(&**storage).await {
+        Ok(count) => tracing::info!("Rebuilt metadata index: {} shards loaded", count),
+        Err(e) => tracing::warn!("Failed to rebuild index: {}", e),
+    }
+
+    // Concurrent conversion tracker (in-memory, resets on restart)
+    let converting = Arc::new(ConvertingOids::new());
+
+    // GC: Garbage collector for orphaned blobs
+    let gc = Arc::new(GarbageCollector::new(storage.clone(), config.gc.clone()));
+    let last_gc_stats = Arc::new(RwLock::new(None::<GcStats>));
+
+    // Start background GC task (if enabled)
+    start_gc_background_task(gc.clone(), last_gc_stats.clone()).await;
 
     let bind_addr = format!("{}:{}", config.server.host, config.server.port);
 
-    println!("Starting Xet Storage server on {}", bind_addr);
-    println!("Storage backend: {}", config.storage.backend);
-    println!("Max upload size: {} MB", config.server.max_body_size_mb);
-    println!("State database: {}", config.state.sqlite_path);
+    tracing::info!("Starting Xet Storage server on {}", bind_addr);
+    tracing::info!("Storage backend: {}", config.storage.backend);
+    tracing::info!("Max upload size: {} MB", config.server.max_body_size_mb);
+    tracing::info!("Conversion: {}", if config.conversion.enabled { "enabled" } else { "disabled" });
+    tracing::info!("GC: {} (interval={}s, dry_run={})",
+        if config.gc.enabled { "enabled" } else { "disabled" },
+        config.gc.interval_seconds,
+        config.gc.dry_run
+    );
+
+    let gc_for_app = gc.clone();
+    let stats_for_app = last_gc_stats.clone();
+
+    // Configure rate limiting for public endpoints
+    // Allow 60 requests per minute per IP address
+    let governor_conf = GovernorConfigBuilder::default()
+        .per_second(60)  // 60 seconds window
+        .burst_size(60)   // 60 requests per window
+        .key_extractor(GlobalKeyExtractor)
+        .finish()
+        .expect("Failed to configure rate limiter");
+
+    tracing::info!("Rate limiting: 60 requests/minute per IP for public endpoints");
 
     HttpServer::new(move || {
         App::new()
             .wrap(Logger::default())
             .wrap(from_fn(metrics_middleware))
+            // Rate limiting for public API endpoints
+            .wrap(Governor::new(&governor_conf))
             // PayloadConfig bounds non-upload routes (web::Bytes, web::Json).
             // Upload handlers use web::Payload which bypasses this limit and
             // enforce max_body_size_bytes manually via streaming byte counting.
@@ -45,14 +79,17 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
             .app_data(web::Data::from(auth_verifier.clone()))
             .app_data(web::Data::from(storage.clone()))
             .app_data(web::Data::from(index.clone()))
-            // Data::new wraps the Arc in another Arc, creating Data<Arc<dyn StorageStateManager>>
-            // which matches handler signatures that extract web::Data<Arc<dyn StorageStateManager>>.
-            .app_data(web::Data::new(state_mgr.clone()))
+            .app_data(web::Data::new(converting.clone()))
             .app_data(web::Data::new(config.clone()))
-            // Internal endpoints (Hub-to-CAS communication)
+            .app_data(web::Data::new(gc_for_app.clone()))
+            .app_data(web::Data::new(stats_for_app.clone()))
+            // Internal endpoints (Hub-to-CAS communication) - no rate limiting
             .route("/internal/state/{oid}", web::get().to(crate::api::internal::get_blob_state))
             .route("/internal/blob/{oid}", web::head().to(crate::api::internal::head_blob))
-            // Public API routes
+            // GC endpoints (CAS internal) - no rate limiting
+            .route("/internal/gc/run", web::post().to(crate::api::gc::trigger_gc))
+            .route("/internal/gc/status", web::get().to(crate::api::gc::gc_status))
+            // Public API routes - rate limited
             .route("/v1/xorbs/{prefix}/{hash}", web::post().to(crate::api::xorb::upload_xorb))
             .route("/v1/xorbs/{prefix}/{hash}", web::put().to(crate::api::xorb::upload_xorb))
             .route("/v1/xorbs/{prefix}/{hash}/download", web::get().to(crate::api::xorb::download_xorb))

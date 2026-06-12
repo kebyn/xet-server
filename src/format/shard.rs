@@ -376,10 +376,20 @@ impl MDBShardFile {
         if footer.file_info_offset > 0 && footer.file_info_offset < data.len() as u64 {
             let mut file_cursor = Cursor::new(&data[footer.file_info_offset as usize..]);
 
+            // When file_lookup_offset marks the end of the file section (i.e., it points
+            // to the xorb info section), use it as the loop boundary so the parser does
+            // not bleed across sections.  The boundary is relative to the cursor start
+            // (file_info_offset).
+            let file_section_end = if footer.file_lookup_offset > footer.file_info_offset {
+                (footer.file_lookup_offset - footer.file_info_offset) as usize
+            } else {
+                0
+            };
+
             // Parse all file entries
             loop {
                 let pos = file_cursor.position() as usize;
-                if pos + 48 > data.len() - footer_start {
+                if pos + 48 > file_section_end {
                     break; // Reached end of file info section
                 }
 
@@ -409,10 +419,19 @@ impl MDBShardFile {
         if footer.xorb_info_offset > 0 && footer.xorb_info_offset < data.len() as u64 {
             let mut xorb_cursor = Cursor::new(&data[footer.xorb_info_offset as usize..]);
 
+            // xorb_lookup_offset marks the start of the xorb lookup section, which is
+            // immediately after the xorb info section.  Use it as the loop boundary so
+            // the parser does not read lookup data as xorb headers.
+            let xorb_section_end = if footer.xorb_lookup_offset > footer.xorb_info_offset {
+                (footer.xorb_lookup_offset - footer.xorb_info_offset) as usize
+            } else {
+                data.len() - footer_start
+            };
+
             // Parse all xorb entries
             loop {
                 let pos = xorb_cursor.position() as usize;
-                if pos + 48 > data.len() - footer_start {
+                if pos + 48 > xorb_section_end {
                     break; // Reached end of xorb info section
                 }
 

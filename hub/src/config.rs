@@ -80,6 +80,8 @@ pub struct StorageSettings {
     pub data_dir: String,
     pub inline_threshold_bytes: u64,
     pub lfs_threshold_bytes: u64,
+    /// Directory for temporary files during streaming uploads
+    pub upload_temp_dir: String,
 }
 
 impl Default for StorageSettings {
@@ -88,6 +90,7 @@ impl Default for StorageSettings {
             data_dir: "./data".to_string(),
             inline_threshold_bytes: 1024 * 1024, // 1MB
             lfs_threshold_bytes: 10 * 1024 * 1024,   // 10MB
+            upload_temp_dir: "/tmp/hub-uploads".to_string(),
         }
     }
 }
@@ -149,6 +152,8 @@ impl HubConfig {
                     .ok()
                     .and_then(|t| t.parse().ok())
                     .unwrap_or(10 * 1024 * 1024),
+                upload_temp_dir: env::var("HUB_UPLOAD_TEMP_DIR")
+                    .unwrap_or_else(|_| "/tmp/hub-uploads".to_string()),
             },
         }
     }

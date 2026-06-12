@@ -3,8 +3,16 @@ use async_trait::async_trait;
 use rusqlite::params;
 use std::sync::Mutex;
 
+// Schema version tracking for future migrations
+// Current version: 1 (initial schema)
+const SCHEMA_VERSION: i64 = 1;
+
 // I15: Extract schema to constant to eliminate duplication
 const SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS repos (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
@@ -67,6 +75,18 @@ impl SqliteMetadataStore {
         // Create tables
         conn.execute_batch(SCHEMA)
             .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+
+        // Initialize schema version if not present
+        let version_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM schema_version",
+            [],
+            |row| row.get(0),
+        ).unwrap_or(0);
+
+        if version_count == 0 {
+            conn.execute("INSERT INTO schema_version (version) VALUES (?1)", params![SCHEMA_VERSION])
+                .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+        }
 
         Ok(Self {
             conn: Mutex::new(conn),
@@ -194,6 +214,11 @@ impl MetadataStore for SqliteMetadataStore {
         }
     }
 
+    /// Delete a repository and all its metadata (file_tree, heads, revisions, repo record)
+    ///
+    /// **Known tradeoff:** This does NOT delete associated blobs from CAS. Since blobs are
+    /// content-addressed and deduplicated, orphaned blobs don't affect correctness. A background
+    /// GC job could clean up orphaned blobs in the future if storage efficiency becomes a concern.
     async fn delete_repo(&self, repo_id: i64) -> Result<(), MetadataError> {
         let conn = self.conn.lock().map_err(|e| {
             MetadataError::DatabaseError(format!("Failed to acquire lock: {}", e))
@@ -611,6 +636,24 @@ impl MetadataStore for SqliteMetadataStore {
                 Err(e)
             }
         }
+    }
+
+    async fn get_all_referenced_hashes(&self) -> Result<std::collections::HashSet<String>, MetadataError> {
+        let conn = self.conn.lock().map_err(|e| {
+            MetadataError::DatabaseError(format!("Failed to acquire lock: {}", e))
+        })?;
+
+        let mut stmt = conn
+            .prepare("SELECT DISTINCT cas_hash FROM file_tree WHERE is_lfs = 1")
+            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+
+        let hashes: std::collections::HashSet<String> = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(hashes)
     }
 }
 

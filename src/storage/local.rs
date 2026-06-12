@@ -139,4 +139,149 @@ impl StorageBackend for LocalStorage {
             Err(e) => Err(StorageError::Internal(format!("Failed to delete: {}", e))),
         }
     }
+
+    async fn list_objects(&self, prefix: &str) -> StorageResult<Vec<String>> {
+        let dir = self.base_path.join(prefix);
+        if !dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut keys = Vec::new();
+        Self::walk_dir(&self.base_path, &dir, &mut keys).await?;
+        Ok(keys)
+    }
+
+    async fn list_objects_with_mtime(&self, prefix: &str) -> StorageResult<Vec<(String, u64)>> {
+        let dir = self.base_path.join(prefix);
+        if !dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut entries_with_mtime = Vec::new();
+        Self::walk_dir_with_mtime(&self.base_path, &dir, &mut entries_with_mtime).await?;
+        Ok(entries_with_mtime)
+    }
+
+    async fn get_mtime(&self, key: &str) -> StorageResult<u64> {
+        let path = self.object_path(key)?;
+
+        match fs::metadata(&path).await {
+            Ok(meta) => {
+                let mtime = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                Ok(mtime)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Err(StorageError::NotFound(key.to_string()))
+            }
+            Err(e) => Err(StorageError::Internal(format!("Failed to get metadata: {}", e))),
+        }
+    }
+
+    async fn get_size(&self, key: &str) -> StorageResult<u64> {
+        let path = self.object_path(key)?;
+
+        match fs::metadata(&path).await {
+            Ok(meta) => Ok(meta.len()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Err(StorageError::NotFound(key.to_string()))
+            }
+            Err(e) => Err(StorageError::Internal(format!("Failed to get metadata: {}", e))),
+        }
+    }
+}
+
+impl LocalStorage {
+    /// Recursively walk a directory, collecting keys relative to base_path.
+    async fn walk_dir(
+        base_path: &Path,
+        dir: &Path,
+        keys: &mut Vec<String>,
+    ) -> StorageResult<()> {
+        let mut entries = fs::read_dir(dir).await.map_err(|e| {
+            StorageError::Internal(format!("Failed to read dir {}: {}", dir.display(), e))
+        })?;
+
+        while let Some(entry) = entries.next_entry().await.map_err(|e| {
+            StorageError::Internal(format!("Failed to read dir entry: {}", e))
+        })? {
+            let path = entry.path();
+            let file_type = entry.file_type().await.map_err(|e| {
+                StorageError::Internal(format!("Failed to get file type: {}", e))
+            })?;
+
+            if file_type.is_dir() {
+                Box::pin(Self::walk_dir(base_path, &path, keys)).await?;
+            } else if file_type.is_file() {
+                let key = path
+                    .strip_prefix(base_path)
+                    .map_err(|e| {
+                        StorageError::Internal(format!(
+                            "Failed to compute relative path: {}",
+                            e
+                        ))
+                    })?
+                    .to_string_lossy()
+                    .to_string();
+                keys.push(key);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Recursively walk a directory, collecting (key, mtime_unix_seconds) pairs.
+    async fn walk_dir_with_mtime(
+        base_path: &Path,
+        dir: &Path,
+        entries_with_mtime: &mut Vec<(String, u64)>,
+    ) -> StorageResult<()> {
+        let mut entries = fs::read_dir(dir).await.map_err(|e| {
+            StorageError::Internal(format!("Failed to read dir {}: {}", dir.display(), e))
+        })?;
+
+        while let Some(entry) = entries.next_entry().await.map_err(|e| {
+            StorageError::Internal(format!("Failed to read dir entry: {}", e))
+        })? {
+            let path = entry.path();
+            let file_type = entry.file_type().await.map_err(|e| {
+                StorageError::Internal(format!("Failed to get file type: {}", e))
+            })?;
+
+            if file_type.is_dir() {
+                Box::pin(Self::walk_dir_with_mtime(base_path, &path, entries_with_mtime)).await?;
+            } else if file_type.is_file() {
+                let key = path
+                    .strip_prefix(base_path)
+                    .map_err(|e| {
+                        StorageError::Internal(format!(
+                            "Failed to compute relative path: {}",
+                            e
+                        ))
+                    })?
+                    .to_string_lossy()
+                    .to_string();
+
+                // Get modification time
+                let mtime = match fs::metadata(&path).await {
+                    Ok(meta) => {
+                        meta.modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0)
+                    }
+                    Err(_) => 0,
+                };
+
+                entries_with_mtime.push((key, mtime));
+            }
+        }
+
+        Ok(())
+    }
 }

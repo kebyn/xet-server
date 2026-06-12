@@ -6,6 +6,7 @@
 use actix_web::{web, HttpResponse};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
+use tracing::error;
 
 use crate::config::ServerConfig;
 use crate::index::MetadataIndex;
@@ -119,11 +120,13 @@ pub async fn get_reconstruction_v1(
         let shard = match fetch_and_parse_shard(&shard_id, &***storage).await {
             Ok(s) => s,
             Err(e) => {
+                // Log detailed error with shard_id, but return generic message to client
+                error!("Failed to fetch/parse shard {}: {}", shard_id, e);
                 GLOBAL_METRICS.record_request(500);
                 GLOBAL_METRICS.record_error();
                 GLOBAL_METRICS.record_latency(start);
                 return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": e
+                    "error": "Failed to fetch or parse shard data"
                 }));
             }
         };
@@ -221,11 +224,13 @@ pub async fn get_reconstruction(
         let shard = match fetch_and_parse_shard(&shard_id, &***storage).await {
             Ok(s) => s,
             Err(e) => {
+                // Log detailed error with shard_id, but return generic message to client
+                error!("Failed to fetch/parse shard {}: {}", shard_id, e);
                 GLOBAL_METRICS.record_request(500);
                 GLOBAL_METRICS.record_error();
                 GLOBAL_METRICS.record_latency(start);
                 return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": e
+                    "error": "Failed to fetch or parse shard data"
                 }));
             }
         };

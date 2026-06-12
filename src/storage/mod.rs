@@ -61,6 +61,47 @@ pub trait StorageBackend: Send + Sync {
 
     /// Delete an object
     async fn delete(&self, key: &str) -> StorageResult<()>;
+
+    /// List object keys matching a prefix.
+    /// Returns full keys (e.g., "shards/abc123", "shards/def456").
+    async fn list_objects(&self, _prefix: &str) -> StorageResult<Vec<String>> {
+        Ok(Vec::new())
+    }
+
+    /// List objects matching a prefix with their modification times.
+    /// Returns (key, unix_timestamp_seconds) pairs.
+    /// Used by GC to determine which blobs are older than the grace period.
+    async fn list_objects_with_mtime(&self, prefix: &str) -> StorageResult<Vec<(String, u64)>> {
+        // Default implementation: call list_objects and return mtime=0
+        // Storage backends should override this for proper grace period support
+        let keys = self.list_objects(prefix).await?;
+        Ok(keys.into_iter().map(|k| (k, 0)).collect())
+    }
+
+    /// Get the modification time of a single object.
+    /// Returns unix timestamp in seconds.
+    /// Used by GC to re-check blob age before deletion, preventing race conditions
+    /// where a blob is uploaded between GC's scan and delete phases.
+    async fn get_mtime(&self, key: &str) -> StorageResult<u64> {
+        // Default implementation: list with prefix and find the key
+        // Storage backends should override this for efficiency
+        let prefix = key.rsplit_once('/').map(|(p, _)| p).unwrap_or("");
+        let objects = self.list_objects_with_mtime(prefix).await?;
+        objects
+            .into_iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, mtime)| mtime)
+            .ok_or_else(|| StorageError::NotFound(key.to_string()))
+    }
+
+    /// Get the size of an object in bytes.
+    /// Used by internal API to report blob size to Hub.
+    async fn get_size(&self, key: &str) -> StorageResult<u64> {
+        // Default implementation: fetch the object and return its size
+        // Storage backends should override this for efficiency (e.g., HEAD request)
+        let data = self.get(key).await?;
+        Ok(data.len() as u64)
+    }
 }
 
 pub async fn create_storage(config: &crate::config::StorageConfig) -> StorageResult<Box<dyn StorageBackend>> {

@@ -143,9 +143,30 @@ impl XetSigner {
     }
 
     /// Sign and create an internal token for Hub-to-CAS communication
+    /// Internal tokens are short-lived (60 seconds) and can only access /internal/* endpoints
     /// Returns (token, expiration_timestamp)
     pub fn sign_internal(&self) -> (String, u64) {
-        self.sign("hub-service", "internal", "", "", "")
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let exp = now + 60; // Short TTL for internal tokens
+
+        let claims = XetClaims {
+            sub: "hub-service".to_string(),
+            scope: "internal".to_string(),
+            repo_id: "".to_string(),
+            repo_type: "".to_string(),
+            revision: "".to_string(),
+            exp,
+            iat: now,
+            kid: self.kid.clone(),
+            token_type: "internal".to_string(),
+            oid: None,
+            operation: None,
+        };
+
+        self.sign_claims(claims, "xet_")
     }
 
     /// Verify a proxy token's signature and decode its claims
@@ -193,12 +214,82 @@ impl XetSigner {
             Err(_) => return None,
         };
 
-        serde_json::from_slice(&claims_json).ok()
+        let claims: XetClaims = serde_json::from_slice(&claims_json).ok()?;
+
+        // Check expiration
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        if claims.exp < now {
+            return None; // Token expired
+        }
+
+        Some(claims)
     }
 
     /// Get the key ID
     pub fn kid(&self) -> &str {
         &self.kid
+    }
+
+    /// Verify a xet token's signature and decode its claims
+    /// Returns Some(claims) if the signature is valid and claims can be decoded, None otherwise
+    #[must_use = "the result of token verification should be checked"]
+    pub fn verify_xet_token(&self, token: &str) -> Option<XetClaims> {
+        use ed25519_dalek::{Signature, Verifier};
+
+        // Check if it's a xet token
+        if !token.starts_with("xet_") {
+            return None;
+        }
+
+        // Parse JWT
+        let token_body = token.strip_prefix("xet_")?;
+
+        let parts: Vec<&str> = token_body.split('.').collect();
+        if parts.len() != 3 {
+            return None;
+        }
+
+        // Verify signature using ed25519-dalek
+        let signing_input = format!("{}.{}", parts[0], parts[1]);
+        let signature_bytes = match URL_SAFE_NO_PAD.decode(parts[2]) {
+            Ok(bytes) => bytes,
+            Err(_) => return None,
+        };
+
+        let signature = match Signature::from_slice(&signature_bytes) {
+            Ok(sig) => sig,
+            Err(_) => return None,
+        };
+
+        // Get verifying key from signing key
+        let verifying_key = self.signing_key.verifying_key();
+
+        // Verify signature
+        if verifying_key.verify(signing_input.as_bytes(), &signature).is_err() {
+            return None;
+        }
+
+        // Decode claims (signature is valid, so this should succeed)
+        let claims_json = match URL_SAFE_NO_PAD.decode(parts[1]) {
+            Ok(json) => json,
+            Err(_) => return None,
+        };
+
+        let claims: XetClaims = serde_json::from_slice(&claims_json).ok()?;
+
+        // Check expiration
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        if claims.exp < now {
+            return None; // Token expired
+        }
+
+        Some(claims)
     }
 }
 

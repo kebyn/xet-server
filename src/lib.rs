@@ -41,13 +41,14 @@ pub mod hash;
 pub mod chunking;
 pub mod format;
 pub mod config;
+pub mod conversion;
 pub mod storage;
-pub mod state;
 pub mod api;
 pub mod server;
 pub mod index;
 pub mod metrics;
 pub mod middleware;
 pub mod util;
+pub mod gc;
 
 pub use error::{XetError, Result};
