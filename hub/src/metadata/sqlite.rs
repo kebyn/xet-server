@@ -58,6 +58,11 @@ CREATE INDEX IF NOT EXISTS idx_file_tree_prefix ON file_tree(repo_id, commit_id,
 "#;
 
 /// SQLite-based metadata store
+///
+/// Note: Uses `Mutex<Connection>` which serializes all database operations.
+/// WAL mode (enabled in `new()`) allows concurrent readers, but writes still
+/// acquire exclusive locks. For higher concurrency under heavy write loads,
+/// consider migrating to a connection pool with separate read-only connections.
 pub struct SqliteMetadataStore {
     conn: Mutex<rusqlite::Connection>,
 }
@@ -70,6 +75,12 @@ impl SqliteMetadataStore {
 
         // I6: Enable foreign key constraints
         conn.execute_batch("PRAGMA foreign_keys = ON;")
+            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+
+        // I2: Enable WAL mode for better read/write concurrency.
+        // SQLite WAL mode allows concurrent readers with a single writer,
+        // reducing lock contention compared to the default journal mode.
+        conn.execute_batch("PRAGMA journal_mode = WAL;")
             .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
         // Create tables
@@ -103,6 +114,10 @@ impl SqliteMetadataStore {
 
         // I6: Enable foreign key constraints
         conn.execute_batch("PRAGMA foreign_keys = ON;")
+            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+
+        // I2: Enable WAL mode for consistency with production path
+        conn.execute_batch("PRAGMA journal_mode = WAL;")
             .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
         conn.execute_batch(SCHEMA)
