@@ -647,44 +647,24 @@ async fn reconstruct_from_xet(
 /// Check if there's enough disk space for an upload.
 /// Returns Ok(()) if sufficient space is available, Err with description otherwise.
 fn check_disk_space(path: &std::path::Path, required_bytes: u64) -> Result<(), String> {
-    // Use statvfs on Unix-like systems to check available space
+    // I4: Use statvfs on Unix-like systems to check actual available space
     #[cfg(unix)]
     {
-        // Get filesystem statistics
-        let _metadata = std::fs::metadata(path).map_err(|e| {
-            format!("Failed to get filesystem info for {}: {}", path.display(), e)
-        })?;
-
-        // Note: MetadataExt::blocks gives us filesystem block info, but for available space
-        // we need to use statvfs. For simplicity, we'll use a basic check.
-        // In production, consider using the nix crate or libc for proper statvfs.
-
-        // For now, we'll do a basic sanity check - ensure the path exists and is writable
-        // A more sophisticated check would use statvfs to get actual available space
+        // Verify path exists first
         if !path.exists() {
             return Err(format!("Path does not exist: {}", path.display()));
         }
 
-        // Check if we can write to the directory
-        let test_file = path.join(".disk_space_check");
-        match std::fs::write(&test_file, b"") {
-            Ok(_) => {
-                let _ = std::fs::remove_file(&test_file);
-            }
-            Err(e) => {
-                return Err(format!("Cannot write to {}: {}", path.display(), e));
-            }
-        }
+        let stat = nix::sys::statvfs::statvfs(path)
+            .map_err(|e| format!("statvfs failed for {}: {}", path.display(), e))?;
 
-        // Basic check passed - in production, use proper statvfs
-        // For now, we trust that if the directory is writable, there's likely space
-        // This is a simplification; a full implementation would check actual available space
-        if required_bytes > 100 * 1024 * 1024 * 1024 {
-            // If requesting >100GB, log a warning but allow it
-            tracing::warn!(
-                "Large upload requested ({} MB) - disk space check is basic",
-                required_bytes / 1024 / 1024
-            );
+        let available = stat.fragment_size() as u64 * stat.blocks_available() as u64;
+        if available < required_bytes {
+            return Err(format!(
+                "Insufficient disk space: need {} MB, have {} MB available",
+                required_bytes / 1024 / 1024,
+                available / 1024 / 1024
+            ));
         }
 
         Ok(())
