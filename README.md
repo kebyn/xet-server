@@ -34,7 +34,7 @@ Xet Server 采用**双进程架构**，由两个独立的服务组成：
 └────────────┬──────────────────────────────┬─────────────────┘
              │                              │
              │ Git LFS / HF Hub API         │ Xet 原生协议
-             │ (HTTP :8080)                 │ (HTTP :8081)
+             │ (HTTP :8080)                 │ (HTTP :8080)
              ▼                              ▼
 ┌────────────────────────┐      ┌────────────────────────┐
 │     Hub API Server     │      │    CAS Server (xet)    │
@@ -69,7 +69,7 @@ Xet Server 采用**双进程架构**，由两个独立的服务组成：
 - 数据库：SQLite（元数据存储）
 
 **CAS Server** (`xet-server`)
-- 端口：8081（默认）
+- 端口：8080（默认，生产环境建议设置为 8081 避免冲突）
 - 功能：内容寻址存储引擎
 - 职责：xorb/shard 存储、文件重构、去重、LFS 对象管理
 - 数据库：SQLite（状态跟踪）
@@ -78,7 +78,7 @@ Xet Server 采用**双进程架构**，由两个独立的服务组成：
 
 ### 环境要求
 
-- **Rust** 1.70+ (Edition 2024)
+- **Rust** 1.85+ (Edition 2024)
 - **SQLite** 3.35+
 - **可选**：S3/MinIO 存储后端
 
@@ -100,22 +100,23 @@ cargo build --release
 ### 生成认证密钥
 
 ```bash
-# 生成 Ed25519 密钥对
+# 生成 Hub 用户令牌（用于 Hub API 认证）
+./target/release/hub-api create-token \
+  --username admin \
+  --name "admin-token" \
+  --scope "read write" \
+  --db hub.db
+
+# 生成 Ed25519 密钥对（用于 CAS 令牌签名）
 openssl genpkey -algorithm Ed25519 -out private_key.pem
 openssl pkey -in private_key.pem -pubout -out public_key.pem
-
-# 生成 Hub 令牌（用于认证）
-./target/release/hub-api create-token \
-  --name "admin" \
-  --private-key private_key.pem \
-  --kid "hub-key-1"
 ```
 
 ### 配置环境变量
 
 **CAS Server 配置**：
 ```bash
-# 服务器设置
+# 服务器设置（注意：默认端口 8080 会与 Hub 冲突，建议改为 8081）
 export XET_HOST=0.0.0.0
 export XET_PORT=8081
 export XET_PUBLIC_BASE_URL=http://localhost:8081
@@ -269,18 +270,18 @@ hf download my-org/my-repo model.bin --local-dir ./downloaded
 
 | 变量名 | 描述 | 默认值 |
 |--------|------|--------|
-| `XET_HOST` | 服务器绑定地址 | `0.0.0.0` |
-| `XET_PORT` | 服务器端口 | `8081` |
+| `XET_HOST` | 服务器绑定地址 | `127.0.0.1` |
+| `XET_PORT` | 服务器端口 | `8080` |
 | `XET_PUBLIC_BASE_URL` | 公共访问 URL | `http://{host}:{port}` |
 | `XET_MAX_BODY_SIZE_MB` | 最大请求体大小（MB） | `2048` |
 | `XET_STORAGE_BACKEND` | 存储后端类型 | `local` |
-| `XET_LOCAL_PATH` | 本地存储路径 | - |
+| `XET_LOCAL_PATH` | 本地存储路径 | `./data` |
 | `XET_S3_BUCKET` | S3 存储桶名称 | - |
 | `XET_S3_REGION` | S3 区域 | - |
 | `XET_S3_ENDPOINT` | S3 端点 URL | - |
-| `CAS_PUBLIC_KEY_PATH` | Ed25519 公钥路径 | - |
-| `CAS_TRUSTED_KIDS` | 受信任的密钥 ID 列表 | - |
-| `CAS_STATE_DB_PATH` | 状态数据库路径 | `state.db` |
+| `CAS_PUBLIC_KEY_PATH` | Ed25519 公钥路径 | `/tmp/xet-public-key.pem` |
+| `CAS_TRUSTED_KIDS` | 受信任的密钥 ID 列表 | `test-kid` |
+| `CAS_STATE_DB_PATH` | 状态数据库路径 | `/tmp/xet-state.db` |
 
 ### Hub API 环境变量
 
@@ -293,7 +294,7 @@ hf download my-org/my-repo model.bin --local-dir ./downloaded
 | `HUB_KID` | 密钥标识符 | `hub-key-1` |
 | `HUB_TOKEN_TTL_SECONDS` | 令牌有效期（秒） | `3600` |
 | `HUB_SQLITE_PATH` | 元数据数据库路径 | `hub.db` |
-| `CAS_BASE_URL` | CAS 服务器 URL | `http://localhost:8081` |
+| `CAS_BASE_URL` | CAS 服务器 URL | `http://localhost:3000` |
 
 详细文档：[Configuration Guide](docs/configuration.md)
 
