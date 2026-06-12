@@ -196,6 +196,10 @@ git push origin master
 
 使用 `hf` CLI 工具与 Hub API 交互：
 
+**注意**：`hf` 是 [huggingface-cli](https://huggingface.co/docs/huggingface_hub/main/en/guides/cli) 的简写形式。
+也可以使用标准的 `huggingface-cli` 命令，两者功能相同。Xet Server 实现了与 HuggingFace Hub 兼容的 REST API，
+因此支持标准的 HuggingFace 工具链。
+
 ```bash
 # 设置环境变量
 export HF_ENDPOINT=http://localhost:8080
@@ -275,8 +279,8 @@ hf download my-org/my-repo model.bin --local-dir ./downloaded
 | `XET_PUBLIC_BASE_URL` | 公共访问 URL | `http://{host}:{port}` |
 | `XET_MAX_BODY_SIZE_MB` | 最大请求体大小（MB） | `2048` |
 | `XET_STORAGE_BACKEND` | 存储后端类型 | `local` |
-| `XET_LOCAL_PATH` | 本地存储路径 | `./data` |
-| `XET_S3_BUCKET` | S3 存储桶名称 | - |
+| `XET_LOCAL_PATH` | 本地存储路径（使用 local 后端时必需） | `./data` |
+| `XET_S3_BUCKET` | S3 存储桶名称（使用 s3 后端时必需） | - |
 | `XET_S3_REGION` | S3 区域 | - |
 | `XET_S3_ENDPOINT` | S3 端点 URL | - |
 | `CAS_PUBLIC_KEY_PATH` | Ed25519 公钥路径 | `/tmp/xet-public-key.pem` |

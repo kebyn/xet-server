@@ -358,12 +358,7 @@ server {
 }
 ```
 
-**方案 2：直接配置 TLS**
-```bash
-# 如果服务器支持 TLS
-export HUB_TLS_CERT_PATH=/etc/ssl/certs/hub.crt
-export HUB_TLS_KEY_PATH=/etc/ssl/private/hub.key
-```
+**注意**：Xet Server 本身不直接支持 TLS，建议在生产环境中使用反向代理（如 Nginx、Caddy）处理 TLS 终止。
 
 ### 3. 环境变量安全
 
