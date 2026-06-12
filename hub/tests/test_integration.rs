@@ -8,15 +8,18 @@ use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use std::sync::Arc;
 
-/// Setup test environment with all components
-fn setup_test_env() -> (
+/// Test environment type alias to reduce complexity
+type TestEnv = (
     Arc<TokenStore>,
     Arc<XetSigner>,
     Arc<dyn MetadataStore>,
     Arc<CasClient>,
     HubConfig,
     String, // plaintext token
-) {
+);
+
+/// Setup test environment with all components
+fn setup_test_env() -> TestEnv {
     // Create in-memory token store
     let token_store = Arc::new(TokenStore::in_memory().unwrap());
 
@@ -85,7 +88,7 @@ async fn test_create_repo_endpoint() {
     let req = test::TestRequest::post()
         .uri("/api/models")
         .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_json(&serde_json::json!({
+        .set_json(serde_json::json!({
             "name": "my-test-model",
             "private": false
         }))
@@ -277,7 +280,7 @@ async fn test_preupload_endpoint() {
     let req = test::TestRequest::post()
         .uri("/api/models/testuser/preupload-test-model/preupload/main")
         .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_json(&serde_json::json!({
+        .set_json(serde_json::json!({
             "files": [
                 {"path": "config.json", "size": 1024}
             ]
@@ -372,7 +375,7 @@ async fn test_full_workflow() {
     let req = test::TestRequest::post()
         .uri("/api/models")
         .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_json(&serde_json::json!({"name": "workflow-test", "private": false}))
+        .set_json(serde_json::json!({"name": "workflow-test", "private": false}))
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert!(resp.status().is_success());

@@ -600,7 +600,7 @@ mod tests {
 
         // Re-encode
         let new_claims_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
-        let tampered_token = format!("proxy_{}.{}", format!("{}.{}", parts[0], new_claims_b64), parts[2]);
+        let tampered_token = format!("proxy_{}.{}.{}", parts[0], new_claims_b64, parts[2]);
 
         let result = validate_proxy_token(&tampered_token, "abc123def456", "upload", &signer);
         assert!(!result, "Token with wrong token_type should be rejected");

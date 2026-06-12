@@ -13,6 +13,7 @@ use tempfile::TempDir;
 /// The `temp_dir` field keeps the temporary directory alive, preventing
 /// the temp files (including the public key PEM file) from being deleted
 /// until the test completes.
+#[allow(dead_code)] // Fields kept for RAII - they hold resources alive during tests
 pub struct TestContext {
     pub config: ServerConfig,
     pub keypair: KeyPair,
@@ -102,7 +103,7 @@ pub fn test_config_with_key(kp: &KeyPair) -> TestContext {
         config,
         keypair: KeyPair::generate(), // New keypair for caller's use
         auth_verifier,
-        temp_dir: temp_dir,
+        temp_dir,
     }
 }
 
@@ -150,7 +151,7 @@ pub fn test_config_with_new_key() -> TestContext {
         config,
         keypair: kp,
         auth_verifier,
-        temp_dir: temp_dir,
+        temp_dir,
     }
 }
 

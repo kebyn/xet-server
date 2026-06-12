@@ -54,6 +54,29 @@ struct XorbFetchInfo {
     size: u64,
 }
 
+/// Fetch and parse a shard from storage.
+///
+/// This is a shared helper used by both `get_reconstruction_v1` and
+/// `reconstruct_from_xet` to reduce code duplication.
+///
+/// Returns the parsed shard or an error message. The caller is responsible
+/// for recording metrics and converting errors to HTTP responses.
+pub async fn fetch_and_parse_shard(
+    shard_id: &str,
+    storage: &dyn StorageBackend,
+) -> Result<MDBShardFile, String> {
+    let shard_key = format!("shards/{}", shard_id);
+    let shard_data = storage
+        .get(&shard_key)
+        .await
+        .map_err(|e| format!("Failed to fetch shard {}: {}", shard_id, e))?;
+
+    GLOBAL_METRICS.record_storage_operation();
+
+    MDBShardFile::parse(&shard_data)
+        .map_err(|e| format!("Failed to parse shard {}: {}", shard_id, e))
+}
+
 /// Get file reconstruction information (V1 format)
 /// Returns detailed chunk-level information for backward compatibility
 pub async fn get_reconstruction_v1(
@@ -92,33 +115,15 @@ pub async fn get_reconstruction_v1(
     let mut seen_xorbs = HashSet::new();
 
     for shard_id in shard_ids {
-        let shard_key = format!("shards/{}", shard_id);
-
-        // Fetch shard from storage
-        let shard_data = match storage.get(&shard_key).await {
-            Ok(data) => {
-                GLOBAL_METRICS.record_storage_operation();
-                data
-            }
-            Err(e) => {
-                GLOBAL_METRICS.record_request(500);
-                GLOBAL_METRICS.record_error();
-                GLOBAL_METRICS.record_latency(start);
-                return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": format!("Failed to fetch shard: {}", e)
-                }));
-            }
-        };
-
-        // Parse shard
-        let shard = match MDBShardFile::parse(&shard_data) {
+        // Fetch and parse shard using shared helper
+        let shard = match fetch_and_parse_shard(&shard_id, &***storage).await {
             Ok(s) => s,
             Err(e) => {
                 GLOBAL_METRICS.record_request(500);
                 GLOBAL_METRICS.record_error();
                 GLOBAL_METRICS.record_latency(start);
                 return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": format!("Failed to parse shard: {}", e)
+                    "error": e
                 }));
             }
         };
@@ -212,33 +217,15 @@ pub async fn get_reconstruction(
     let mut seen_xorbs = HashSet::new();
 
     for shard_id in shard_ids {
-        let shard_key = format!("shards/{}", shard_id);
-
-        // Fetch shard from storage
-        let shard_data = match storage.get(&shard_key).await {
-            Ok(data) => {
-                GLOBAL_METRICS.record_storage_operation();
-                data
-            }
-            Err(e) => {
-                GLOBAL_METRICS.record_request(500);
-                GLOBAL_METRICS.record_error();
-                GLOBAL_METRICS.record_latency(start);
-                return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": format!("Failed to fetch shard: {}", e)
-                }));
-            }
-        };
-
-        // Parse shard
-        let shard = match MDBShardFile::parse(&shard_data) {
+        // Fetch and parse shard using shared helper
+        let shard = match fetch_and_parse_shard(&shard_id, &***storage).await {
             Ok(s) => s,
             Err(e) => {
                 GLOBAL_METRICS.record_request(500);
                 GLOBAL_METRICS.record_error();
                 GLOBAL_METRICS.record_latency(start);
                 return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": format!("Failed to parse shard: {}", e)
+                    "error": e
                 }));
             }
         };

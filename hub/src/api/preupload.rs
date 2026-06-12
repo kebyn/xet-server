@@ -240,15 +240,15 @@ mod tests {
 
     #[test]
     fn test_classify_upload_mode() {
-        let inline_threshold = 1 * 1024 * 1024; // 1MB
+        let inline_threshold = 1024 * 1024; // 1MB
 
         // Regular: <= 1MB
         assert_eq!(classify_upload_mode(0, inline_threshold), "regular");
         assert_eq!(classify_upload_mode(1024, inline_threshold), "regular");
-        assert_eq!(classify_upload_mode(1 * 1024 * 1024, inline_threshold), "regular");
+        assert_eq!(classify_upload_mode(1024 * 1024, inline_threshold), "regular");
 
         // LFS: > 1MB
-        assert_eq!(classify_upload_mode(1 * 1024 * 1024 + 1, inline_threshold), "lfs");
+        assert_eq!(classify_upload_mode(1024 * 1024 + 1, inline_threshold), "lfs");
         assert_eq!(classify_upload_mode(5 * 1024 * 1024, inline_threshold), "lfs");
         assert_eq!(classify_upload_mode(10 * 1024 * 1024, inline_threshold), "lfs");
         assert_eq!(classify_upload_mode(10 * 1024 * 1024 + 1, inline_threshold), "lfs");

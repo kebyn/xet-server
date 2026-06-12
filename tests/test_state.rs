@@ -1,7 +1,7 @@
 //! Tests for the StorageStateManager trait and SQLite implementation.
 
 use tempfile::tempdir;
-use xet_server::state::{FileState, SqliteStateManager, StateError, StorageState, StorageStateManager};
+use xet_server::state::{SqliteStateManager, StateError, StorageState, StorageStateManager};
 
 /// Test that registering a raw blob works and get_state returns RawOnly.
 #[tokio::test]
