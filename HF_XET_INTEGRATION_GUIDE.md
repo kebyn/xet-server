@@ -331,14 +331,6 @@ Xet Server 使用两层认证系统：
 | `write` | 写入权限 | 上传文件、创建仓库 |
 | `internal` | 内部权限 | Hub → CAS 通信（超级权限） |
 
-## 📊 性能对比
-
-| 方式 | 上传速度 | 下载速度 | 适用场景 |
-|------|----------|----------|----------|
-| **HF Hub API** | ~80 MB/s | ~80 MB/s | HF CLI 工具、REST API 集成 |
-| **Git LFS** | ~100 MB/s | ~100 MB/s | Git 工作流、版本控制 |
-| **Xet 原生** | ~120 MB/s | ~120 MB/s | 高性能客户端、自定义集成 |
-
 ## 🔄 从 HuggingFace 迁移
 
 ### 完整迁移工作流
@@ -348,28 +340,31 @@ Xet Server 使用两层认证系统：
 set -e
 
 # 配置
-export HF_ENDPOINT=http://localhost:8080
-export HF_TOKEN=hf_your_token_here
 SOURCE_REPO="Qwen/Qwen3-4B"
 TARGET_REPO="my-org/qwen3-4b"
+LOCAL_XET_ENDPOINT="http://localhost:8080"
+HF_TOKEN_LOCAL=hf_your_token_here
 
-# 1. 从 HuggingFace 下载
-echo "Downloading from HuggingFace..."
+# 1. 从公共 HuggingFace 下载（临时使用默认 endpoint）
+echo "Downloading from public HuggingFace..."
+unset HF_ENDPOINT  # 临时取消设置，使用默认的 huggingface.co
 hf download $SOURCE_REPO \
   config.json \
   model.safetensors \
   tokenizer.json \
   --local-dir ./model
 
-# 2. 在 Xet Server 创建仓库
-echo "Creating repository on Xet Server..."
+# 2. 在本地 Xet Server 创建仓库
+echo "Creating repository on local Xet Server..."
+export HF_ENDPOINT=$LOCAL_XET_ENDPOINT
+export HF_TOKEN=$HF_TOKEN_LOCAL
 curl -X POST "$HF_ENDPOINT/api/repos/create" \
   -H "Authorization: Bearer $HF_TOKEN" \
   -H "Content-Type: application/json" \
   -d "{\"type\": \"model\", \"name\": \"qwen3-4b\", \"namespace\": \"my-org\"}"
 
-# 3. 上传到 Xet Server
-echo "Uploading to Xet Server..."
+# 3. 上传到本地 Xet Server
+echo "Uploading to local Xet Server..."
 cd model
 for file in *; do
   echo "Uploading $file..."

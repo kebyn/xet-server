@@ -661,7 +661,51 @@ curl -X POST "http://localhost:8080/api/models/my-org/my-model/preupload/main" \
 
 ## LFS 代理 API
 
-LFS 代理 API 将 Git LFS 请求代理到 CAS Server。
+LFS 代理 API 将 Git LFS 请求代理到 CAS Server。支持标准 LFS 端点和 Git-style LFS 端点。
+
+### 标准 LFS 端点
+
+**端点**：
+- `POST /objects/batch` - 批量操作
+- `POST /lfs/objects/batch` - 批量操作（别名）
+- `PUT /lfs/objects/{oid}` - 上传对象
+- `GET /lfs/objects/{oid}` - 下载对象
+
+### Git-style LFS 端点（Git LFS Smart HTTP）
+
+用于 Git LFS Smart HTTP 协议的端点，支持通过 `.git/info/lfs` 路径访问：
+
+**模型仓库**：
+- `POST /models/{ns}/{repo}.git/info/lfs/objects/batch`
+- `PUT /models/{ns}/{repo}.git/info/lfs/objects/{oid}`
+- `GET /models/{ns}/{repo}.git/info/lfs/objects/{oid}`
+
+**数据集仓库**：
+- `POST /datasets/{ns}/{repo}.git/info/lfs/objects/batch`
+- `PUT /datasets/{ns}/{repo}.git/info/lfs/objects/{oid}`
+- `GET /datasets/{ns}/{repo}.git/info/lfs/objects/{oid}`
+
+**Space 仓库**：
+- `POST /spaces/{ns}/{repo}.git/info/lfs/objects/batch`
+- `PUT /spaces/{ns}/{repo}.git/info/lfs/objects/{oid}`
+- `GET /spaces/{ns}/{repo}.git/info/lfs/objects/{oid}`
+
+**通用格式**（自动检测仓库类型）：
+- `POST /{ns}/{repo}.git/info/lfs/objects/batch`
+- `PUT /{ns}/{repo}.git/info/lfs/objects/{oid}`
+- `GET /{ns}/{repo}.git/info/lfs/objects/{oid}`
+
+**Git LFS 配置示例**：
+```bash
+# 在 Git 仓库中配置 LFS 指向 Hub API
+git config lfs.url http://localhost:8080/my-org/my-model.git/info/lfs
+
+# 或使用 .lfsconfig 文件
+cat > .lfsconfig << EOF
+[lfs]
+    url = http://localhost:8080/my-org/my-model.git/info/lfs
+EOF
+```
 
 ### LFS 批量操作
 
