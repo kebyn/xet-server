@@ -475,14 +475,19 @@ impl MDBShardFile {
         })
     }
 
-    /// Parse a shard file from a file on disk without loading the entire file into RAM.
+    /// Parse only the header and footer from a shard file on disk.
     ///
-    /// Reads only the header (start) and footer (end) from the file.
-    /// `raw_data` is left empty — the hash must be computed externally (e.g., during
-    /// streaming upload) since this method does not retain the file contents.
+    /// This is a memory-efficient parsing method that reads only the 48-byte header
+    /// at the start and 208-byte footer at the end of the file. All data sections
+    /// (file_entries, chunk_mappings, xorb_entries, etc.) are returned as empty vectors.
     ///
-    /// Use `compute_hash_from_file(path)` or a streaming hasher to get the shard hash.
-    pub fn parse_from_file(path: &Path) -> XetResult<Self> {
+    /// Use this when you only need structural metadata (header/footer) and will compute
+    /// the shard hash externally via streaming (e.g., during upload verification).
+    /// The `raw_data` field is intentionally left empty since this method does not
+    /// retain the file contents.
+    ///
+    /// For full parsing with all data sections populated, use `parse()` instead.
+    pub fn parse_header_footer_from_file(path: &Path) -> XetResult<Self> {
         let mut file = File::open(path).map_err(|e| {
             crate::error::XetError::IoError(std::io::Error::other(
                 format!("Failed to open shard file {}: {}", path.display(), e),
