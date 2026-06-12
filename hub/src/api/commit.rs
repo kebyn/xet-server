@@ -165,6 +165,11 @@ async fn handle_commit(
         }
     };
 
+    // Two-phase HEAD check (I3): this pre-check provides early rejection with specific
+    // error messages before doing expensive CAS uploads. The authoritative check
+    // happens inside commit_atomic() under BEGIN IMMEDIATE lock for correctness.
+    // Both are necessary: this one for UX (better error messages), the atomic one
+    // for race-safety (prevents conflicts from concurrent commits).
     // Get current HEAD for OCC check
     let current_head = metadata.get_head(repo.id).await.ok().flatten();
     let parent_revision = header.parent_revision.clone();
