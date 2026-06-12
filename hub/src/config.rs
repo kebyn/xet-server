@@ -184,6 +184,13 @@ impl HubConfig {
             config.server.port = port;
         }
         if let Some(url) = env::var("HUB_PUBLIC_BASE_URL").ok() {
+            // M-3: Validate URL format when set via environment variable
+            if let Err(e) = url::Url::parse(&url) {
+                tracing::error!(
+                    "HUB_PUBLIC_BASE_URL '{}' is not a valid URL: {}",
+                    url, e
+                );
+            }
             config.server.public_base_url = Some(url);
         }
         if let Some(path) = env::var("HUB_PRIVATE_KEY_PATH").ok() {
