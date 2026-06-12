@@ -24,7 +24,10 @@ impl TokenStore {
         Ok(Self { conn: Mutex::new(conn) })
     }
 
-    /// Create an in-memory TokenStore (for testing)
+    /// Create an in-memory TokenStore.
+    ///
+    /// **Warning:** This is intended for testing only. In-memory stores do not persist
+    /// data across restarts and should not be used in production deployments.
     pub fn in_memory() -> Result<Self, rusqlite::Error> {
         let conn = Connection::open_in_memory()?;
         Self::init_tables(&conn)?;

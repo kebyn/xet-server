@@ -460,6 +460,10 @@ async fn serve_raw_blob_inmemory(
 /// 3. Downloads all required xorbs
 /// 4. Extracts and decompresses chunks
 /// 5. Reassembles chunks into the complete file
+// TODO(I4): This function shares ~35 lines of shard fetch/parse/xorb iteration logic
+// with get_reconstruction_v1 in src/api/reconstruction.rs. Consider extracting a shared
+// helper like `fetch_and_parse_shards(shard_ids, storage)` to reduce duplication.
+// Current duplication is isolated and low-risk, so deferring refactoring is acceptable.
 async fn reconstruct_from_xet(
     file_id: &str,
     index: web::Data<crate::index::MetadataIndex>,
