@@ -1,7 +1,8 @@
 use std::env;
+use serde::{Deserialize, Serialize};
 
 /// Server configuration settings
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerSettings {
     pub host: String,
     pub port: u16,
@@ -27,7 +28,7 @@ impl Default for ServerSettings {
 }
 
 /// Authentication settings
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthSettings {
     pub private_key_path: String,
     pub kid: String,
@@ -45,7 +46,7 @@ impl Default for AuthSettings {
 }
 
 /// Metadata store settings
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetadataSettings {
     pub sqlite_path: String,
 }
@@ -59,7 +60,7 @@ impl Default for MetadataSettings {
 }
 
 /// CAS (Content Addressable Storage) settings
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CasSettings {
     pub base_url: String,
     pub internal_timeout_seconds: u64,
@@ -75,7 +76,7 @@ impl Default for CasSettings {
 }
 
 /// Storage settings
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageSettings {
     pub data_dir: String,
     pub inline_threshold_bytes: u64,
@@ -96,7 +97,7 @@ impl Default for StorageSettings {
 }
 
 /// Main configuration for the Hub API
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[derive(Default)]
 pub struct HubConfig {
     pub server: ServerSettings,
@@ -156,5 +157,66 @@ impl HubConfig {
                     .unwrap_or_else(|_| "/tmp/hub-uploads".to_string()),
             },
         }
+    }
+
+    /// M3: Load configuration from a TOML file
+    pub fn from_file(path: &str) -> Result<Self, String> {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read config file {}: {}", path, e))?;
+        toml::from_str(&content)
+            .map_err(|e| format!("Failed to parse config file {}: {}", path, e))
+    }
+
+    /// M3: Load configuration from file (if path provided) with environment variable overrides.
+    /// Priority: environment variables > file > defaults
+    pub fn from_file_or_env() -> Self {
+        // Start with file-based config if HUB_CONFIG_FILE is set
+        let mut config = env::var("HUB_CONFIG_FILE")
+            .ok()
+            .and_then(|path| Self::from_file(&path).ok())
+            .unwrap_or_else(Self::from_env);
+
+        // Override with environment variables (env takes precedence)
+        if let Some(host) = env::var("HUB_HOST").ok() {
+            config.server.host = host;
+        }
+        if let Some(port) = env::var("HUB_PORT").ok().and_then(|p| p.parse().ok()) {
+            config.server.port = port;
+        }
+        if let Some(url) = env::var("HUB_PUBLIC_BASE_URL").ok() {
+            config.server.public_base_url = Some(url);
+        }
+        if let Some(path) = env::var("HUB_PRIVATE_KEY_PATH").ok() {
+            config.auth.private_key_path = path;
+        }
+        if let Some(kid) = env::var("HUB_KID").ok() {
+            config.auth.kid = kid;
+        }
+        if let Some(ttl) = env::var("HUB_TOKEN_TTL_SECONDS").ok().and_then(|t| t.parse().ok()) {
+            config.auth.token_ttl_seconds = ttl;
+        }
+        if let Some(path) = env::var("HUB_SQLITE_PATH").ok() {
+            config.metadata.sqlite_path = path;
+        }
+        if let Some(url) = env::var("CAS_BASE_URL").ok() {
+            config.cas.base_url = url;
+        }
+        if let Some(timeout) = env::var("HUB_CAS_TIMEOUT_SECS").ok().and_then(|t| t.parse().ok()) {
+            config.cas.internal_timeout_seconds = timeout;
+        }
+        if let Some(dir) = env::var("HUB_DATA_DIR").ok() {
+            config.storage.data_dir = dir;
+        }
+        if let Some(threshold) = env::var("HUB_INLINE_THRESHOLD").ok().and_then(|t| t.parse().ok()) {
+            config.storage.inline_threshold_bytes = threshold;
+        }
+        if let Some(threshold) = env::var("HUB_LFS_THRESHOLD").ok().and_then(|t| t.parse().ok()) {
+            config.storage.lfs_threshold_bytes = threshold;
+        }
+        if let Some(dir) = env::var("HUB_UPLOAD_TEMP_DIR").ok() {
+            config.storage.upload_temp_dir = dir;
+        }
+
+        config
     }
 }
