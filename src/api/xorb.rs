@@ -334,51 +334,9 @@ pub async fn download_xorb(
 }
 
 /// Check if there's enough disk space for an upload.
-/// Returns Ok(()) if sufficient space is available, Err with description otherwise.
+/// Delegates to the shared utility in crate::util::disk.
 fn check_disk_space(path: &std::path::Path, required_bytes: u64) -> Result<(), String> {
-    // Use statvfs on Unix-like systems to check available space
-    #[cfg(unix)]
-    {
-        // Get filesystem statistics
-        let _metadata = std::fs::metadata(path).map_err(|e| {
-            format!("Failed to get filesystem info for {}: {}", path.display(), e)
-        })?;
-
-        // For now, we'll do a basic sanity check - ensure the path exists and is writable
-        // A more sophisticated check would use statvfs to get actual available space
-        if !path.exists() {
-            return Err(format!("Path does not exist: {}", path.display()));
-        }
-
-        // Check if we can write to the directory
-        let test_file = path.join(".disk_space_check");
-        match std::fs::write(&test_file, b"") {
-            Ok(_) => {
-                let _ = std::fs::remove_file(&test_file);
-            }
-            Err(e) => {
-                return Err(format!("Cannot write to {}: {}", path.display(), e));
-            }
-        }
-
-        // Basic check passed - in production, use proper statvfs
-        if required_bytes > 100 * 1024 * 1024 * 1024 {
-            // If requesting >100GB, log a warning but allow it
-            tracing::warn!(
-                "Large upload requested ({} MB) - disk space check is basic",
-                required_bytes / 1024 / 1024
-            );
-        }
-
-        Ok(())
-    }
-
-    #[cfg(not(unix))]
-    {
-        // On non-Unix systems, skip the check
-        let _ = required_bytes;
-        Ok(())
-    }
+    crate::util::disk::check_disk_space(path, required_bytes)
 }
 
 #[cfg(test)]
