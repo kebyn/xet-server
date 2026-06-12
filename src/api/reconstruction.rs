@@ -8,6 +8,7 @@ use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use tracing::error;
 
+use crate::api::auth::{check_scope, extract_token_from_request, AuthVerifier};
 use crate::config::ServerConfig;
 use crate::index::MetadataIndex;
 use crate::metrics::GLOBAL_METRICS;
@@ -85,9 +86,42 @@ pub async fn get_reconstruction_v1(
     index: web::Data<MetadataIndex>,
     storage: web::Data<Box<dyn StorageBackend>>,
     _config: web::Data<ServerConfig>,
-    _req: actix_web::HttpRequest,
+    auth: web::Data<AuthVerifier>,
+    req: actix_web::HttpRequest,
 ) -> HttpResponse {
     let start = std::time::Instant::now();
+
+    // Extract and validate auth token
+    let token = match extract_token_from_request(&req) {
+        Some(t) => t,
+        None => {
+            GLOBAL_METRICS.record_request(401);
+            GLOBAL_METRICS.record_latency(start);
+            return HttpResponse::Unauthorized().json(serde_json::json!({
+                "error": "Missing or invalid authorization token"
+            }));
+        }
+    };
+
+    let claims = match auth.verify_token(&token) {
+        Ok(c) => c,
+        Err(_) => {
+            GLOBAL_METRICS.record_request(401);
+            GLOBAL_METRICS.record_latency(start);
+            return HttpResponse::Unauthorized().json(serde_json::json!({
+                "error": "Invalid token"
+            }));
+        }
+    };
+
+    if !check_scope(&claims, "read") {
+        GLOBAL_METRICS.record_request(403);
+        GLOBAL_METRICS.record_latency(start);
+        return HttpResponse::Forbidden().json(serde_json::json!({
+            "error": "Insufficient scope, 'read' required"
+        }));
+    }
+
     let file_id = path.into_inner();
 
     // Validate file_id format (should be a hex hash)
@@ -188,9 +222,42 @@ pub async fn get_reconstruction(
     index: web::Data<MetadataIndex>,
     storage: web::Data<Box<dyn StorageBackend>>,
     _config: web::Data<ServerConfig>,
-    _req: actix_web::HttpRequest,
+    auth: web::Data<AuthVerifier>,
+    req: actix_web::HttpRequest,
 ) -> HttpResponse {
     let start = std::time::Instant::now();
+
+    // Extract and validate auth token
+    let token = match extract_token_from_request(&req) {
+        Some(t) => t,
+        None => {
+            GLOBAL_METRICS.record_request(401);
+            GLOBAL_METRICS.record_latency(start);
+            return HttpResponse::Unauthorized().json(serde_json::json!({
+                "error": "Missing or invalid authorization token"
+            }));
+        }
+    };
+
+    let claims = match auth.verify_token(&token) {
+        Ok(c) => c,
+        Err(_) => {
+            GLOBAL_METRICS.record_request(401);
+            GLOBAL_METRICS.record_latency(start);
+            return HttpResponse::Unauthorized().json(serde_json::json!({
+                "error": "Invalid token"
+            }));
+        }
+    };
+
+    if !check_scope(&claims, "read") {
+        GLOBAL_METRICS.record_request(403);
+        GLOBAL_METRICS.record_latency(start);
+        return HttpResponse::Forbidden().json(serde_json::json!({
+            "error": "Insufficient scope, 'read' required"
+        }));
+    }
+
     let file_id = path.into_inner();
 
     // Validate file_id format (should be a hex hash)
@@ -278,8 +345,53 @@ pub async fn get_reconstruction(
 mod tests {
     use super::*;
     use actix_web::{test, web, App};
+    use crate::api::auth::{AuthVerifier, KeyPair, XetClaims, sign_xet_token};
+    use crate::config::AuthConfig;
     use crate::storage::local::LocalStorage;
     use tempfile::tempdir;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn create_test_config() -> (KeyPair, AuthVerifier, ServerConfig) {
+        let kp = KeyPair::generate();
+        let public_key_pem = KeyPair::public_key_to_pem(&kp.verifying_key()).unwrap();
+
+        let temp_dir = tempdir().unwrap();
+        let temp_path = temp_dir.path().join(format!("pubkey-{}.pem", kp.kid()));
+        std::fs::write(&temp_path, &public_key_pem).unwrap();
+
+        let temp_path_str = temp_path.to_str().unwrap().to_string();
+        std::mem::forget(temp_dir);
+
+        let auth_config = AuthConfig {
+            public_key_path: temp_path_str,
+            trusted_kids: vec![kp.kid()],
+        };
+
+        let auth_verifier = AuthVerifier::from_config(&auth_config).unwrap();
+        let config = ServerConfig::default();
+
+        (kp, auth_verifier, config)
+    }
+
+    fn create_test_token(kp: &KeyPair, scope: &str) -> String {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let claims = XetClaims {
+            sub: "test-user".to_string(),
+            scope: scope.to_string(),
+            repo_id: "test/repo".to_string(),
+            repo_type: "model".to_string(),
+            revision: "main".to_string(),
+            exp: now + 3600,
+            iat: now,
+            kid: kp.kid(),
+        };
+
+        sign_xet_token(&claims, kp).unwrap()
+    }
 
     #[actix_web::test]
     async fn test_reconstruction_not_found() {
@@ -288,20 +400,24 @@ mod tests {
             LocalStorage::new(dir.path().to_str().unwrap()).unwrap()
         );
 
+        let (kp, auth, config) = create_test_config();
+        let token = create_test_token(&kp, "read");
+
         let index = MetadataIndex::new();
-        let config = ServerConfig::default();
 
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(index))
                 .app_data(web::Data::new(storage))
                 .app_data(web::Data::new(config))
+                .app_data(web::Data::new(auth))
                 .route("/v2/reconstructions/{file_id}", web::get().to(get_reconstruction))
         ).await;
 
         let file_id = "a".repeat(64);
         let req = test::TestRequest::get()
             .uri(&format!("/v2/reconstructions/{}", file_id))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
             .to_request();
 
         let resp = test::call_service(&app, req).await;
@@ -315,19 +431,23 @@ mod tests {
             LocalStorage::new(dir.path().to_str().unwrap()).unwrap()
         );
 
+        let (kp, auth, config) = create_test_config();
+        let token = create_test_token(&kp, "read");
+
         let index = MetadataIndex::new();
-        let config = ServerConfig::default();
 
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(index))
                 .app_data(web::Data::new(storage))
                 .app_data(web::Data::new(config))
+                .app_data(web::Data::new(auth))
                 .route("/v2/reconstructions/{file_id}", web::get().to(get_reconstruction))
         ).await;
 
         let req = test::TestRequest::get()
             .uri("/v2/reconstructions/invalid")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
             .to_request();
 
         let resp = test::call_service(&app, req).await;
@@ -341,20 +461,24 @@ mod tests {
             LocalStorage::new(dir.path().to_str().unwrap()).unwrap()
         );
 
+        let (kp, auth, config) = create_test_config();
+        let token = create_test_token(&kp, "read");
+
         let index = MetadataIndex::new();
-        let config = ServerConfig::default();
 
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(index))
                 .app_data(web::Data::new(storage))
                 .app_data(web::Data::new(config))
+                .app_data(web::Data::new(auth))
                 .route("/v1/reconstructions/{file_id}", web::get().to(get_reconstruction_v1))
         ).await;
 
         let file_id = "a".repeat(64);
         let req = test::TestRequest::get()
             .uri(&format!("/v1/reconstructions/{}", file_id))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
             .to_request();
 
         let resp = test::call_service(&app, req).await;
@@ -368,19 +492,23 @@ mod tests {
             LocalStorage::new(dir.path().to_str().unwrap()).unwrap()
         );
 
+        let (kp, auth, config) = create_test_config();
+        let token = create_test_token(&kp, "read");
+
         let index = MetadataIndex::new();
-        let config = ServerConfig::default();
 
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(index))
                 .app_data(web::Data::new(storage))
                 .app_data(web::Data::new(config))
+                .app_data(web::Data::new(auth))
                 .route("/v1/reconstructions/{file_id}", web::get().to(get_reconstruction_v1))
         ).await;
 
         let req = test::TestRequest::get()
             .uri("/v1/reconstructions/invalid")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
             .to_request();
 
         let resp = test::call_service(&app, req).await;

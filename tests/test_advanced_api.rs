@@ -98,6 +98,7 @@ async fn test_full_upload_workflow() {
     let file_id = "b".repeat(64);
     let req = test::TestRequest::get()
         .uri(&format!("/v2/reconstructions/{}", file_id))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
         .to_request();
 
     let resp = test::call_service(&app, req).await;
@@ -107,6 +108,7 @@ async fn test_full_upload_workflow() {
     let chunk_hash = "c".repeat(64);
     let req = test::TestRequest::get()
         .uri(&format!("/v1/chunks/default/{}", chunk_hash))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
         .to_request();
 
     let resp = test::call_service(&app, req).await;
@@ -115,6 +117,7 @@ async fn test_full_upload_workflow() {
     // Step 6: Query global dedup with invalid prefix
     let req = test::TestRequest::get()
         .uri(&format!("/v1/chunks/invalid/{}", chunk_hash))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
         .to_request();
 
     let resp = test::call_service(&app, req).await;
@@ -241,6 +244,7 @@ async fn test_hash_validation() {
     // Test 4: Invalid file_id in reconstruction
     let req = test::TestRequest::get()
         .uri("/v2/reconstructions/short")
+        .insert_header(("Authorization", format!("Bearer {}", token)))
         .to_request();
 
     let resp = test::call_service(&app, req).await;
@@ -249,6 +253,7 @@ async fn test_hash_validation() {
     // Test 5: Invalid hash in chunk query
     let req = test::TestRequest::get()
         .uri("/v1/chunks/default/invalid")
+        .insert_header(("Authorization", format!("Bearer {}", token)))
         .to_request();
 
     let resp = test::call_service(&app, req).await;

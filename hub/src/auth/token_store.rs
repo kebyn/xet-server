@@ -2,6 +2,24 @@ use rusqlite::{Connection, params};
 use sha2::{Sha256, Digest};
 use std::sync::Mutex;
 
+/// Error type for mutex lock poisoning
+/// I3: Handles poisoned mutex gracefully instead of panicking
+#[derive(Debug)]
+struct LockPoisoned(String);
+
+impl std::fmt::Display for LockPoisoned {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Mutex poisoned: {}", self.0)
+    }
+}
+
+impl std::error::Error for LockPoisoned {}
+
+/// Helper to convert PoisonError to rusqlite::Error
+fn lock_error<T>(e: std::sync::PoisonError<T>) -> rusqlite::Error {
+    rusqlite::Error::ToSqlConversionFailure(Box::new(LockPoisoned(e.to_string())))
+}
+
 /// Token information returned after validation
 #[derive(Debug, Clone)]
 pub struct TokenInfo {
@@ -63,7 +81,7 @@ impl TokenStore {
         let now = now_secs();
         let user_id = format!("user_{}", &token_hash[..16]);
 
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().map_err(lock_error)?;
         conn.execute(
             "INSERT OR IGNORE INTO users (user_id, username, created_at) VALUES (?1, ?2, ?3)",
             params![user_id, username, now as i64],
@@ -81,7 +99,7 @@ impl TokenStore {
         let token_hash = Self::hash_token(&token);
         let now = now_secs();
 
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().map_err(lock_error)?;
         conn.execute(
             "INSERT INTO tokens (token_hash, user_id, name, scope, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![token_hash, user_id, token_name, scope, now as i64],
@@ -92,7 +110,7 @@ impl TokenStore {
     /// Validate a token. Returns None if invalid/expired/revoked.
     pub fn validate_token(&self, token: &str) -> Result<Option<TokenInfo>, rusqlite::Error> {
         let token_hash = Self::hash_token(token);
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().map_err(lock_error)?;
         let mut stmt = conn.prepare(
             "SELECT u.user_id, u.username, t.name, t.scope, t.expires_at, t.revoked_at
              FROM tokens t JOIN users u ON t.user_id = u.user_id
@@ -133,7 +151,7 @@ impl TokenStore {
     pub fn revoke_token(&self, token: &str) -> Result<bool, rusqlite::Error> {
         let token_hash = Self::hash_token(token);
         let now = now_secs();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().map_err(lock_error)?;
         let rows = conn.execute(
             "UPDATE tokens SET revoked_at = ?1 WHERE token_hash = ?2 AND revoked_at IS NULL",
             params![now as i64, token_hash],
@@ -143,7 +161,7 @@ impl TokenStore {
 
     /// Get all tokens for a user (without returning the actual tokens, just metadata)
     pub fn list_tokens_for_user(&self, user_id: &str) -> Result<Vec<TokenMetadata>, rusqlite::Error> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().map_err(lock_error)?;
         let mut stmt = conn.prepare(
             "SELECT name, scope, created_at, expires_at, revoked_at
              FROM tokens WHERE user_id = ?1 ORDER BY created_at DESC"
@@ -168,7 +186,7 @@ impl TokenStore {
     /// Set expiration on a token (for testing)
     pub fn set_token_expiration(&self, token: &str, expires_at: u64) -> Result<(), rusqlite::Error> {
         let token_hash = Self::hash_token(token);
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().map_err(lock_error)?;
         conn.execute(
             "UPDATE tokens SET expires_at = ?1 WHERE token_hash = ?2",
             params![expires_at as i64, token_hash],
