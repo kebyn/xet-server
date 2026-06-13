@@ -45,7 +45,7 @@ impl GarbageCollector {
     /// Create a new GarbageCollector
     pub fn new(storage: Arc<Box<dyn StorageBackend>>, config: GcConfig) -> Self {
         let hub_client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(300)) // 5 minutes for large hash lists
+            .timeout(Duration::from_secs(config.http_timeout_seconds))
             .build()
             .expect("Failed to build GC hub client");
 
