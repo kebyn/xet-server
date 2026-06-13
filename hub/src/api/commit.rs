@@ -475,7 +475,7 @@ mod tests {
         );
         let cas_client: std::sync::Arc<dyn CasClientTrait> = std::sync::Arc::new(mock_cas);
         let signing_key = SigningKey::generate(&mut OsRng);
-        let signer = std::sync::Arc::new(XetSigner::new(signing_key, "test-key", 3600));
+        let signer = std::sync::Arc::new(XetSigner::new(signing_key, "test-key", 3600, 300));
         (token_store, metadata, cas_client, signer)
     }
 

@@ -185,7 +185,7 @@ mod tests {
         // M2: Create XetSigner for testing proxy token generation
         let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
         let xet_signer = std::sync::Arc::new(
-            crate::auth::xet_signer::XetSigner::new(signing_key, "test-kid", 3600)
+            crate::auth::xet_signer::XetSigner::new(signing_key, "test-kid", 3600, 300)
         );
 
         // Create repo and add files

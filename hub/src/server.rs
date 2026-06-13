@@ -28,7 +28,7 @@ pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
     let private_key_pem = std::fs::read(&config.auth.private_key_path)
         .map_err(|e| std::io::Error::other(format!("Failed to read private key from '{}': {}", config.auth.private_key_path, e)))?;
     let signer = Arc::new(
-        XetSigner::from_pem(&private_key_pem, &config.auth.kid, config.auth.token_ttl_seconds)
+        XetSigner::from_pem(&private_key_pem, &config.auth.kid, config.auth.token_ttl_seconds, config.auth.proxy_token_ttl_seconds)
             .map_err(|e| std::io::Error::other(format!("Failed to create xet signer: {}", e)))?
     );
 

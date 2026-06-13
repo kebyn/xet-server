@@ -76,6 +76,10 @@ pub struct AuthSettings {
     pub private_key_path: String,
     pub kid: String,
     pub token_ttl_seconds: u64,
+    /// TTL for short-lived proxy tokens (LFS operations).
+    /// Configure via `HUB_PROXY_TOKEN_TTL_SECONDS` environment variable.
+    /// Default: 300 (5 minutes).
+    pub proxy_token_ttl_seconds: u64,
 }
 
 impl Default for AuthSettings {
@@ -84,6 +88,7 @@ impl Default for AuthSettings {
             private_key_path: "private_key.pem".to_string(),
             kid: "hub-key-1".to_string(),
             token_ttl_seconds: 3600,
+            proxy_token_ttl_seconds: 300,
         }
     }
 }
@@ -176,6 +181,10 @@ impl HubConfig {
                     .ok()
                     .and_then(|t| t.parse().ok())
                     .unwrap_or(3600),
+                proxy_token_ttl_seconds: env::var("HUB_PROXY_TOKEN_TTL_SECONDS")
+                    .ok()
+                    .and_then(|t| t.parse().ok())
+                    .unwrap_or(300),
             },
             metadata: MetadataSettings {
                 sqlite_path: env::var("HUB_SQLITE_PATH")
@@ -261,6 +270,9 @@ impl HubConfig {
         }
         if let Some(ttl) = env::var("HUB_TOKEN_TTL_SECONDS").ok().and_then(|t| t.parse().ok()) {
             config.auth.token_ttl_seconds = ttl;
+        }
+        if let Some(ttl) = env::var("HUB_PROXY_TOKEN_TTL_SECONDS").ok().and_then(|t| t.parse().ok()) {
+            config.auth.proxy_token_ttl_seconds = ttl;
         }
         if let Some(path) = env::var("HUB_SQLITE_PATH").ok() {
             config.metadata.sqlite_path = path;

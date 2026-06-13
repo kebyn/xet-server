@@ -42,11 +42,12 @@ pub struct XetSigner {
     signing_key: SigningKey,
     kid: String,
     ttl_seconds: u64,
+    proxy_ttl_seconds: u64,
 }
 
 impl XetSigner {
     /// Create a new XetSigner from a PEM-encoded private key
-    pub fn from_pem(pem_bytes: &[u8], kid: &str, ttl_seconds: u64) -> Result<Self, String> {
+    pub fn from_pem(pem_bytes: &[u8], kid: &str, ttl_seconds: u64, proxy_ttl_seconds: u64) -> Result<Self, String> {
         use ed25519_dalek::pkcs8::DecodePrivateKey;
         let pem_str = std::str::from_utf8(pem_bytes).map_err(|e| e.to_string())?;
         let signing_key = SigningKey::from_pkcs8_pem(pem_str)
@@ -55,15 +56,17 @@ impl XetSigner {
             signing_key,
             kid: kid.to_string(),
             ttl_seconds,
+            proxy_ttl_seconds,
         })
     }
 
     /// Create a new XetSigner from a raw signing key (for testing)
-    pub fn new(signing_key: SigningKey, kid: &str, ttl_seconds: u64) -> Self {
+    pub fn new(signing_key: SigningKey, kid: &str, ttl_seconds: u64, proxy_ttl_seconds: u64) -> Self {
         Self {
             signing_key,
             kid: kid.to_string(),
             ttl_seconds,
+            proxy_ttl_seconds,
         }
     }
 
@@ -122,8 +125,8 @@ impl XetSigner {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        // Proxy tokens expire in 5 minutes (300 seconds)
-        let exp = now + 300;
+        // Proxy tokens use configurable TTL (default 300s / 5 minutes)
+        let exp = now + self.proxy_ttl_seconds;
 
         let claims = XetClaims {
             sub: sub.to_string(),
@@ -261,7 +264,7 @@ mod tests {
     #[test]
     fn test_sign_produces_valid_format() {
         let signing_key = generate_test_key();
-        let signer = XetSigner::new(signing_key, "test-key-1", 3600);
+        let signer = XetSigner::new(signing_key, "test-key-1", 3600, 300);
 
         let (token, exp) = signer.sign("user123", "read", "namespace/model", "model", "main");
 
@@ -284,7 +287,7 @@ mod tests {
     #[test]
     fn test_sign_includes_correct_claims() {
         let signing_key = generate_test_key();
-        let signer = XetSigner::new(signing_key, "test-key-2", 3600);
+        let signer = XetSigner::new(signing_key, "test-key-2", 3600, 300);
 
         let (token, _) = signer.sign("user123", "write", "namespace/model", "dataset", "v1.0");
 
@@ -313,7 +316,7 @@ mod tests {
         let pem_bytes = pem.as_bytes();
 
         // Load it back
-        let signer = XetSigner::from_pem(pem_bytes, "pem-key", 3600).unwrap();
+        let signer = XetSigner::from_pem(pem_bytes, "pem-key", 3600, 300).unwrap();
 
         // Verify by signing something
         let (token, _) = signer.sign("user", "read", "repo", "model", "main");
@@ -325,8 +328,8 @@ mod tests {
         let key1 = generate_test_key();
         let key2 = generate_test_key();
 
-        let signer1 = XetSigner::new(key1, "key1", 3600);
-        let signer2 = XetSigner::new(key2, "key2", 3600);
+        let signer1 = XetSigner::new(key1, "key1", 3600, 300);
+        let signer2 = XetSigner::new(key2, "key2", 3600, 300);
 
         let (token1, _) = signer1.sign("user", "read", "repo", "model", "main");
         let (token2, _) = signer2.sign("user", "read", "repo", "model", "main");
@@ -337,7 +340,7 @@ mod tests {
     #[test]
     fn test_sign_proxy_produces_valid_format() {
         let signing_key = generate_test_key();
-        let signer = XetSigner::new(signing_key, "test-key-proxy", 3600);
+        let signer = XetSigner::new(signing_key, "test-key-proxy", 3600, 300);
 
         let (token, exp) = signer.sign_proxy("user123", "abc123def456", "upload", "", "");
 
@@ -360,7 +363,7 @@ mod tests {
     #[test]
     fn test_sign_proxy_includes_correct_claims() {
         let signing_key = generate_test_key();
-        let signer = XetSigner::new(signing_key, "test-key-proxy-2", 3600);
+        let signer = XetSigner::new(signing_key, "test-key-proxy-2", 3600, 300);
 
         let (token, _) = signer.sign_proxy("user456", "oid789xyz", "download", "", "");
 
@@ -381,7 +384,7 @@ mod tests {
     #[test]
     fn test_verify_proxy_token_valid() {
         let signing_key = generate_test_key();
-        let signer = XetSigner::new(signing_key, "test-key-verify", 3600);
+        let signer = XetSigner::new(signing_key, "test-key-verify", 3600, 300);
 
         let (token, _) = signer.sign_proxy("user", "oid123", "upload", "", "");
 
@@ -392,7 +395,7 @@ mod tests {
     #[test]
     fn test_verify_proxy_token_invalid_signature() {
         let signing_key = generate_test_key();
-        let signer = XetSigner::new(signing_key, "test-key-verify-2", 3600);
+        let signer = XetSigner::new(signing_key, "test-key-verify-2", 3600, 300);
 
         let (token, _) = signer.sign_proxy("user", "oid123", "upload", "", "");
 
@@ -406,7 +409,7 @@ mod tests {
     #[test]
     fn test_verify_proxy_token_wrong_prefix() {
         let signing_key = generate_test_key();
-        let signer = XetSigner::new(signing_key, "test-key-verify-3", 3600);
+        let signer = XetSigner::new(signing_key, "test-key-verify-3", 3600, 300);
 
         let (token, _) = signer.sign_proxy("user", "oid123", "upload", "", "");
 
@@ -420,7 +423,7 @@ mod tests {
     #[test]
     fn test_verify_proxy_token_malformed() {
         let signing_key = generate_test_key();
-        let signer = XetSigner::new(signing_key, "test-key-verify-4", 3600);
+        let signer = XetSigner::new(signing_key, "test-key-verify-4", 3600, 300);
 
         // Malformed tokens should not verify
         assert!(signer.verify_proxy_token("proxy_").is_none(), "Empty token body should not verify");
@@ -434,8 +437,8 @@ mod tests {
         let key1 = generate_test_key();
         let key2 = generate_test_key();
 
-        let signer1 = XetSigner::new(key1, "key1", 3600);
-        let signer2 = XetSigner::new(key2, "key2", 3600);
+        let signer1 = XetSigner::new(key1, "key1", 3600, 300);
+        let signer2 = XetSigner::new(key2, "key2", 3600, 300);
 
         let (token, _) = signer1.sign_proxy("user", "oid123", "upload", "", "");
 
