@@ -214,18 +214,18 @@ mod tests {
     use ed25519_dalek::SigningKey;
     use rand::rngs::OsRng;
 
-    fn setup_test_env() -> (
+    async fn setup_test_env() -> (
         std::sync::Arc<TokenStore>,
         std::sync::Arc<XetSigner>,
         std::sync::Arc<dyn MetadataStore>,
         HubConfig,
     ) {
-        let token_store = std::sync::Arc::new(TokenStore::in_memory().unwrap());
+        let token_store = std::sync::Arc::new(TokenStore::in_memory().await.unwrap());
         let mut csprng = OsRng;
         let signing_key = SigningKey::generate(&mut csprng);
         let xet_signer = std::sync::Arc::new(XetSigner::new(signing_key, "test-key", 3600));
         let metadata: std::sync::Arc<dyn MetadataStore> = std::sync::Arc::new(
-            SqliteMetadataStore::in_memory().unwrap()
+            SqliteMetadataStore::in_memory().await.unwrap()
         );
         let config = HubConfig::default();
         (token_store, xet_signer, metadata, config)
@@ -233,10 +233,10 @@ mod tests {
 
     #[actix_web::test]
     async fn test_exchange_model_read_success() {
-        let (token_store, xet_signer, metadata, config) = setup_test_env();
+        let (token_store, xet_signer, metadata, config) = setup_test_env().await;
 
         // Create a token and repo
-        let token = token_store.create_token("testuser", "test-token", "read").unwrap();
+        let token = token_store.create_token("testuser", "test-token", "read").await.unwrap();
         metadata.create_repo("ns", "repo", RepoType::Model, false).await.unwrap();
 
         let app = test::init_service(
@@ -263,10 +263,10 @@ mod tests {
 
     #[actix_web::test]
     async fn test_exchange_model_write_with_read_token_fails() {
-        let (token_store, xet_signer, metadata, config) = setup_test_env();
+        let (token_store, xet_signer, metadata, config) = setup_test_env().await;
 
         // Create a read-only token
-        let token = token_store.create_token("testuser", "test-token", "read").unwrap();
+        let token = token_store.create_token("testuser", "test-token", "read").await.unwrap();
         metadata.create_repo("ns", "repo", RepoType::Model, false).await.unwrap();
 
         let app = test::init_service(
@@ -289,10 +289,10 @@ mod tests {
 
     #[actix_web::test]
     async fn test_exchange_model_write_with_write_token_succeeds() {
-        let (token_store, xet_signer, metadata, config) = setup_test_env();
+        let (token_store, xet_signer, metadata, config) = setup_test_env().await;
 
         // Create a write token
-        let token = token_store.create_token("testuser", "test-token", "write").unwrap();
+        let token = token_store.create_token("testuser", "test-token", "write").await.unwrap();
         metadata.create_repo("ns", "repo", RepoType::Model, false).await.unwrap();
 
         let app = test::init_service(
@@ -315,9 +315,9 @@ mod tests {
 
     #[actix_web::test]
     async fn test_exchange_repo_not_found() {
-        let (token_store, xet_signer, metadata, config) = setup_test_env();
+        let (token_store, xet_signer, metadata, config) = setup_test_env().await;
 
-        let token = token_store.create_token("testuser", "test-token", "read").unwrap();
+        let token = token_store.create_token("testuser", "test-token", "read").await.unwrap();
         // Don't create the repo
 
         let app = test::init_service(
@@ -340,7 +340,7 @@ mod tests {
 
     #[actix_web::test]
     async fn test_exchange_invalid_token() {
-        let (token_store, xet_signer, metadata, config) = setup_test_env();
+        let (token_store, xet_signer, metadata, config) = setup_test_env().await;
 
         let app = test::init_service(
             App::new()

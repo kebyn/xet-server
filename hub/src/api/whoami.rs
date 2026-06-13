@@ -28,8 +28,8 @@ mod tests {
 
     #[actix_web::test]
     async fn test_whoami_valid_token() {
-        let token_store = std::sync::Arc::new(TokenStore::in_memory().unwrap());
-        let token = token_store.create_token("testuser", "test-token", "read").unwrap();
+        let token_store = std::sync::Arc::new(TokenStore::in_memory().await.unwrap());
+        let token = token_store.create_token("testuser", "test-token", "read").await.unwrap();
 
         let app = test::init_service(
             App::new()
@@ -53,7 +53,7 @@ mod tests {
 
     #[actix_web::test]
     async fn test_whoami_invalid_token() {
-        let token_store = std::sync::Arc::new(TokenStore::in_memory().unwrap());
+        let token_store = std::sync::Arc::new(TokenStore::in_memory().await.unwrap());
 
         let app = test::init_service(
             App::new()
@@ -72,7 +72,7 @@ mod tests {
 
     #[actix_web::test]
     async fn test_whoami_missing_auth() {
-        let token_store = std::sync::Arc::new(TokenStore::in_memory().unwrap());
+        let token_store = std::sync::Arc::new(TokenStore::in_memory().await.unwrap());
 
         let app = test::init_service(
             App::new()

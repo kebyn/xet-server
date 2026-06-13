@@ -384,18 +384,18 @@ mod tests {
     use crate::auth::token_store::TokenStore;
     use crate::metadata::SqliteMetadataStore;
 
-    fn setup_test_env() -> (std::sync::Arc<TokenStore>, std::sync::Arc<dyn MetadataStore>) {
-        let token_store = std::sync::Arc::new(TokenStore::in_memory().unwrap());
+    async fn setup_test_env() -> (std::sync::Arc<TokenStore>, std::sync::Arc<dyn MetadataStore>) {
+        let token_store = std::sync::Arc::new(TokenStore::in_memory().await.unwrap());
         let metadata: std::sync::Arc<dyn MetadataStore> = std::sync::Arc::new(
-            SqliteMetadataStore::in_memory().unwrap()
+            SqliteMetadataStore::in_memory().await.unwrap()
         );
         (token_store, metadata)
     }
 
     #[actix_web::test]
     async fn test_create_repo() {
-        let (token_store, metadata) = setup_test_env();
-        let token = token_store.create_token("testuser", "test-token", "write").unwrap();
+        let (token_store, metadata) = setup_test_env().await;
+        let token = token_store.create_token("testuser", "test-token", "write").await.unwrap();
 
         let app = actix_test::init_service(
             App::new()
@@ -421,8 +421,8 @@ mod tests {
 
     #[actix_web::test]
     async fn test_create_duplicate_repo() {
-        let (token_store, metadata) = setup_test_env();
-        let token = token_store.create_token("testuser", "test-token", "write").unwrap();
+        let (token_store, metadata) = setup_test_env().await;
+        let token = token_store.create_token("testuser", "test-token", "write").await.unwrap();
 
         let app = actix_test::init_service(
             App::new()
@@ -452,8 +452,8 @@ mod tests {
 
     #[actix_web::test]
     async fn test_get_repo() {
-        let (token_store, metadata) = setup_test_env();
-        let token = token_store.create_token("testuser", "test-token", "read").unwrap();
+        let (token_store, metadata) = setup_test_env().await;
+        let token = token_store.create_token("testuser", "test-token", "read").await.unwrap();
 
         // Create repo directly
         metadata.create_repo("testuser", "my-model", RepoType::Model, false).await.unwrap();
@@ -480,8 +480,8 @@ mod tests {
 
     #[actix_web::test]
     async fn test_get_nonexistent_repo() {
-        let (token_store, metadata) = setup_test_env();
-        let token = token_store.create_token("testuser", "test-token", "read").unwrap();
+        let (token_store, metadata) = setup_test_env().await;
+        let token = token_store.create_token("testuser", "test-token", "read").await.unwrap();
 
         let app = actix_test::init_service(
             App::new()
@@ -501,8 +501,8 @@ mod tests {
 
     #[actix_web::test]
     async fn test_delete_repo() {
-        let (token_store, metadata) = setup_test_env();
-        let token = token_store.create_token("testuser", "test-token", "write").unwrap();
+        let (token_store, metadata) = setup_test_env().await;
+        let token = token_store.create_token("testuser", "test-token", "write").await.unwrap();
 
         // Create repo directly
         metadata.create_repo("testuser", "my-model", RepoType::Model, false).await.unwrap();
@@ -529,9 +529,9 @@ mod tests {
 
     #[actix_web::test]
     async fn test_delete_repo_not_owner() {
-        let (token_store, metadata) = setup_test_env();
-        let _token1 = token_store.create_token("user1", "token1", "write").unwrap();
-        let token2 = token_store.create_token("user2", "token2", "write").unwrap();
+        let (token_store, metadata) = setup_test_env().await;
+        let _token1 = token_store.create_token("user1", "token1", "write").await.unwrap();
+        let token2 = token_store.create_token("user2", "token2", "write").await.unwrap();
 
         // Create repo with user1
         metadata.create_repo("user1", "my-model", RepoType::Model, false).await.unwrap();

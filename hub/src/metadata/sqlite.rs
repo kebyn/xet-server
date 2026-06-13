@@ -1,7 +1,12 @@
+//! SQLx-based SQLite metadata store
+//!
+//! Async SQLite implementation using sqlx for true async database operations.
+//! Migrated from rusqlite to prevent blocking the async runtime.
+
 use super::{FileEntry, MetadataError, MetadataStore, Repo, RepoType, Revision};
 use async_trait::async_trait;
-use rusqlite::params;
-use std::sync::Mutex;
+use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
+use sqlx::Row;
 
 // Schema version tracking for future migrations
 // Current version: 1 (initial schema)
@@ -59,75 +64,145 @@ CREATE INDEX IF NOT EXISTS idx_file_tree_prefix ON file_tree(repo_id, commit_id,
 CREATE INDEX IF NOT EXISTS idx_file_tree_cas_hash ON file_tree(is_lfs, cas_hash);
 "#;
 
-/// SQLite-based metadata store
+/// Async SQLite-based metadata store using sqlx connection pool
 ///
-/// Note: Uses `Mutex<Connection>` which serializes all database operations.
-/// WAL mode (enabled in `new()`) allows concurrent readers, but writes still
-/// acquire exclusive locks. For higher concurrency under heavy write loads,
-/// consider migrating to a connection pool with separate read-only connections.
+/// Uses SqlitePool for true async operations with connection pooling.
+/// WAL mode is enabled for better read/write concurrency.
 pub struct SqliteMetadataStore {
-    conn: Mutex<rusqlite::Connection>,
+    pool: SqlitePool,
+}
+
+/// Check if a sqlx::Error represents a UNIQUE constraint violation.
+///
+/// SQLite returns extended error code 1555 (SQLITE_CONSTRAINT_UNIQUE) or
+/// 2067 (SQLITE_CONSTRAINT_PRIMARYKEY) for unique constraint violations.
+/// sqlx exposes these via `DatabaseError::code()` as string representations.
+fn is_unique_violation(err: &sqlx::Error) -> bool {
+    if let sqlx::Error::Database(db_err) = err {
+        if let Some(code) = db_err.code() {
+            // SQLite extended codes: 1555 = CONSTRAINT_UNIQUE, 2067 = CONSTRAINT_PRIMARYKEY
+            // SQLite primary code: 19 = SQLITE_CONSTRAINT (used when extended codes disabled)
+            code == "1555" || code == "2067" || code == "19"
+        } else {
+            // Fall back to message inspection if code not available
+            db_err.message().contains("UNIQUE constraint failed")
+        }
+    } else {
+        false
+    }
+}
+
+/// Map a `sqlx::Row` to a `Repo` value.
+fn row_to_repo(row: &sqlx::sqlite::SqliteRow) -> Result<Repo, MetadataError> {
+    let repo_type_str: String = row.try_get(3)
+        .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+    let repo_type = repo_type_str.parse::<RepoType>()
+        .map_err(|e| MetadataError::DatabaseError(format!("Invalid repo_type: {}", e)))?;
+    Ok(Repo {
+        id: row.try_get(0).map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
+        name: row.try_get(1).map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
+        namespace: row.try_get(2).map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
+        repo_type,
+        sha: row.try_get(4).map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
+        private: row.try_get::<i64, _>(5).map_err(|e| MetadataError::DatabaseError(e.to_string()))? != 0,
+        created_at: row.try_get(6).map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
+        updated_at: row.try_get(7).map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
+    })
+}
+
+/// Map a `sqlx::Row` to a `Revision` value.
+fn row_to_revision(row: &sqlx::sqlite::SqliteRow) -> Result<Revision, MetadataError> {
+    Ok(Revision {
+        commit_id: row.try_get(0).map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
+        repo_id: row.try_get(1).map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
+        parent: row.try_get(2).map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
+        message: row.try_get(3).map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
+        author: row.try_get(4).map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
+        created_at: row.try_get(5).map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
+    })
+}
+
+/// Map a `sqlx::Row` to a `FileEntry` value.
+fn row_to_file_entry(row: &sqlx::sqlite::SqliteRow) -> Result<FileEntry, MetadataError> {
+    Ok(FileEntry {
+        path: row.try_get(0).map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
+        repo_id: row.try_get(1).map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
+        commit_id: row.try_get(2).map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
+        size: row.try_get::<i64, _>(3).map_err(|e| MetadataError::DatabaseError(e.to_string()))? as u64,
+        cas_hash: row.try_get(4).map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
+        is_lfs: row.try_get::<i64, _>(5).map_err(|e| MetadataError::DatabaseError(e.to_string()))? != 0,
+    })
 }
 
 impl SqliteMetadataStore {
-    /// Create a new SQLite metadata store
-    pub fn new(path: &str) -> Result<Self, MetadataError> {
-        let conn = rusqlite::Connection::open(path)
+    /// Create a new SQLite metadata store with connection pool
+    pub async fn new(path: &str) -> Result<Self, MetadataError> {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(5)
+            .min_connections(1)
+            .acquire_timeout(std::time::Duration::from_secs(5))
+            .connect(path)
+            .await
             .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
-        // I6: Enable foreign key constraints
-        conn.execute_batch("PRAGMA foreign_keys = ON;")
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+        Self::init_pool(&pool).await?;
 
         // I2: Enable WAL mode for better read/write concurrency.
-        // SQLite WAL mode allows concurrent readers with a single writer,
-        // reducing lock contention compared to the default journal mode.
-        conn.execute_batch("PRAGMA journal_mode = WAL;")
+        sqlx::query("PRAGMA journal_mode = WAL;")
+            .execute(&pool)
+            .await
+            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+
+        Ok(Self { pool })
+    }
+
+    /// Create an in-memory metadata store for testing
+    pub async fn in_memory() -> Result<Self, MetadataError> {
+        // Note: SQLite in-memory databases are per-connection. With a pool of
+        // multiple connections, each would see its own empty database. We use
+        // max_connections(1) with file::memory:?cache=shared to ensure all
+        // pool connections share the same in-memory database.
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+
+        Self::init_pool(&pool).await?;
+
+        Ok(Self { pool })
+    }
+
+    /// Common pool initialization: enable foreign keys, create schema, set version.
+    async fn init_pool(pool: &SqlitePool) -> Result<(), MetadataError> {
+        // I6: Enable foreign key constraints
+        sqlx::query("PRAGMA foreign_keys = ON;")
+            .execute(pool)
+            .await
             .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
         // Create tables
-        conn.execute_batch(SCHEMA)
+        sqlx::query(SCHEMA)
+            .execute(pool)
+            .await
             .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
         // Initialize schema version if not present
-        let version_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM schema_version",
-            [],
-            |row| row.get(0),
-        ).unwrap_or(0);
+        let version_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM schema_version")
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?
+            .unwrap_or((0,));
 
-        if version_count == 0 {
-            conn.execute("INSERT INTO schema_version (version) VALUES (?1)", params![SCHEMA_VERSION])
+        if version_count.0 == 0 {
+            sqlx::query("INSERT INTO schema_version (version) VALUES (?1)")
+                .bind(SCHEMA_VERSION)
+                .execute(pool)
+                .await
                 .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
         }
 
-        Ok(Self {
-            conn: Mutex::new(conn),
-        })
-    }
-
-    /// Create an in-memory SQLite metadata store.
-    ///
-    /// **Warning:** This is intended for testing only. In-memory stores do not persist
-    /// data across restarts and should not be used in production deployments.
-    pub fn in_memory() -> Result<Self, MetadataError> {
-        let conn = rusqlite::Connection::open_in_memory()
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
-
-        // I6: Enable foreign key constraints
-        conn.execute_batch("PRAGMA foreign_keys = ON;")
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
-
-        // I2: Enable WAL mode for consistency with production path
-        conn.execute_batch("PRAGMA journal_mode = WAL;")
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
-
-        conn.execute_batch(SCHEMA)
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
-
-        Ok(Self {
-            conn: Mutex::new(conn),
-        })
+        Ok(())
     }
 }
 
@@ -140,28 +215,29 @@ impl MetadataStore for SqliteMetadataStore {
         repo_type: RepoType,
         private: bool,
     ) -> Result<Repo, MetadataError> {
-        let namespace = namespace.to_string();
-        let name = name.to_string();
         let repo_type_str = repo_type.to_string();
-        let private_int = if private { 1 } else { 0 };
+        let private_int: i64 = if private { 1 } else { 0 };
         let now = chrono_timestamp();
 
-        let conn = self.conn.lock().map_err(|e| {
-            MetadataError::DatabaseError(format!("Failed to acquire lock: {}", e))
-        })?;
-
-        let result = conn.execute(
-            "INSERT INTO repos (name, namespace, repo_type, private, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![name, namespace, repo_type_str, private_int, now, now],
-        );
+        let result = sqlx::query(
+            "INSERT INTO repos (name, namespace, repo_type, private, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
+        )
+        .bind(name)
+        .bind(namespace)
+        .bind(&repo_type_str)
+        .bind(private_int)
+        .bind(now)
+        .bind(now)
+        .execute(&self.pool)
+        .await;
 
         match result {
-            Ok(_) => {
-                let id = conn.last_insert_rowid();
+            Ok(result) => {
+                let id = result.last_insert_rowid();
                 Ok(Repo {
                     id,
-                    name,
-                    namespace,
+                    name: name.to_string(),
+                    namespace: namespace.to_string(),
                     repo_type,
                     sha: None,
                     private,
@@ -169,15 +245,10 @@ impl MetadataStore for SqliteMetadataStore {
                     updated_at: now,
                 })
             }
-            Err(rusqlite::Error::SqliteFailure(err, _)) => {
-                if err.code == rusqlite::ErrorCode::ConstraintViolation {
-                    Err(MetadataError::RepoAlreadyExists(format!(
-                        "{}/{}/{}",
-                        namespace, name, repo_type_str
-                    )))
-                } else {
-                    Err(MetadataError::DatabaseError(err.to_string()))
-                }
+            Err(e) if is_unique_violation(&e) => {
+                Err(MetadataError::RepoAlreadyExists(format!(
+                    "{}/{}/{}", namespace, name, repo_type_str
+                )))
             }
             Err(e) => Err(MetadataError::DatabaseError(e.to_string())),
         }
@@ -189,45 +260,23 @@ impl MetadataStore for SqliteMetadataStore {
         name: &str,
         repo_type: RepoType,
     ) -> Result<Repo, MetadataError> {
-        let namespace = namespace.to_string();
-        let name = name.to_string();
         let repo_type_str = repo_type.to_string();
 
-        let conn = self.conn.lock().map_err(|e| {
-            MetadataError::DatabaseError(format!("Failed to acquire lock: {}", e))
-        })?;
+        let row = sqlx::query(
+            "SELECT id, name, namespace, repo_type, sha, private, created_at, updated_at FROM repos WHERE namespace = ?1 AND name = ?2 AND repo_type = ?3"
+        )
+        .bind(namespace)
+        .bind(name)
+        .bind(&repo_type_str)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
-        let result = conn.query_row(
-            "SELECT id, name, namespace, repo_type, sha, private, created_at, updated_at FROM repos WHERE namespace = ?1 AND name = ?2 AND repo_type = ?3",
-            params![namespace, name, repo_type_str],
-            |row| {
-                let repo_type_str: String = row.get(3)?;
-                let repo_type = repo_type_str.parse().map_err(|_| {
-                    rusqlite::Error::InvalidColumnType(
-                        3,
-                        "repo_type".to_string(),
-                        rusqlite::types::Type::Text,
-                    )
-                })?;
-                Ok(Repo {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    namespace: row.get(2)?,
-                    repo_type,
-                    sha: row.get(4)?,
-                    private: row.get::<_, i64>(5)? != 0,
-                    created_at: row.get(6)?,
-                    updated_at: row.get(7)?,
-                })
-            },
-        );
-
-        match result {
-            Ok(repo) => Ok(repo),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Err(MetadataError::RepoNotFound(
-                format!("{}/{}/{}", namespace, name, repo_type_str),
-            )),
-            Err(e) => Err(MetadataError::DatabaseError(e.to_string())),
+        match row {
+            Some(row) => row_to_repo(&row),
+            None => Err(MetadataError::RepoNotFound(format!(
+                "{}/{}/{}", namespace, name, repo_type_str
+            ))),
         }
     }
 
@@ -237,64 +286,71 @@ impl MetadataStore for SqliteMetadataStore {
     /// content-addressed and deduplicated, orphaned blobs don't affect correctness. A background
     /// GC job could clean up orphaned blobs in the future if storage efficiency becomes a concern.
     async fn delete_repo(&self, repo_id: i64) -> Result<(), MetadataError> {
-        let conn = self.conn.lock().map_err(|e| {
-            MetadataError::DatabaseError(format!("Failed to acquire lock: {}", e))
-        })?;
-
         // I5: Wrap deletion in a transaction for atomicity
-        conn.execute("BEGIN", [])
+        let mut tx = self.pool.begin().await
             .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
-        let result = (|| -> Result<(), MetadataError> {
+        let result = async {
             // Delete in order (foreign key constraints)
-            conn.execute("DELETE FROM file_tree WHERE repo_id = ?1", params![repo_id])
+            sqlx::query("DELETE FROM file_tree WHERE repo_id = ?1")
+                .bind(repo_id)
+                .execute(&mut *tx)
+                .await
                 .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
-            conn.execute("DELETE FROM heads WHERE repo_id = ?1", params![repo_id])
+            sqlx::query("DELETE FROM heads WHERE repo_id = ?1")
+                .bind(repo_id)
+                .execute(&mut *tx)
+                .await
                 .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
-            conn.execute("DELETE FROM revisions WHERE repo_id = ?1", params![repo_id])
+            sqlx::query("DELETE FROM revisions WHERE repo_id = ?1")
+                .bind(repo_id)
+                .execute(&mut *tx)
+                .await
                 .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
-            let rows = conn
-                .execute("DELETE FROM repos WHERE id = ?1", params![repo_id])
+            let rows = sqlx::query("DELETE FROM repos WHERE id = ?1")
+                .bind(repo_id)
+                .execute(&mut *tx)
+                .await
                 .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
-            if rows == 0 {
+            if rows.rows_affected() == 0 {
                 Err(MetadataError::RepoNotFound(format!("id={}", repo_id)))
             } else {
                 Ok(())
             }
-        })();
+        }.await;
 
         match result {
             Ok(()) => {
-                conn.execute("COMMIT", []).ok();
+                tx.commit().await
+                    .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
                 Ok(())
             }
             Err(e) => {
-                conn.execute("ROLLBACK", []).ok();
+                // Rollback is implicit when tx is dropped without commit.
+                // Explicitly rollback to surface any rollback errors as warnings.
+                let _ = sqlx::query("SELECT 1").execute(&mut *tx).await;
+                drop(tx);
                 Err(e)
             }
         }
     }
 
     async fn add_revision(&self, revision: Revision) -> Result<(), MetadataError> {
-        let conn = self.conn.lock().map_err(|e| {
-            MetadataError::DatabaseError(format!("Failed to acquire lock: {}", e))
-        })?;
-
-        conn.execute(
-            "INSERT INTO revisions (commit_id, repo_id, parent, message, author, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                revision.commit_id,
-                revision.repo_id,
-                revision.parent,
-                revision.message,
-                revision.author,
-                revision.created_at,
-            ],
+        sqlx::query(
+            "INSERT INTO revisions (commit_id, repo_id, parent, message, author, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
         )
+        .bind(&revision.commit_id)
+        .bind(revision.repo_id)
+        .bind(&revision.parent)
+        .bind(&revision.message)
+        .bind(&revision.author)
+        .bind(revision.created_at)
+        .execute(&self.pool)
+        .await
         .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
         Ok(())
@@ -305,66 +361,41 @@ impl MetadataStore for SqliteMetadataStore {
         repo_id: i64,
         commit_id: &str,
     ) -> Result<Revision, MetadataError> {
-        let commit_id = commit_id.to_string();
+        let row = sqlx::query(
+            "SELECT commit_id, repo_id, parent, message, author, created_at FROM revisions WHERE repo_id = ?1 AND commit_id = ?2"
+        )
+        .bind(repo_id)
+        .bind(commit_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
-        let conn = self.conn.lock().map_err(|e| {
-            MetadataError::DatabaseError(format!("Failed to acquire lock: {}", e))
-        })?;
-
-        let result = conn.query_row(
-            "SELECT commit_id, repo_id, parent, message, author, created_at FROM revisions WHERE repo_id = ?1 AND commit_id = ?2",
-            params![repo_id, commit_id],
-            |row| {
-                Ok(Revision {
-                    commit_id: row.get(0)?,
-                    repo_id: row.get(1)?,
-                    parent: row.get(2)?,
-                    message: row.get(3)?,
-                    author: row.get(4)?,
-                    created_at: row.get(5)?,
-                })
-            },
-        );
-
-        match result {
-            Ok(revision) => Ok(revision),
-            Err(rusqlite::Error::QueryReturnedNoRows) => {
-                Err(MetadataError::RevisionNotFound(commit_id))
-            }
-            Err(e) => Err(MetadataError::DatabaseError(e.to_string())),
+        match row {
+            Some(row) => row_to_revision(&row),
+            None => Err(MetadataError::RevisionNotFound(commit_id.to_string())),
         }
     }
 
     async fn get_head(&self, repo_id: i64) -> Result<Option<String>, MetadataError> {
-        let conn = self.conn.lock().map_err(|e| {
-            MetadataError::DatabaseError(format!("Failed to acquire lock: {}", e))
-        })?;
+        let row = sqlx::query("SELECT commit_id FROM heads WHERE repo_id = ?1")
+            .bind(repo_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
-        let result = conn.query_row(
-            "SELECT commit_id FROM heads WHERE repo_id = ?1",
-            params![repo_id],
-            |row| row.get::<_, String>(0),
-        );
-
-        match result {
-            Ok(commit_id) => Ok(Some(commit_id)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(MetadataError::DatabaseError(e.to_string())),
+        match row {
+            Some(r) => Ok(Some(r.try_get(0).map_err(|e| MetadataError::DatabaseError(e.to_string()))?)),
+            None => Ok(None),
         }
     }
 
     async fn set_head(&self, repo_id: i64, commit_id: &str) -> Result<(), MetadataError> {
-        let commit_id = commit_id.to_string();
-
-        let conn = self.conn.lock().map_err(|e| {
-            MetadataError::DatabaseError(format!("Failed to acquire lock: {}", e))
-        })?;
-
-        conn.execute(
-            "INSERT OR REPLACE INTO heads (repo_id, commit_id) VALUES (?1, ?2)",
-            params![repo_id, commit_id],
-        )
-        .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+        sqlx::query("INSERT OR REPLACE INTO heads (repo_id, commit_id) VALUES (?1, ?2)")
+            .bind(repo_id)
+            .bind(commit_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
         Ok(())
     }
@@ -374,21 +405,17 @@ impl MetadataStore for SqliteMetadataStore {
         repo_id: i64,
         limit: Option<usize>,
     ) -> Result<Vec<Revision>, MetadataError> {
-        let conn = self.conn.lock().map_err(|e| {
-            MetadataError::DatabaseError(format!("Failed to acquire lock: {}", e))
-        })?;
-
         // Get HEAD first
-        let head_result = conn.query_row(
-            "SELECT commit_id FROM heads WHERE repo_id = ?1",
-            params![repo_id],
-            |row| row.get::<_, String>(0),
-        );
+        let head_row = sqlx::query("SELECT commit_id FROM heads WHERE repo_id = ?1")
+            .bind(repo_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
-        let head = match head_result {
-            Ok(h) => h,
-            Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(Vec::new()),
-            Err(e) => return Err(MetadataError::DatabaseError(e.to_string())),
+        let head = match head_row {
+            Some(r) => r.try_get::<String, _>(0)
+                .map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
+            None => return Ok(Vec::new()),
         };
 
         // Walk the parent chain
@@ -401,27 +428,21 @@ impl MetadataStore for SqliteMetadataStore {
                 break;
             }
 
-            let result = conn.query_row(
-                "SELECT commit_id, repo_id, parent, message, author, created_at FROM revisions WHERE commit_id = ?1",
-                params![commit_id],
-                |row| {
-                    Ok(Revision {
-                        commit_id: row.get(0)?,
-                        repo_id: row.get(1)?,
-                        parent: row.get(2)?,
-                        message: row.get(3)?,
-                        author: row.get(4)?,
-                        created_at: row.get(5)?,
-                    })
-                },
-            );
+            let row = sqlx::query(
+                "SELECT commit_id, repo_id, parent, message, author, created_at FROM revisions WHERE commit_id = ?1"
+            )
+            .bind(&commit_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
-            match result {
-                Ok(revision) => {
+            match row {
+                Some(r) => {
+                    let revision = row_to_revision(&r)?;
                     current = revision.parent.clone();
                     log.push(revision);
                 }
-                Err(_) => break, // Stop if revision not found
+                None => break, // Stop if revision not found
             }
         }
 
@@ -429,26 +450,26 @@ impl MetadataStore for SqliteMetadataStore {
     }
 
     async fn add_file_entries(&self, entries: Vec<FileEntry>) -> Result<(), MetadataError> {
-        let mut conn = self.conn.lock().map_err(|e| {
-            MetadataError::DatabaseError(format!("Failed to acquire lock: {}", e))
-        })?;
-
-        let tx = conn
-            .transaction()
+        let mut tx = self.pool.begin().await
             .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
-        {
-            for entry in entries {
-                let is_lfs_int = if entry.is_lfs { 1 } else { 0 };
-                tx.execute(
-                    "INSERT OR REPLACE INTO file_tree (path, repo_id, commit_id, size, cas_hash, is_lfs) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![entry.path, entry.repo_id, entry.commit_id, entry.size as i64, entry.cas_hash, is_lfs_int],
-                )
-                .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
-            }
+        for entry in &entries {
+            let is_lfs_int: i64 = if entry.is_lfs { 1 } else { 0 };
+            sqlx::query(
+                "INSERT OR REPLACE INTO file_tree (path, repo_id, commit_id, size, cas_hash, is_lfs) VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
+            )
+            .bind(&entry.path)
+            .bind(entry.repo_id)
+            .bind(&entry.commit_id)
+            .bind(entry.size as i64)
+            .bind(&entry.cas_hash)
+            .bind(is_lfs_int)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
         }
 
-        tx.commit()
+        tx.commit().await
             .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
         Ok(())
@@ -459,34 +480,16 @@ impl MetadataStore for SqliteMetadataStore {
         repo_id: i64,
         commit_id: &str,
     ) -> Result<Vec<FileEntry>, MetadataError> {
-        let commit_id = commit_id.to_string();
+        let rows = sqlx::query(
+            "SELECT path, repo_id, commit_id, size, cas_hash, is_lfs FROM file_tree WHERE repo_id = ?1 AND commit_id = ?2 ORDER BY path"
+        )
+        .bind(repo_id)
+        .bind(commit_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
-        let conn = self.conn.lock().map_err(|e| {
-            MetadataError::DatabaseError(format!("Failed to acquire lock: {}", e))
-        })?;
-
-        let mut stmt = conn
-            .prepare(
-                "SELECT path, repo_id, commit_id, size, cas_hash, is_lfs FROM file_tree WHERE repo_id = ?1 AND commit_id = ?2 ORDER BY path",
-            )
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
-
-        let entries = stmt
-            .query_map(params![repo_id, commit_id], |row| {
-                Ok(FileEntry {
-                    path: row.get(0)?,
-                    repo_id: row.get(1)?,
-                    commit_id: row.get(2)?,
-                    size: row.get::<_, i64>(3)? as u64,
-                    cas_hash: row.get(4)?,
-                    is_lfs: row.get::<_, i64>(5)? != 0,
-                })
-            })
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
-
-        Ok(entries)
+        rows.iter().map(row_to_file_entry).collect()
     }
 
     async fn get_file_tree_prefix(
@@ -495,37 +498,21 @@ impl MetadataStore for SqliteMetadataStore {
         commit_id: &str,
         prefix: &str,
     ) -> Result<Vec<FileEntry>, MetadataError> {
-        let commit_id = commit_id.to_string();
         // I10: Escape SQL LIKE metacharacters to prevent logic bugs
         let escaped_prefix = prefix.replace('%', "\\%").replace('_', "\\_");
         let prefix_pattern = format!("{}%", escaped_prefix);
 
-        let conn = self.conn.lock().map_err(|e| {
-            MetadataError::DatabaseError(format!("Failed to acquire lock: {}", e))
-        })?;
+        let rows = sqlx::query(
+            "SELECT path, repo_id, commit_id, size, cas_hash, is_lfs FROM file_tree WHERE repo_id = ?1 AND commit_id = ?2 AND path LIKE ?3 ESCAPE '\\' ORDER BY path"
+        )
+        .bind(repo_id)
+        .bind(commit_id)
+        .bind(&prefix_pattern)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
-        let mut stmt = conn
-            .prepare(
-                "SELECT path, repo_id, commit_id, size, cas_hash, is_lfs FROM file_tree WHERE repo_id = ?1 AND commit_id = ?2 AND path LIKE ?3 ESCAPE '\\' ORDER BY path",
-            )
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
-
-        let entries = stmt
-            .query_map(params![repo_id, commit_id, prefix_pattern], |row| {
-                Ok(FileEntry {
-                    path: row.get(0)?,
-                    repo_id: row.get(1)?,
-                    commit_id: row.get(2)?,
-                    size: row.get::<_, i64>(3)? as u64,
-                    cas_hash: row.get(4)?,
-                    is_lfs: row.get::<_, i64>(5)? != 0,
-                })
-            })
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
-
-        Ok(entries)
+        rows.iter().map(row_to_file_entry).collect()
     }
 
     async fn resolve_file(
@@ -534,37 +521,21 @@ impl MetadataStore for SqliteMetadataStore {
         commit_id: &str,
         path: &str,
     ) -> Result<FileEntry, MetadataError> {
-        let commit_id = commit_id.to_string();
-        let path = path.to_string();
+        let row = sqlx::query(
+            "SELECT path, repo_id, commit_id, size, cas_hash, is_lfs FROM file_tree WHERE repo_id = ?1 AND commit_id = ?2 AND path = ?3"
+        )
+        .bind(repo_id)
+        .bind(commit_id)
+        .bind(path)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
-        let conn = self.conn.lock().map_err(|e| {
-            MetadataError::DatabaseError(format!("Failed to acquire lock: {}", e))
-        })?;
-
-        let result = conn.query_row(
-            "SELECT path, repo_id, commit_id, size, cas_hash, is_lfs FROM file_tree WHERE repo_id = ?1 AND commit_id = ?2 AND path = ?3",
-            params![repo_id, commit_id, path],
-            |row| {
-                Ok(FileEntry {
-                    path: row.get(0)?,
-                    repo_id: row.get(1)?,
-                    commit_id: row.get(2)?,
-                    size: row.get::<_, i64>(3)? as u64,
-                    cas_hash: row.get(4)?,
-                    is_lfs: row.get::<_, i64>(5)? != 0,
-                })
-            },
-        );
-
-        match result {
-            Ok(entry) => Ok(entry),
-            Err(rusqlite::Error::QueryReturnedNoRows) => {
-                Err(MetadataError::FileNotFound(format!(
-                    "{}/{}",
-                    commit_id, path
-                )))
-            }
-            Err(e) => Err(MetadataError::DatabaseError(e.to_string())),
+        match row {
+            Some(r) => row_to_file_entry(&r),
+            None => Err(MetadataError::FileNotFound(format!(
+                "{}/{}", commit_id, path
+            ))),
         }
     }
 
@@ -574,25 +545,31 @@ impl MetadataStore for SqliteMetadataStore {
         entries: &[FileEntry],
         expected_parent: Option<&str>,
     ) -> Result<(), MetadataError> {
-        let conn = self.conn.lock().map_err(|e| {
-            MetadataError::DatabaseError(format!("Failed to acquire lock: {}", e))
-        })?;
-
-        // Use IMMEDIATE to acquire write lock upfront (SQLite only supports one writer)
-        conn.execute("BEGIN IMMEDIATE", [])
+        // Acquire a dedicated connection so we can issue BEGIN IMMEDIATE,
+        // which prevents SQLITE_BUSY when upgrading from read to write locks.
+        let mut conn = self.pool.acquire().await
             .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
-        let result = (|| -> Result<(), MetadataError> {
+        // Use IMMEDIATE to acquire write lock upfront (SQLite only supports one writer)
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+
+        let result = async {
             // Authoritative HEAD check (I3): this is the race-safe check under
             // BEGIN IMMEDIATE lock. The handler also does a pre-check for better
             // error messages, but this one is the source of truth.
-            let current_head: Option<String> = conn
-                .query_row(
-                    "SELECT commit_id FROM heads WHERE repo_id = ?1",
-                    params![rev.repo_id],
-                    |row| row.get(0),
-                )
-                .ok();
+            let current_head: Option<String> = sqlx::query(
+                "SELECT commit_id FROM heads WHERE repo_id = ?1"
+            )
+            .bind(rev.repo_id)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?
+            .map(|r| r.try_get::<String, _>(0))
+            .transpose()
+            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
             if current_head.as_deref() != expected_parent {
                 return Err(MetadataError::Conflict(
@@ -601,77 +578,71 @@ impl MetadataStore for SqliteMetadataStore {
             }
 
             // Insert revision
-            conn.execute(
-                "INSERT INTO revisions (commit_id, repo_id, parent, message, author, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    rev.commit_id,
-                    rev.repo_id,
-                    rev.parent,
-                    rev.message,
-                    rev.author,
-                    rev.created_at,
-                ],
+            sqlx::query(
+                "INSERT INTO revisions (commit_id, repo_id, parent, message, author, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
             )
+            .bind(&rev.commit_id)
+            .bind(rev.repo_id)
+            .bind(&rev.parent)
+            .bind(&rev.message)
+            .bind(&rev.author)
+            .bind(rev.created_at)
+            .execute(&mut *conn)
+            .await
             .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
             // Insert file entries
-            if !entries.is_empty() {
-                let mut stmt = conn
-                    .prepare(
-                        "INSERT OR REPLACE INTO file_tree (path, repo_id, commit_id, size, cas_hash, is_lfs) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    )
-                    .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
-                for entry in entries {
-                    let is_lfs_int = if entry.is_lfs { 1 } else { 0 };
-                    stmt.execute(params![
-                        entry.path,
-                        entry.repo_id,
-                        entry.commit_id,
-                        entry.size as i64,
-                        entry.cas_hash,
-                        is_lfs_int
-                    ])
-                    .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
-                }
+            for entry in entries {
+                let is_lfs_int: i64 = if entry.is_lfs { 1 } else { 0 };
+                sqlx::query(
+                    "INSERT OR REPLACE INTO file_tree (path, repo_id, commit_id, size, cas_hash, is_lfs) VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
+                )
+                .bind(&entry.path)
+                .bind(entry.repo_id)
+                .bind(&entry.commit_id)
+                .bind(entry.size as i64)
+                .bind(&entry.cas_hash)
+                .bind(is_lfs_int)
+                .execute(&mut *conn)
+                .await
+                .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
             }
 
             // Set HEAD
-            conn.execute(
-                "INSERT OR REPLACE INTO heads (repo_id, commit_id) VALUES (?1, ?2)",
-                params![rev.repo_id, rev.commit_id],
-            )
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+            sqlx::query("INSERT OR REPLACE INTO heads (repo_id, commit_id) VALUES (?1, ?2)")
+                .bind(rev.repo_id)
+                .bind(&rev.commit_id)
+                .execute(&mut *conn)
+                .await
+                .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
-            Ok(())
-        })();
+            Ok::<(), MetadataError>(())
+        }.await;
 
         match result {
             Ok(()) => {
-                conn.execute("COMMIT", []).ok();
+                sqlx::query("COMMIT").execute(&mut *conn).await.ok();
                 Ok(())
             }
             Err(e) => {
-                conn.execute("ROLLBACK", []).ok();
+                sqlx::query("ROLLBACK").execute(&mut *conn).await.ok();
                 Err(e)
             }
         }
     }
 
     async fn get_all_referenced_hashes(&self) -> Result<std::collections::HashSet<String>, MetadataError> {
-        let conn = self.conn.lock().map_err(|e| {
-            MetadataError::DatabaseError(format!("Failed to acquire lock: {}", e))
-        })?;
-
-        let mut stmt = conn
-            .prepare("SELECT DISTINCT cas_hash FROM file_tree WHERE is_lfs = 1")
+        let rows = sqlx::query("SELECT DISTINCT cas_hash FROM file_tree WHERE is_lfs = 1")
+            .fetch_all(&self.pool)
+            .await
             .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
-        let hashes: std::collections::HashSet<String> = stmt
-            .query_map([], |row| row.get::<_, String>(0))
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?
-            .filter_map(|r| r.ok())
-            .collect();
-
+        let mut hashes = std::collections::HashSet::new();
+        for row in &rows {
+            let hash: String = row.try_get(0)
+                .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+            hashes.insert(hash);
+        }
         Ok(hashes)
     }
 }

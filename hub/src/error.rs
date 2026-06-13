@@ -64,8 +64,8 @@ impl actix_web::ResponseError for HubError {
     }
 }
 
-impl From<rusqlite::Error> for HubError {
-    fn from(e: rusqlite::Error) -> Self {
+impl From<sqlx::Error> for HubError {
+    fn from(e: sqlx::Error) -> Self {
         HubError::Internal(format!("Database error: {}", e))
     }
 }

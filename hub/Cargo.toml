@@ -13,7 +13,9 @@ actix-governor = "0.5"
 tokio = { version = "1.36", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-rusqlite = { version = "0.31", features = ["bundled"] }
+# SQLx for async SQLite with bundled sqlite
+# Use bundled feature to compile sqlite from source and avoid conflicts with rusqlite
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "sqlite", "macros"] }
 ed25519-dalek = { version = "2", features = ["pem", "rand_core", "pkcs8"] }
 pkcs8 = { version = "0.10", features = ["pem"] }
 base64 = "0.22"

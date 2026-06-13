@@ -141,6 +141,7 @@ impl<S: ScopeRequirement + 'static> FromRequest for AuthUser<S> {
 
             let info = token_store
                 .validate_token(&token)
+                .await
                 .map_err(|e| AuthError::Internal(e.to_string()))?
                 .ok_or(AuthError::InvalidToken)?;
 
@@ -166,9 +167,10 @@ mod tests {
 
     #[actix_web::test]
     async fn test_auth_any_valid_token() {
-        let token_store = Arc::new(TokenStore::in_memory().unwrap());
+        let token_store = Arc::new(TokenStore::in_memory().await.unwrap());
         let token = token_store
             .create_token("testuser", "test-token", "read")
+            .await
             .unwrap();
 
         let app = test::init_service(
@@ -192,7 +194,7 @@ mod tests {
 
     #[actix_web::test]
     async fn test_auth_any_missing_header() {
-        let token_store = Arc::new(TokenStore::in_memory().unwrap());
+        let token_store = Arc::new(TokenStore::in_memory().await.unwrap());
 
         let app = test::init_service(
             App::new()
@@ -212,7 +214,7 @@ mod tests {
 
     #[actix_web::test]
     async fn test_auth_any_invalid_token() {
-        let token_store = Arc::new(TokenStore::in_memory().unwrap());
+        let token_store = Arc::new(TokenStore::in_memory().await.unwrap());
 
         let app = test::init_service(
             App::new()
@@ -235,9 +237,10 @@ mod tests {
 
     #[actix_web::test]
     async fn test_auth_read_with_read_token() {
-        let token_store = Arc::new(TokenStore::in_memory().unwrap());
+        let token_store = Arc::new(TokenStore::in_memory().await.unwrap());
         let token = token_store
             .create_token("testuser", "read-token", "read")
+            .await
             .unwrap();
 
         let app = test::init_service(
@@ -261,9 +264,10 @@ mod tests {
 
     #[actix_web::test]
     async fn test_auth_read_with_write_token() {
-        let token_store = Arc::new(TokenStore::in_memory().unwrap());
+        let token_store = Arc::new(TokenStore::in_memory().await.unwrap());
         let token = token_store
             .create_token("testuser", "write-token", "write")
+            .await
             .unwrap();
 
         let app = test::init_service(
@@ -287,9 +291,10 @@ mod tests {
 
     #[actix_web::test]
     async fn test_auth_write_with_write_token() {
-        let token_store = Arc::new(TokenStore::in_memory().unwrap());
+        let token_store = Arc::new(TokenStore::in_memory().await.unwrap());
         let token = token_store
             .create_token("testuser", "write-token", "write")
+            .await
             .unwrap();
 
         let app = test::init_service(
@@ -313,9 +318,10 @@ mod tests {
 
     #[actix_web::test]
     async fn test_auth_write_with_read_token() {
-        let token_store = Arc::new(TokenStore::in_memory().unwrap());
+        let token_store = Arc::new(TokenStore::in_memory().await.unwrap());
         let token = token_store
             .create_token("testuser", "read-token", "read")
+            .await
             .unwrap();
 
         let app = test::init_service(

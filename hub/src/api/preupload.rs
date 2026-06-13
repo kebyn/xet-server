@@ -122,18 +122,18 @@ mod tests {
     use crate::auth::token_store::TokenStore;
     use crate::metadata::SqliteMetadataStore;
 
-    fn setup_test_env() -> (std::sync::Arc<TokenStore>, std::sync::Arc<dyn MetadataStore>) {
-        let token_store = std::sync::Arc::new(TokenStore::in_memory().unwrap());
+    async fn setup_test_env() -> (std::sync::Arc<TokenStore>, std::sync::Arc<dyn MetadataStore>) {
+        let token_store = std::sync::Arc::new(TokenStore::in_memory().await.unwrap());
         let metadata: std::sync::Arc<dyn MetadataStore> = std::sync::Arc::new(
-            SqliteMetadataStore::in_memory().unwrap()
+            SqliteMetadataStore::in_memory().await.unwrap()
         );
         (token_store, metadata)
     }
 
     #[actix_web::test]
     async fn test_preupload_mode_regular() {
-        let (token_store, metadata) = setup_test_env();
-        let token = token_store.create_token("testuser", "test-token", "write").unwrap();
+        let (token_store, metadata) = setup_test_env().await;
+        let token = token_store.create_token("testuser", "test-token", "write").await.unwrap();
 
         // Create repo
         metadata.create_repo("testuser", "my-model", RepoType::Model, false).await.unwrap();
@@ -168,8 +168,8 @@ mod tests {
 
     #[actix_web::test]
     async fn test_preupload_mode_lfs() {
-        let (token_store, metadata) = setup_test_env();
-        let token = token_store.create_token("testuser", "test-token", "write").unwrap();
+        let (token_store, metadata) = setup_test_env().await;
+        let token = token_store.create_token("testuser", "test-token", "write").await.unwrap();
 
         // Create repo
         metadata.create_repo("testuser", "my-model", RepoType::Model, false).await.unwrap();
@@ -204,8 +204,8 @@ mod tests {
 
     #[actix_web::test]
     async fn test_preupload_mode_xet() {
-        let (token_store, metadata) = setup_test_env();
-        let token = token_store.create_token("testuser", "test-token", "write").unwrap();
+        let (token_store, metadata) = setup_test_env().await;
+        let token = token_store.create_token("testuser", "test-token", "write").await.unwrap();
 
         // Create repo
         metadata.create_repo("testuser", "my-model", RepoType::Model, false).await.unwrap();

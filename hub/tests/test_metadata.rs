@@ -1,12 +1,12 @@
 use hub_api::metadata::{FileEntry, MetadataStore, RepoType, Revision, SqliteMetadataStore};
 
-fn create_test_store() -> SqliteMetadataStore {
-    SqliteMetadataStore::in_memory().expect("Failed to create in-memory store")
+async fn create_test_store() -> SqliteMetadataStore {
+    SqliteMetadataStore::in_memory().await.expect("Failed to create in-memory store")
 }
 
 #[tokio::test]
 async fn test_create_and_get_repo() {
-    let store = create_test_store();
+    let store = create_test_store().await;
 
     let repo = store
         .create_repo("testuser", "testrepo", RepoType::Model, false)
@@ -31,7 +31,7 @@ async fn test_create_and_get_repo() {
 
 #[tokio::test]
 async fn test_create_duplicate_repo() {
-    let store = create_test_store();
+    let store = create_test_store().await;
 
     store
         .create_repo("testuser", "testrepo", RepoType::Model, false)
@@ -53,7 +53,7 @@ async fn test_create_duplicate_repo() {
 
 #[tokio::test]
 async fn test_delete_repo() {
-    let store = create_test_store();
+    let store = create_test_store().await;
 
     let repo = store
         .create_repo("testuser", "testrepo", RepoType::Model, false)
@@ -74,7 +74,7 @@ async fn test_delete_repo() {
 
 #[tokio::test]
 async fn test_add_and_get_revision() {
-    let store = create_test_store();
+    let store = create_test_store().await;
 
     let repo = store
         .create_repo("testuser", "testrepo", RepoType::Model, false)
@@ -108,7 +108,7 @@ async fn test_add_and_get_revision() {
 
 #[tokio::test]
 async fn test_head_management() {
-    let store = create_test_store();
+    let store = create_test_store().await;
 
     let repo = store
         .create_repo("testuser", "testrepo", RepoType::Model, false)
@@ -160,7 +160,7 @@ async fn test_head_management() {
 
 #[tokio::test]
 async fn test_file_tree_operations() {
-    let store = create_test_store();
+    let store = create_test_store().await;
 
     let repo = store
         .create_repo("testuser", "testrepo", RepoType::Model, false)
@@ -227,7 +227,7 @@ async fn test_file_tree_operations() {
 
 #[tokio::test]
 async fn test_file_tree_prefix_filter() {
-    let store = create_test_store();
+    let store = create_test_store().await;
 
     let repo = store
         .create_repo("testuser", "testrepo", RepoType::Model, false)
@@ -298,7 +298,7 @@ async fn test_file_tree_prefix_filter() {
 
 #[tokio::test]
 async fn test_resolve_file() {
-    let store = create_test_store();
+    let store = create_test_store().await;
 
     let repo = store
         .create_repo("testuser", "testrepo", RepoType::Model, false)
@@ -353,7 +353,7 @@ async fn test_resolve_file() {
 
 #[tokio::test]
 async fn test_commit_log() {
-    let store = create_test_store();
+    let store = create_test_store().await;
 
     let repo = store
         .create_repo("testuser", "testrepo", RepoType::Model, false)
@@ -410,7 +410,7 @@ async fn test_commit_log() {
 
 #[tokio::test]
 async fn test_commit_atomic_success() {
-    let store = create_test_store();
+    let store = create_test_store().await;
 
     let repo = store
         .create_repo("testuser", "testrepo", RepoType::Model, false)
@@ -452,7 +452,7 @@ async fn test_commit_atomic_success() {
 
 #[tokio::test]
 async fn test_commit_atomic_rejects_mismatched_parent() {
-    let store = create_test_store();
+    let store = create_test_store().await;
 
     let repo = store
         .create_repo("testuser", "testrepo", RepoType::Model, false)
@@ -500,7 +500,7 @@ async fn test_commit_atomic_rejects_mismatched_parent() {
 
 #[tokio::test]
 async fn test_commit_atomic_concurrent_protection() {
-    let store = create_test_store();
+    let store = create_test_store().await;
 
     let repo = store
         .create_repo("testuser", "testrepo", RepoType::Model, false)
