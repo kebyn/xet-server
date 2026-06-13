@@ -377,3 +377,40 @@ impl ServerConfig {
         }
     }
 }
+
+/// Check public key file permissions and return a warning message if insecure.
+///
+/// Returns `Some(warning)` if the file is world-writable or group-writable,
+/// which would allow other users to replace the public key and forge tokens.
+/// Returns `None` if permissions are secure (owner-only read/write).
+pub fn check_public_key_permissions(path: &str) -> Option<String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let metadata = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(_) => return None, // File doesn't exist yet, skip check
+    };
+    let mode = metadata.permissions().mode();
+
+    let world_writable = mode & 0o002 != 0;
+    let group_writable = mode & 0o020 != 0;
+
+    if world_writable || group_writable {
+        let mut warnings = Vec::new();
+        if world_writable {
+            warnings.push("world-writable (any user can modify)");
+        }
+        if group_writable {
+            warnings.push("group-writable (group members can modify)");
+        }
+        Some(format!(
+            "SECURITY WARNING: Public key file '{}' is {}. \
+            An attacker could replace this file to forge authentication tokens. \
+            Use a secure path (e.g., /etc/xet/) with mode 0644 or 0600.",
+            path,
+            warnings.join(" and ")
+        ))
+    } else {
+        None
+    }
+}
