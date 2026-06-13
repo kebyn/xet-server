@@ -22,11 +22,12 @@ CAS Server 是 Xet Server 的核心存储引擎，负责内容寻址存储、文
 | 环境变量 | 描述 | 默认值 | 必需 |
 |---------|------|--------|------|
 | `XET_HOST` | 服务器绑定地址 | `127.0.0.1` | 否 |
-| `XET_PORT` | 服务器端口 | `8080` | 否 |
+| `XET_PORT` | 服务器端口 | `8081` | 否 |
 | `XET_PUBLIC_BASE_URL` | 公共访问 URL | `http://{host}:{port}` | 否* |
 | `XET_MAX_BODY_SIZE_MB` | 最大请求体大小（MB） | `2048` | 否 |
 
 **注意**：
+- CAS Server 默认端口为 `8081`，以避免与 Hub API 默认端口 `8080` 冲突
 - `XET_PUBLIC_BASE_URL` 在服务器位于反向代理、负载均衡器或 NAT 后时**必须设置**
 - `XET_MAX_BODY_SIZE_MB` 控制单个请求的最大内存使用
 
@@ -80,11 +81,12 @@ export XET_S3_ENDPOINT=https://s3.amazonaws.com
 | 环境变量 | 描述 | 默认值 | 必需 |
 |---------|------|--------|------|
 | `CAS_PUBLIC_KEY_PATH` | Ed25519 公钥路径 | `/tmp/xet-public-key.pem` | 是 |
-| `CAS_TRUSTED_KIDS` | 受信任的密钥 ID 列表 | `test-kid` | 是 |
+| `CAS_TRUSTED_KIDS` | 受信任的密钥 ID 列表 | `hub-key-1` | 是 |
 
 **说明**：
 - `CAS_PUBLIC_KEY_PATH` 指向 Hub 的公钥文件（PEM 格式）
 - `CAS_TRUSTED_KIDS` 是逗号分隔的密钥 ID 列表，用于密钥轮换
+- 默认 trusted kid 为 `hub-key-1`，应与 Hub 的 `HUB_KID` 配置保持一致
 
 **示例**：
 ```bash
@@ -92,19 +94,106 @@ export CAS_PUBLIC_KEY_PATH=/etc/xet/hub-public-key.pem
 export CAS_TRUSTED_KIDS=hub-key-1,hub-key-2
 ```
 
-### 状态数据库
+### 转换管道设置
 
 | 环境变量 | 描述 | 默认值 | 必需 |
 |---------|------|--------|------|
-| `CAS_STATE_DB_PATH` | SQLite 状态数据库路径 | `/tmp/xet-state.db` | 否 |
+| `XET_CONVERSION_ENABLED` | 启用自动转换 LFS blob 为 xorb/shard 格式 | `true` | 否 |
+| `XET_CONVERSION_SCHEME` | 压缩方案（none/lz4/bg4lz4） | `lz4` | 否 |
+| `XET_DELETE_RAW_AFTER_CONVERSION` | 转换成功后删除原始 blob（节省存储空间） | `true` | 否 |
+| `XET_MIN_CONVERSION_SIZE` | 最小转换文件大小（字节），小于此值的文件保持原始格式 | `1024` (1KB) | 否 |
+| `XET_MAX_CONVERSION_SIZE` | 最大转换文件大小（字节），大于此值的文件保持原始格式以防止 OOM | `536870912` (512MB) | 否 |
 
 **说明**：
-- 状态数据库跟踪 blob 的存储状态（RawOnly/XetOnly）
-- 建议使用 SSD 存储以获得最佳性能
+- 转换管道自动将上传的 LFS blob 转换为 xorb+shard 格式，实现全局 chunk 级去重
+- `XET_CONVERSION_SCHEME` 支持三种压缩方案：
+  - `none`: 不压缩
+  - `lz4`: LZ4 压缩（推荐，平衡速度和压缩率）
+  - `bg4lz4`: ByteGrouping4LZ4 压缩（更高压缩率，但速度较慢）
+- 转换过程会加载整个文件到内存进行 CDC 分块，因此 `XET_MAX_CONVERSION_SIZE` 用于防止大文件导致 OOM
+- 建议生产环境保持 `XET_DELETE_RAW_AFTER_CONVERSION=true` 以节省 50% 存储空间
 
 **示例**：
 ```bash
-export CAS_STATE_DB_PATH=/var/lib/xet/state.db
+# 启用转换管道（默认）
+export XET_CONVERSION_ENABLED=true
+export XET_CONVERSION_SCHEME=lz4
+export XET_DELETE_RAW_AFTER_CONVERSION=true
+
+# 调整转换大小限制
+export XET_MIN_CONVERSION_SIZE=2048        # 2KB
+export XET_MAX_CONVERSION_SIZE=1073741824  # 1GB
+```
+
+### 垃圾回收设置
+
+| 环境变量 | 描述 | 默认值 | 必需 |
+|---------|------|--------|------|
+| `GC_ENABLED` | 启用后台垃圾回收任务 | `false` | 否 |
+| `GC_INTERVAL_SECONDS` | GC 运行间隔（秒） | `3600` (1 小时) | 否 |
+| `GC_GRACE_PERIOD_SECONDS` | 新上传 blob 的宽限期（秒），在此期间不会被删除 | `600` (10 分钟) | 否 |
+| `GC_DRY_RUN` | 试运行模式，只报告统计信息但不实际删除 | `true` | 否 |
+| `GC_HUB_BASE_URL` | Hub API 服务器 URL，用于查询被引用的哈希列表 | `http://localhost:8080` | 否 |
+| `GC_HUB_INTERNAL_TOKEN` | Hub 内部认证令牌，用于访问 /internal/* 端点 | 空 | 是* |
+
+**说明**：
+- GC 定期扫描存储后端，查找不再被任何文件引用的孤立 blob 并删除
+- `GC_GRACE_PERIOD_SECONDS` 防止竞态条件：blob 已上传但 commit 尚未写入文件树时，blob 不应被删除
+- `GC_DRY_RUN=true` 时，GC 只会记录将删除哪些 blob，但不会实际删除，适合初次部署时测试
+- `GC_HUB_INTERNAL_TOKEN` 需要 Hub 端生成具有 `internal` scope 的令牌
+- 建议生产环境设置 `GC_DRY_RUN=false` 前先以试运行模式观察几天
+
+**示例**：
+```bash
+# 启用 GC（生产环境）
+export GC_ENABLED=true
+export GC_INTERVAL_SECONDS=3600
+export GC_GRACE_PERIOD_SECONDS=600
+export GC_DRY_RUN=false
+export GC_HUB_BASE_URL=http://localhost:8080
+export GC_HUB_INTERNAL_TOKEN=hf_xxx_internal_token
+
+# 试运行模式（测试）
+export GC_ENABLED=true
+export GC_DRY_RUN=true
+```
+
+### 索引持久化设置
+
+| 环境变量 | 描述 | 默认值 | 必需 |
+|---------|------|--------|------|
+| `XET_INDEX_PERSIST` | 启用元数据索引持久化到 SQLite | `false` | 否 |
+| `XET_INDEX_DB_PATH` | 索引数据库文件路径 | `./data/metadata_index.db` | 否 |
+
+**说明**：
+- 启用持久化后，MetadataIndex 会保存到 SQLite 数据库，避免每次重启时扫描所有 shard 重建索引
+- 禁用时（默认），每次启动都会扫描存储后端中的所有 shard 文件来重建内存索引
+- 对于大型部署（数万个 shard），启用持久化可以显著减少启动时间
+- 数据库文件建议使用 SSD 存储以获得最佳性能
+
+**示例**：
+```bash
+# 启用索引持久化
+export XET_INDEX_PERSIST=true
+export XET_INDEX_DB_PATH=/var/lib/xet/metadata_index.db
+```
+
+### 完整性验证设置
+
+| 环境变量 | 描述 | 默认值 | 必需 |
+|---------|------|--------|------|
+| `XET_VERIFY_DOWNLOAD_INTEGRITY` | 启用 LFS 下载时的 SHA-256 完整性校验 | `false` | 否 |
+
+**说明**：
+- 启用后，服务器在发送 LFS 文件前会计算 SHA-256 哈希并验证与 OID 匹配
+- 可以检测存储损坏（bit rot），但会增加 CPU 开销
+- 对于可信存储后端（本地文件系统、私有 S3），可以禁用以获得最佳性能
+- 对于不可信存储或高安全性要求场景，建议启用
+
+**示例**：
+```bash
+# 启用下载完整性验证
+export XET_VERIFY_DOWNLOAD_INTEGRITY=true
 ```
 
 ---
@@ -176,11 +265,11 @@ export HUB_SQLITE_PATH=/var/lib/xet/hub-metadata.db
 
 | 环境变量 | 描述 | 默认值 | 必需 |
 |---------|------|--------|------|
-| `CAS_BASE_URL` | CAS 服务器 URL | `http://localhost:3000` | 是 |
+| `CAS_BASE_URL` | CAS 服务器 URL | `http://localhost:8081` | 是 |
 | `HUB_CAS_TIMEOUT_SECS` | CAS 请求超时（秒） | `30` | 否 |
 
 **说明**：
-- `CAS_BASE_URL` 指向 CAS Server 的内部 URL
+- `CAS_BASE_URL` 指向 CAS Server 的内部 URL，默认端口为 8081（与 CAS Server 默认端口一致）
 - `HUB_CAS_TIMEOUT_SECS` 控制 Hub 到 CAS 的请求超时
 
 **示例**：
@@ -196,18 +285,60 @@ export HUB_CAS_TIMEOUT_SECS=60
 | `HUB_DATA_DIR` | Hub 数据目录 | `./data` | 否 |
 | `HUB_INLINE_THRESHOLD` | 内联文件阈值（字节） | `1048576` (1MB) | 否 |
 | `HUB_LFS_THRESHOLD` | LFS 文件阈值（字节） | `10485760` (10MB) | 否 |
+| `HUB_UPLOAD_TEMP_DIR` | 上传临时文件目录 | `/tmp/hub-uploads` | 否 |
+| `HUB_MAX_UPLOAD_SIZE` | 最大上传文件大小（字节） | `536870912` (512MB) | 否 |
 
 **说明**：
-- `HUB_INLINE_THRESHOLD`: 小于此值的文件内联在 commit 中
-- `HUB_LFS_THRESHOLD`: 大于此值的文件使用 Xet 路径（分块/去重）
-- 介于两者之间的文件使用 LFS 路径（原始字节存储）
+- `HUB_INLINE_THRESHOLD`: 小于此值的文件内联在 commit 中（regular 模式）
+- `HUB_LFS_THRESHOLD`: 大于此值的文件使用 LFS 路径（lfs 模式）
+- `HUB_UPLOAD_TEMP_DIR`: 流式上传时的临时文件存储目录，建议使用 SSD
+- `HUB_MAX_UPLOAD_SIZE`: 单个文件的最大上传大小限制
 
 **示例**：
 ```bash
 export HUB_DATA_DIR=/var/lib/xet/hub-data
 export HUB_INLINE_THRESHOLD=2097152  # 2MB
 export HUB_LFS_THRESHOLD=20971520    # 20MB
+export HUB_UPLOAD_TEMP_DIR=/fast-ssd/hub-uploads
+export HUB_MAX_UPLOAD_SIZE=1073741824  # 1GB
 ```
+
+### 配置文件支持
+
+Hub API 支持通过 TOML 文件进行配置。使用 `HUB_CONFIG_FILE` 环境变量指定配置文件路径：
+
+```bash
+export HUB_CONFIG_FILE=/etc/xet/hub-config.toml
+```
+
+配置文件示例：
+```toml
+[server]
+host = "0.0.0.0"
+port = 8080
+public_base_url = "https://hub.example.com"
+
+[auth]
+private_key_path = "/etc/xet/hub-private-key.pem"
+kid = "hub-key-1"
+token_ttl_seconds = 3600
+
+[metadata]
+sqlite_path = "/var/lib/xet/hub-metadata.db"
+
+[cas]
+base_url = "http://localhost:8081"
+internal_timeout_seconds = 30
+
+[storage]
+data_dir = "/var/lib/xet/hub-data"
+inline_threshold_bytes = 1048576
+lfs_threshold_bytes = 10485760
+upload_temp_dir = "/fast-ssd/hub-uploads"
+max_upload_size = 536870912
+```
+
+**优先级**：环境变量 > 配置文件 > 默认值
 
 ---
 
@@ -226,7 +357,6 @@ export XET_STORAGE_BACKEND=local
 export XET_LOCAL_PATH=./data/cas-storage
 export CAS_PUBLIC_KEY_PATH=./keys/hub-public-key.pem
 export CAS_TRUSTED_KIDS=dev-key-1
-export CAS_STATE_DB_PATH=./data/cas-state.db
 
 # Hub API
 export HUB_HOST=127.0.0.1
@@ -254,7 +384,6 @@ export XET_LOCAL_PATH=/data/xet-storage
 export XET_UPLOAD_TEMP_DIR=/fast-ssd/xet-uploads
 export CAS_PUBLIC_KEY_PATH=/etc/xet/hub-public-key.pem
 export CAS_TRUSTED_KIDS=hub-key-1,hub-key-2
-export CAS_STATE_DB_PATH=/var/lib/xet/state.db
 
 # Hub API
 export HUB_HOST=0.0.0.0
@@ -286,7 +415,6 @@ export XET_S3_REGION=us-east-1
 export XET_S3_ENDPOINT=https://s3.amazonaws.com
 export CAS_PUBLIC_KEY_PATH=/etc/xet/hub-public-key.pem
 export CAS_TRUSTED_KIDS=hub-key-1
-export CAS_STATE_DB_PATH=/var/lib/xet/state.db
 
 # Hub API（同上）
 export HUB_HOST=0.0.0.0

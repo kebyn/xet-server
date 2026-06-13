@@ -69,7 +69,7 @@ Xet Server 采用**双进程架构**，由两个独立的服务组成：
 - 数据库：SQLite（元数据存储）
 
 **CAS Server** (`xet-server`)
-- 端口：8080（默认，生产环境建议设置为 8081 避免冲突）
+- 端口：8081（默认，避免与 Hub API 端口 8080 冲突）
 - 功能：内容寻址存储引擎
 - 职责：xorb/shard 存储、文件重构、去重、LFS 对象管理
 - 数据库：SQLite（状态跟踪）
@@ -116,7 +116,7 @@ openssl pkey -in private_key.pem -pubout -out public_key.pem
 
 **CAS Server 配置**：
 ```bash
-# 服务器设置（注意：默认端口 8080 会与 Hub 冲突，建议改为 8081）
+# 服务器设置（默认端口 8081，避免与 Hub API 端口 8080 冲突）
 export XET_HOST=0.0.0.0
 export XET_PORT=8081
 export XET_PUBLIC_BASE_URL=http://localhost:8081
@@ -129,9 +129,6 @@ export XET_LOCAL_PATH=/data/xet-storage
 # 认证设置
 export CAS_PUBLIC_KEY_PATH=/path/to/public_key.pem
 export CAS_TRUSTED_KIDS=hub-key-1
-
-# 状态数据库
-export CAS_STATE_DB_PATH=/data/xet-state.db
 ```
 
 **Hub API 配置**：
@@ -275,7 +272,7 @@ hf download my-org/my-repo model.bin --local-dir ./downloaded
 | 变量名 | 描述 | 默认值 |
 |--------|------|--------|
 | `XET_HOST` | 服务器绑定地址 | `127.0.0.1` |
-| `XET_PORT` | 服务器端口 | `8080` |
+| `XET_PORT` | 服务器端口 | `8081` |
 | `XET_PUBLIC_BASE_URL` | 公共访问 URL | `http://{host}:{port}` |
 | `XET_MAX_BODY_SIZE_MB` | 最大请求体大小（MB） | `2048` |
 | `XET_STORAGE_BACKEND` | 存储后端类型 | `local` |
@@ -283,6 +280,8 @@ hf download my-org/my-repo model.bin --local-dir ./downloaded
 | `XET_S3_BUCKET` | S3 存储桶名称（使用 s3 后端时必需） | - |
 | `XET_S3_REGION` | S3 区域 | - |
 | `XET_S3_ENDPOINT` | S3 端点 URL | - |
+| `XET_UPLOAD_TEMP_DIR` | 上传临时文件目录 | 自动 |
+| `XET_VERIFY_DOWNLOAD_INTEGRITY` | 启用下载完整性校验 | `false` |
 
 > **⚠️ 重要：S3 Lifecycle Rules 配置**
 >
@@ -313,8 +312,7 @@ hf download my-org/my-repo model.bin --local-dir ./downloaded
 >
 > 如果不配置此规则，进程崩溃或网络中断会导致孤立的 multipart 上传，持续产生存储费用。
 | `CAS_PUBLIC_KEY_PATH` | Ed25519 公钥路径 | `/tmp/xet-public-key.pem` |
-| `CAS_TRUSTED_KIDS` | 受信任的密钥 ID 列表 | `test-kid` |
-| `CAS_STATE_DB_PATH` | 状态数据库路径 | `/tmp/xet-state.db` |
+| `CAS_TRUSTED_KIDS` | 受信任的密钥 ID 列表 | `hub-key-1` |
 
 ### Hub API 环境变量
 
@@ -327,7 +325,13 @@ hf download my-org/my-repo model.bin --local-dir ./downloaded
 | `HUB_KID` | 密钥标识符 | `hub-key-1` |
 | `HUB_TOKEN_TTL_SECONDS` | 令牌有效期（秒） | `3600` |
 | `HUB_SQLITE_PATH` | 元数据数据库路径 | `hub.db` |
-| `CAS_BASE_URL` | CAS 服务器 URL | `http://localhost:3000` |
+| `CAS_BASE_URL` | CAS 服务器 URL | `http://localhost:8081` |
+| `HUB_CAS_TIMEOUT_SECS` | CAS 请求超时（秒） | `30` |
+| `HUB_DATA_DIR` | Hub 数据目录 | `./data` |
+| `HUB_INLINE_THRESHOLD` | 内联文件阈值（字节） | `1048576` (1MB) |
+| `HUB_LFS_THRESHOLD` | LFS 文件阈值（字节） | `10485760` (10MB) |
+| `HUB_UPLOAD_TEMP_DIR` | 上传临时文件目录 | `/tmp/hub-uploads` |
+| `HUB_MAX_UPLOAD_SIZE` | 最大上传文件大小（字节） | `536870912` (512MB) |
 
 详细文档：[Configuration Guide](docs/configuration.md)
 
