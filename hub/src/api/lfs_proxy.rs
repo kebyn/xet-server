@@ -205,15 +205,8 @@ fn validate_proxy_token(
         return false;
     }
 
-    // Check expiration (not checked by verify_proxy_token)
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    if claims.exp < now {
-        tracing::error!("validate_proxy_token: token expired: exp={} now={}", claims.exp, now);
-        return false;
-    }
+    // I3 FIX: Expiration is already checked by verify_proxy_token -> verify_token_inner.
+    // Removed duplicate expiration check.
 
     // Check OID matches
     if claims.oid.as_deref() != Some(expected_oid) {
@@ -567,7 +560,7 @@ mod tests {
 
         let mut csprng = OsRng;
         let signing_key = SigningKey::generate(&mut csprng);
-        let signer = XetSigner::new(signing_key, "test-key", 3600);
+        let signer = XetSigner::new(signing_key, "test-key", 3600, 300);
 
         // Use a valid 64-character hex OID
         let valid_oid = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
@@ -609,7 +602,7 @@ mod tests {
 
         let mut csprng = OsRng;
         let signing_key = SigningKey::generate(&mut csprng);
-        let signer = XetSigner::new(signing_key, "test-key", 3600);
+        let signer = XetSigner::new(signing_key, "test-key", 3600, 300);
 
         let mut response = json!({
             "objects": [
@@ -641,7 +634,7 @@ mod tests {
 
         let mut csprng = OsRng;
         let signing_key = SigningKey::generate(&mut csprng);
-        let signer = XetSigner::new(signing_key, "test-key", 3600);
+        let signer = XetSigner::new(signing_key, "test-key", 3600, 300);
 
         // Use valid 64-character hex OIDs
         let oid1 = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
@@ -691,7 +684,7 @@ mod tests {
 
         let mut csprng = OsRng;
         let signing_key = SigningKey::generate(&mut csprng);
-        XetSigner::new(signing_key, "test-key", 3600)
+        XetSigner::new(signing_key, "test-key", 3600, 300)
     }
 
     #[test]
@@ -803,11 +796,11 @@ mod tests {
         // Create two signers with different key IDs
         let mut csprng = OsRng;
         let signing_key1 = SigningKey::generate(&mut csprng);
-        let signer1 = XetSigner::new(signing_key1, "key-id-1", 3600);
+        let signer1 = XetSigner::new(signing_key1, "key-id-1", 3600, 300);
 
         let mut csprng2 = OsRng;
         let signing_key2 = SigningKey::generate(&mut csprng2);
-        let signer2 = XetSigner::new(signing_key2, "key-id-2", 3600);
+        let signer2 = XetSigner::new(signing_key2, "key-id-2", 3600, 300);
 
         // Sign token with signer1
         let (token, _) = signer1.sign_proxy("testuser", "abc123def456", "upload", "", "");

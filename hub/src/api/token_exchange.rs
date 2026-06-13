@@ -223,7 +223,7 @@ mod tests {
         let token_store = std::sync::Arc::new(TokenStore::in_memory().await.unwrap());
         let mut csprng = OsRng;
         let signing_key = SigningKey::generate(&mut csprng);
-        let xet_signer = std::sync::Arc::new(XetSigner::new(signing_key, "test-key", 3600));
+        let xet_signer = std::sync::Arc::new(XetSigner::new(signing_key, "test-key", 3600, 300));
         let metadata: std::sync::Arc<dyn MetadataStore> = std::sync::Arc::new(
             SqliteMetadataStore::in_memory().await.unwrap()
         );

@@ -26,7 +26,7 @@ async fn setup_test_env() -> TestEnv {
     // Create test signing key
     let mut csprng = OsRng;
     let signing_key = SigningKey::generate(&mut csprng);
-    let xet_signer = Arc::new(XetSigner::new(signing_key, "test-key", 3600));
+    let xet_signer = Arc::new(XetSigner::new(signing_key, "test-key", 3600, 300));
 
     // Create in-memory metadata store
     let metadata: Arc<dyn MetadataStore> = Arc::new(SqliteMetadataStore::in_memory().await.unwrap());
@@ -425,4 +425,28 @@ async fn test_hub_config_no_dead_fields() {
 async fn test_hub_config_rate_limit_default() {
     let config = HubConfig::default();
     assert_eq!(config.server.rate_limit_rpm, 120, "Default Hub rate limit should be 120 RPM");
+}
+
+#[actix_web::test]
+async fn test_hub_config_proxy_token_ttl_default() {
+    let config = HubConfig::default();
+    assert_eq!(config.auth.proxy_token_ttl_seconds, 300);
+}
+
+#[actix_web::test]
+async fn test_sign_proxy_uses_configured_ttl() {
+    use ed25519_dalek::SigningKey;
+    use rand::rngs::OsRng;
+    use hub_api::auth::xet_signer::XetSigner;
+
+    let mut csprng = OsRng;
+    let signing_key = SigningKey::generate(&mut csprng);
+    let signer = XetSigner::new(signing_key, "test-key", 3600, 600);
+
+    let (_token, exp) = signer.sign_proxy("user", "oid123", "upload", "repo", "model");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    assert!(exp >= now + 598 && exp <= now + 602, "Proxy token TTL should use configured 600s value");
 }

@@ -16,7 +16,7 @@ use std::sync::Arc;
 fn setup_lfs_test_env() -> (Arc<XetSigner>, Arc<CasClient>, HubConfig) {
     let mut csprng = OsRng;
     let signing_key = SigningKey::generate(&mut csprng);
-    let xet_signer = Arc::new(XetSigner::new(signing_key, "test-key", 3600));
+    let xet_signer = Arc::new(XetSigner::new(signing_key, "test-key", 3600, 300));
     let cas_client = Arc::new(CasClient::new(&CasSettings::default()));
     let config = HubConfig::default();
     (xet_signer, cas_client, config)
@@ -253,7 +253,7 @@ async fn test_streaming_lfs_upload_success_via_mock_cas() {
 
     let mut csprng = OsRng;
     let signing_key = SigningKey::generate(&mut csprng);
-    let xet_signer = Arc::new(XetSigner::new(signing_key, "test-key", 3600));
+    let xet_signer = Arc::new(XetSigner::new(signing_key, "test-key", 3600, 300));
     let cas_client = Arc::new(CasClient::new(&CasSettings {
         base_url: cas_url,
         internal_timeout_seconds: 30,
@@ -296,7 +296,7 @@ async fn test_streaming_lfs_upload_hash_mismatch_returns_400() {
 
     let mut csprng = OsRng;
     let signing_key = SigningKey::generate(&mut csprng);
-    let xet_signer = Arc::new(XetSigner::new(signing_key, "test-key", 3600));
+    let xet_signer = Arc::new(XetSigner::new(signing_key, "test-key", 3600, 300));
     let cas_client = Arc::new(CasClient::new(&CasSettings {
         base_url: cas_url,
         internal_timeout_seconds: 30,
@@ -344,7 +344,7 @@ async fn test_streaming_lfs_upload_oversized_returns_413() {
 
     let mut csprng = OsRng;
     let signing_key = SigningKey::generate(&mut csprng);
-    let xet_signer = Arc::new(XetSigner::new(signing_key, "test-key", 3600));
+    let xet_signer = Arc::new(XetSigner::new(signing_key, "test-key", 3600, 300));
     let cas_client = Arc::new(CasClient::new(&CasSettings {
         base_url: cas_url,
         internal_timeout_seconds: 30,
