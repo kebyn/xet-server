@@ -68,14 +68,14 @@ where
     }
 }
 
-/// Extract token from Authorization header (Bearer/Basic) or query parameter (?token=...).
+/// Extract token from Authorization header (Bearer/Basic).
 ///
-/// **Security note:** Query parameter tokens leak in server logs, proxy logs (nginx/CloudFlare),
-/// browser history, and referrer headers. We support them as a fallback because some LFS clients
-/// (e.g. huggingface_hub's python-httpx) do not forward Authorization headers from batch responses.
-/// This is an acceptable tradeoff because proxy tokens are short-lived (5 min) and OID-bound.
+/// I5 fix: Query parameter tokens have been removed from this function to prevent
+/// token leakage in server logs, proxy logs, browser history, and referrer headers.
+/// Query parameter tokens are only supported in `extract_proxy_token()` for LFS
+/// redirect scenarios where proxy tokens (short-lived, OID-bound) are used.
 fn extract_token(req: &HttpRequest) -> Option<String> {
-    // Try Authorization header first
+    // Try Authorization header
     if let Some(auth) = req.headers().get("Authorization") {
         let auth_str = auth.to_str().ok()?;
 
@@ -95,26 +95,6 @@ fn extract_token(req: &HttpRequest) -> Option<String> {
         }
     }
 
-    // Fall back to query parameter token (?token=...)
-    // WARNING: Query parameter tokens leak in server logs, proxy logs, browser history,
-    // and referrer headers. Log a warning for security auditing.
-    if let Some(query) = req.uri().query() {
-        for pair in query.split('&') {
-            if let Some((key, value)) = pair.split_once('=')
-                && key == "token" {
-                    tracing::warn!(
-                        "Token received via query parameter - this leaks in logs. \
-                        Client should use Authorization header instead. URI: {}",
-                        req.uri().path()
-                    );
-                    // URL-decode the token value to handle special characters
-                    if let Ok(decoded) = percent_encoding::percent_decode_str(value).decode_utf8() {
-                        return Some(decoded.into_owned());
-                    }
-                }
-        }
-    }
-
     None
 }
 
@@ -122,6 +102,9 @@ fn extract_token(req: &HttpRequest) -> Option<String> {
 /// Prefers query parameter token (?token=proxy_xxx) over Authorization header,
 /// because clients following 302 redirects from /resolve/ send their user token
 /// in the Authorization header, but the proxy token is in the URL query param.
+///
+/// Security: Query parameter tokens leak in logs. Proxy tokens are acceptable here
+/// because they are short-lived (5 min TTL) and OID-bound, limiting blast radius.
 fn extract_proxy_token(req: &HttpRequest) -> Option<String> {
     // First try query parameter (this is where proxy tokens are placed in redirects)
     if let Some(query) = req.uri().query() {
@@ -131,6 +114,11 @@ fn extract_proxy_token(req: &HttpRequest) -> Option<String> {
                     if let Ok(decoded) = percent_encoding::percent_decode_str(value).decode_utf8() {
                         let token = decoded.into_owned();
                         if token.starts_with("proxy_") {
+                            // I5 fix: Structured audit log for query parameter token usage
+                            tracing::info!(
+                                path = %req.uri().path(),
+                                "Proxy token received via query parameter (short-lived, OID-bound)"
+                            );
                             return Some(token);
                         }
                     }
@@ -427,6 +415,10 @@ pub async fn lfs_upload(
 
     let temp_path = temp_file.path().to_path_buf();
 
+    // I4 fix: Detach NamedTempFile ownership — we manage cleanup explicitly on all exit paths.
+    // This prevents Drop from racing with our tokio::fs::remove_file calls.
+    let _ = temp_file.keep();
+
     // Stream payload to temp file while computing hash
     use sha2::{Sha256, Digest};
     use tokio::io::AsyncWriteExt;
@@ -453,7 +445,8 @@ pub async fn lfs_upload(
             Ok(c) => c,
             Err(e) => {
                 tracing::error!("Error reading payload: {}", e);
-                // Temp file will be cleaned up by Drop
+                // I4 fix: Explicit temp file cleanup on error path
+                let _ = tokio::fs::remove_file(&temp_path).await;
                 return HttpResponse::BadRequest().json(serde_json::json!({
                     "error": "Error reading upload data",
                     "error_type": "ClientError"
@@ -464,7 +457,8 @@ pub async fn lfs_upload(
         total_bytes += chunk.len() as u64;
         if total_bytes > max_upload_size {
             tracing::warn!("Upload too large: {} bytes (max {})", total_bytes, max_upload_size);
-            // Temp file will be cleaned up by Drop
+            // I4 fix: Explicit temp file cleanup on error path
+            let _ = tokio::fs::remove_file(&temp_path).await;
             return HttpResponse::PayloadTooLarge().json(serde_json::json!({
                 "error": format!("Upload too large ({} bytes), max allowed: {} bytes", total_bytes, max_upload_size),
                 "error_type": "PayloadTooLarge"
@@ -474,6 +468,8 @@ pub async fn lfs_upload(
         hasher.update(&chunk);
         if let Err(e) = file_writer.write_all(&chunk).await {
             tracing::error!("Failed to write to temp file: {}", e);
+            // I4 fix: Explicit temp file cleanup on error path
+            let _ = tokio::fs::remove_file(&temp_path).await;
             return HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": "Failed to write upload data",
                 "error_type": "InternalError"
@@ -484,6 +480,8 @@ pub async fn lfs_upload(
     // Flush and close file
     if let Err(e) = file_writer.flush().await {
         tracing::error!("Failed to flush temp file: {}", e);
+        // I4 fix: Explicit temp file cleanup on error path
+        let _ = tokio::fs::remove_file(&temp_path).await;
         return HttpResponse::InternalServerError().json(serde_json::json!({
             "error": "Failed to finalize upload data",
             "error_type": "InternalError"

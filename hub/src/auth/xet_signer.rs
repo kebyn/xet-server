@@ -279,6 +279,14 @@ impl XetSigner {
     pub fn verify_xet_token(&self, token: &str) -> Option<XetClaims> {
         self.verify_token_inner(token, "xet_")
     }
+
+    /// Verify an internal token's signature and decode its claims
+    /// Internal tokens use "internal_" prefix and are for Hub-to-CAS communication
+    /// Returns Some(claims) if the signature is valid and claims can be decoded, None otherwise
+    #[must_use = "the result of token verification should be checked"]
+    pub fn verify_internal_token(&self, token: &str) -> Option<XetClaims> {
+        self.verify_token_inner(token, "internal_")
+    }
 }
 
 #[cfg(test)]

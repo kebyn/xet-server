@@ -40,7 +40,12 @@ impl ServerSettings {
     /// Trailing slashes are stripped to prevent malformed URLs when callers append paths.
     ///
     /// # Panics
-    /// Panics if `public_base_url` is set but not a valid URL.
+    /// Panics if `public_base_url` is set and either:
+    /// - The URL is not syntactically valid (e.g. malformed scheme or path)
+    /// - The URL is missing a host component (e.g. `"http://"`)
+    ///
+    /// This fail-fast behavior ensures misconfiguration is caught at startup
+    /// rather than at first request.
     pub fn base_url(&self) -> String {
         let url = self.public_base_url.clone()
             .unwrap_or_else(|| format!("http://{}:{}", self.host, self.port));

@@ -1,5 +1,5 @@
 use actix_web::{web, App, HttpServer, HttpResponse, middleware::Logger};
-use actix_governor::{Governor, GovernorConfigBuilder, GlobalKeyExtractor};
+use actix_governor::{Governor, GovernorConfigBuilder};
 use std::sync::Arc;
 
 use crate::auth::token_store::TokenStore;
@@ -36,12 +36,17 @@ pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
     let cas_client = Arc::new(CasClient::new(&config.cas));
 
     // Optional: verify CAS connectivity at startup (async, non-blocking)
+    // M5 fix: Add timeout to prevent health check from hanging indefinitely
     let cas_health = cas_client.clone();
     tokio::spawn(async move {
-        match cas_health.health_check().await {
-            Ok(true) => tracing::info!("CAS health check passed"),
-            Ok(false) => tracing::warn!("CAS health check returned non-success. Verify CAS is running."),
-            Err(e) => tracing::warn!("CAS health check failed: {}. Hub and CAS may not be able to communicate.", e),
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            cas_health.health_check()
+        ).await {
+            Ok(Ok(true)) => tracing::info!("CAS health check passed"),
+            Ok(Ok(false)) => tracing::warn!("CAS health check returned non-success. Verify CAS is running."),
+            Ok(Err(e)) => tracing::warn!("CAS health check failed: {}. Hub and CAS may not be able to communicate.", e),
+            Err(_) => tracing::error!("CAS health check timed out after 10 seconds"),
         }
     });
 
@@ -70,12 +75,12 @@ pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
 
     // Configure rate limiting for public API endpoints.
     // Internal endpoints (/internal/*) and health check bypass rate limiting.
-    // Allow configured requests per minute per IP (default 120, higher than CAS since Hub serves more API calls).
+    // M2 fix: Use default PeerIpKeyExtractor for per-IP rate limiting (not global).
+    // GovernorConfigBuilder uses PeerIpKeyExtractor by default in actix-governor 0.5.
     let rpm = config.server.rate_limit_rpm;
     let governor_conf = GovernorConfigBuilder::default()
-        .per_second(60)  // 60 seconds window
+        .per_second(60)  // 60-second refill window
         .burst_size(rpm) // configured requests per window
-        .key_extractor(GlobalKeyExtractor)
         .finish()
         .expect("Failed to configure rate limiter");
 

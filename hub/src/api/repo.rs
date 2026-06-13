@@ -27,12 +27,16 @@ fn repo_to_json(repo: &Repo) -> serde_json::Value {
     })
 }
 
-/// Convert Unix timestamp to ISO 8601 datetime string
+/// Convert Unix timestamp to ISO 8601 datetime string.
+/// M6 fix: Log warning on invalid timestamp instead of silently returning epoch.
 fn chrono_datetime(timestamp: i64) -> String {
-    DateTime::from_timestamp(timestamp, 0)
-        .unwrap_or_default()
-        .format("%Y-%m-%dT%H:%M:%SZ")
-        .to_string()
+    match DateTime::from_timestamp(timestamp, 0) {
+        Some(dt) => dt.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+        None => {
+            tracing::warn!("Invalid Unix timestamp: {} (out of range for DateTime)", timestamp);
+            "1970-01-01T00:00:00Z".to_string()
+        }
+    }
 }
 
 /// Internal helper to create a repo

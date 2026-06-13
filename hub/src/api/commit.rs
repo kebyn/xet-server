@@ -181,7 +181,8 @@ async fn handle_commit(
                 return HttpResponse::Conflict().json(serde_json::json!({
                     "error": "Parent revision does not match current HEAD",
                     "error_type": "ConflictError",
-                    "currentHead": head
+                    "currentHead": head,
+                    "note": "This is a pre-check for early error detection. The authoritative check happens atomically during commit."
                 }));
             }
         }
@@ -190,7 +191,8 @@ async fn handle_commit(
             return HttpResponse::Conflict().json(serde_json::json!({
                 "error": "Parent revision specified but repository has no HEAD",
                 "error_type": "ConflictError",
-                "currentHead": null
+                "currentHead": null,
+                "note": "This is a pre-check. The authoritative check happens atomically during commit."
             }));
         }
         (None, Some(head)) => {
@@ -199,7 +201,8 @@ async fn handle_commit(
             return HttpResponse::Conflict().json(serde_json::json!({
                 "error": format!("No parent specified but repository already has HEAD: {}", head),
                 "error_type": "ConflictError",
-                "currentHead": head
+                "currentHead": head,
+                "note": "This is a pre-check. The authoritative check happens atomically during commit."
             }));
         }
         (None, None) => {

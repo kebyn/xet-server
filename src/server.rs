@@ -1,7 +1,7 @@
 //! HTTP server implementation
 
 use actix_web::{web, App, HttpServer, HttpResponse, middleware::{Logger, from_fn}};
-use actix_governor::{Governor, GovernorConfigBuilder, GlobalKeyExtractor};
+use actix_governor::{Governor, GovernorConfigBuilder};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -88,12 +88,12 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
     // Configure rate limiting for public endpoints only.
     // Internal endpoints (/internal/*) bypass rate limiting to avoid
     // disrupting Hub-to-CAS communication.
-    // Allow `rate_limit_rpm` requests per minute per IP address.
+    // M2 fix: Use default PeerIpKeyExtractor for per-IP rate limiting (not global).
+    // GovernorConfigBuilder uses PeerIpKeyExtractor by default in actix-governor 0.5.
     let rpm = config.server.rate_limit_rpm;
     let governor_conf = GovernorConfigBuilder::default()
-        .per_second(60)  // 60 seconds window
-        .burst_size(rpm)   // rpm requests per window
-        .key_extractor(GlobalKeyExtractor)
+        .per_second(60)  // 60-second refill window
+        .burst_size(rpm) // rpm requests per window
         .finish()
         .expect("Failed to configure rate limiter");
 

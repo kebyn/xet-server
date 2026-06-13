@@ -167,8 +167,16 @@ pub fn test_token_for_keypair(kp: &KeyPair, scope: &str) -> String {
         .unwrap()
         .as_secs();
 
+    // I2 fix: When scope is "internal", create a proper internal token
+    // that matches is_internal_token() validation (sub="hub-service", token_type="internal")
+    let (sub, token_type) = if scope == "internal" {
+        ("hub-service".to_string(), "internal".to_string())
+    } else {
+        ("test-user".to_string(), "user".to_string())
+    };
+
     let claims = XetClaims {
-        sub: "test-user".to_string(),
+        sub,
         scope: scope.to_string(),
         repo_id: "test/repo".to_string(),
         repo_type: "model".to_string(),
@@ -176,7 +184,7 @@ pub fn test_token_for_keypair(kp: &KeyPair, scope: &str) -> String {
         exp: now + 3600,
         iat: now,
         kid,
-        token_type: "user".to_string(),
+        token_type,
     };
 
     sign_xet_token(&claims, kp).unwrap()
