@@ -39,6 +39,25 @@ pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
     tracing::info!("Starting Hub API on {}", bind_addr);
     tracing::info!("CAS: {}", config.cas.base_url);
 
+    // Warn about relative paths that depend on process CWD
+    if !std::path::Path::new(&config.auth.private_key_path).is_absolute() {
+        tracing::warn!(
+            "HUB_PRIVATE_KEY_PATH '{}' is a relative path. Resolved to: '{}'. \
+            Consider using an absolute path for production deployments.",
+            config.auth.private_key_path,
+            std::fs::canonicalize(&config.auth.private_key_path)
+                .unwrap_or_else(|_| std::path::PathBuf::from("(not found)"))
+                .display()
+        );
+    }
+    if !std::path::Path::new(&config.metadata.sqlite_path).is_absolute() {
+        tracing::warn!(
+            "HUB_SQLITE_PATH '{}' is a relative path. \
+            Consider using an absolute path (e.g., /var/lib/xet/hub.db) for production deployments.",
+            config.metadata.sqlite_path
+        );
+    }
+
     // Configure rate limiting for public API endpoints.
     // Internal endpoints (/internal/*) and health check bypass rate limiting.
     // Allow configured requests per minute per IP (default 120, higher than CAS since Hub serves more API calls).
