@@ -160,6 +160,16 @@ impl ConversionPipeline {
             let block = &read_buf[..bytes_read];
             chunk_data_buf.extend_from_slice(block);
 
+            // I5 fix: Safety check to prevent unbounded buffer growth if chunker has a bug.
+            // chunk_data_buf should only hold data for the current incomplete chunk.
+            // If it grows beyond expected size (e.g., 2x max chunk size), something is wrong.
+            // Max chunk size is typically ~64KB, so 10MB is a generous safety margin.
+            debug_assert!(
+                chunk_data_buf.len() < 10 * 1024 * 1024,
+                "chunk_data_buf grew unexpectedly large: {} bytes. Possible chunker bug.",
+                chunk_data_buf.len()
+            );
+
             // Get any complete chunks from the streaming chunker
             let new_chunks = streaming_chunker.next_block(block);
 
@@ -222,6 +232,14 @@ impl ConversionPipeline {
 
             chunk_data_buf.drain(..chunk.size);
         }
+
+        // I5 fix: Verify buffer is empty after processing all chunks.
+        // If not empty, it means the chunker didn't emit all chunks (bug).
+        debug_assert!(
+            chunk_data_buf.is_empty(),
+            "chunk_data_buf not empty after finalize: {} bytes remaining. Possible chunker bug.",
+            chunk_data_buf.len()
+        );
 
         info!("Converting OID {}: {} bytes, {} chunks (streaming)", oid, raw_size, num_chunks);
 

@@ -237,7 +237,9 @@ impl Default for ServerConfig {
                 verify_download_integrity: false, // Disabled by default for performance
             },
             auth: AuthConfig {
-                public_key_path: "/tmp/xet-public-key.pem".to_string(),  // Unified with from_env() default
+                // M2 fix: Use /etc/xet instead of /tmp for better security
+                // /tmp is world-writable and vulnerable to symlink attacks
+                public_key_path: "/etc/xet/public-key.pem".to_string(),  // Production default
                 trusted_kids: vec!["hub-key-1".to_string()],  // Changed from "test-kid" to match Hub default
             },
             conversion: ConversionConfig::default(),
@@ -285,8 +287,9 @@ impl ServerConfig {
             .unwrap_or(false);
 
         // CAS-specific auth configuration
+        // M2 fix: Use /etc/xet instead of /tmp for better security
         let public_key_path = std::env::var("CAS_PUBLIC_KEY_PATH")
-            .unwrap_or_else(|_| "/tmp/xet-public-key.pem".to_string());
+            .unwrap_or_else(|_| "/etc/xet/public-key.pem".to_string());
         let trusted_kids = std::env::var("CAS_TRUSTED_KIDS")
             .ok()
             .map(|s| s.split(',').map(|kid| kid.trim().to_string()).collect())

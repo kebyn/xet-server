@@ -127,7 +127,7 @@ xet_eyJhbGciOiJFZDI1NTE5Iiwia2lkIjoiaHViLWtleS0xIiwidHlwIjoiSldUIn0.eyJzdWIiOiJh
 
 **特点**：
 - Ed25519 签名的 JWT
-- 超短期有效（固定 5 分钟）
+- 超短期有效（默认 5 分钟，可通过 `HUB_PROXY_TOKEN_TTL_SECONDS` 配置）
 - 绑定到特定 LFS 对象 ID (`oid`)
 - 绑定到特定操作 (`upload` 或 `download`)
 - scope 为 `lfs-upload` 或 `lfs-download`
@@ -394,7 +394,7 @@ pub fn create_token(&self, username: &str, token_name: &str, scope: &str) -> Res
 
 **短期有效**：
 - CAS tokens 默认 1 小时有效
-- Proxy tokens 固定 5 分钟有效
+- Proxy tokens 默认 5 分钟有效（可通过 `HUB_PROXY_TOKEN_TTL_SECONDS` 配置）
 - 减少令牌泄露的风险
 
 **签名验证**：
@@ -409,14 +409,14 @@ pub fn create_token(&self, username: &str, token_name: &str, scope: &str) -> Res
 ```bash
 # 使用反向代理（推荐）
 nginx/caddy → Hub API (HTTP :8080)
-nginx/caddy → CAS Server (HTTP :8080/8081)
+nginx/caddy → CAS Server (HTTP :8081)
 ```
 
 ### 4. 网络安全
 
 **防火墙规则**：
 - Hub API (8080): 公开访问
-- CAS Server (8080/8081): 限制访问（仅 Hub 和授权客户端）
+- CAS Server (8081): 限制访问（仅 Hub 和授权客户端）
 - Internal API: 仅 Hub 可访问
 
 ## 错误处理

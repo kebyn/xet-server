@@ -153,17 +153,21 @@ pub fn sign_xet_token(claims: &XetClaims, keypair: &KeyPair) -> Result<String, A
 /// Verify a xet token with a specific public key and expected kid
 ///
 /// Checks:
-/// 1. Token format (xet_ prefix, three base64url parts)
+/// 1. Token format (xet_ or internal_ prefix, three base64url parts)
 /// 2. Signature validity
 /// 3. Key ID matches expected kid
 /// 4. Token has not expired
+///
+/// C2 fix: Accept both xet_ and internal_ prefixes for backward compatibility
 pub fn verify_xet_token(
     token: &str,
     public_key: &VerifyingKey,
     expected_kid: &str,
 ) -> Result<XetClaims, AuthError> {
-    // Strip "xet_" prefix
-    let token_body = token.strip_prefix("xet_").ok_or(AuthError::InvalidToken)?;
+    // C2 fix: Strip either "xet_" or "internal_" prefix
+    let token_body = token.strip_prefix("xet_")
+        .or_else(|| token.strip_prefix("internal_"))
+        .ok_or(AuthError::InvalidToken)?;
 
     // Split into three parts
     let parts: Vec<&str> = token_body.split('.').collect();

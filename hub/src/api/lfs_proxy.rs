@@ -1,5 +1,8 @@
 use actix_web::{web, HttpRequest, HttpResponse};
-use futures_util::StreamExt;
+use futures_util::{Stream, StreamExt, TryStreamExt};
+use pin_project::pin_project;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use crate::auth::token_store::TokenStore;
 use crate::auth::xet_signer::XetSigner;
 use crate::cas_client::CasClient;
@@ -9,6 +12,61 @@ use crate::config::HubConfig;
 /// Mirrors CAS-side limit for defense-in-depth — reject oversized batches early
 /// at the Hub rather than forwarding to CAS and returning 502.
 const MAX_BATCH_SIZE: usize = 1000;
+
+/// C3 fix: Stream wrapper that enforces a maximum byte limit during streaming.
+/// This prevents unbounded data transfer even if Content-Length header is missing or incorrect.
+#[pin_project]
+struct MaxBytesStream<S> {
+    #[pin]
+    stream: S,
+    max_bytes: u64,
+    bytes_read: u64,
+}
+
+impl<S, B> MaxBytesStream<S>
+where
+    S: Stream<Item = Result<B, std::io::Error>>,
+    B: AsRef<[u8]>,
+{
+    fn new(stream: S, max_bytes: u64) -> Self {
+        Self {
+            stream,
+            max_bytes,
+            bytes_read: 0,
+        }
+    }
+}
+
+impl<S, B> Stream for MaxBytesStream<S>
+where
+    S: Stream<Item = Result<B, std::io::Error>>,
+    B: AsRef<[u8]>,
+{
+    type Item = Result<B, std::io::Error>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.project();
+
+        match this.stream.poll_next(cx) {
+            Poll::Ready(Some(Ok(chunk))) => {
+                let chunk_len = chunk.as_ref().len() as u64;
+                *this.bytes_read += chunk_len;
+
+                if *this.bytes_read > *this.max_bytes {
+                    Poll::Ready(Some(Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("Stream exceeded maximum size of {} bytes", this.max_bytes),
+                    ))))
+                } else {
+                    Poll::Ready(Some(Ok(chunk)))
+                }
+            }
+            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
 
 /// Extract token from Authorization header (Bearer/Basic) or query parameter (?token=...).
 ///
@@ -480,6 +538,7 @@ pub async fn lfs_download(
     path: web::Path<String>,
     xet_signer: web::Data<std::sync::Arc<XetSigner>>,
     cas_client: web::Data<std::sync::Arc<CasClient>>,
+    config: web::Data<HubConfig>,
 ) -> HttpResponse {
     // Extract token
     let token = match extract_proxy_token(&req) {
@@ -513,15 +572,19 @@ pub async fn lfs_download(
     // Generate internal token for CAS
     let (internal_token, _) = xet_signer.sign_internal();
 
-    // Forward to CAS
-    // I6: Use streaming download to avoid loading entire file into memory
+    // C3 fix: Use streaming download with runtime size enforcement
     match cas_client.proxy_lfs_download_streaming(&oid, &internal_token).await {
         Ok((content_length, resp)) => {
             // Convert reqwest response body to actix-web streaming body
             let stream = resp.bytes_stream();
-            let mapped_stream = stream.map(|result| {
-                result.map_err(|e| actix_web::Error::from(std::io::Error::other(e)))
-            });
+
+            // C3 fix: Wrap stream with MaxBytesStream for runtime size enforcement
+            // This protects against CAS bugs that could cause unbounded data transfer
+            let max_size = config.cas.max_download_size;
+            let limited_stream = MaxBytesStream::new(
+                stream.map(|result| result.map_err(|e| std::io::Error::other(e))),
+                max_size
+            );
 
             let mut builder = HttpResponse::Ok();
             builder.content_type("application/octet-stream");
@@ -530,7 +593,7 @@ pub async fn lfs_download(
                 builder.insert_header(("Content-Length", content_length.to_string()));
             }
 
-            builder.streaming(mapped_stream)
+            builder.streaming(limited_stream.map_err(|e| actix_web::Error::from(e)))
         }
         Err(e) => match e {
             crate::error::HubError::NotFound(_) => {

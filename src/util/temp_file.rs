@@ -36,20 +36,10 @@ impl TempFile {
             ))
         })?;
 
-        // Generate a unique filename using timestamp + random suffix
-        let unique_id = format!(
-            "{}-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos(),
-            // Use a simple counter-based approach since we don't have a UUID dep
-            {
-                use std::sync::atomic::{AtomicU64, Ordering};
-                static COUNTER: AtomicU64 = AtomicU64::new(0);
-                COUNTER.fetch_add(1, Ordering::Relaxed)
-            }
-        );
+        // M3 fix: Use UUID v4 for unpredictable temp file names.
+        // Previous implementation used timestamp + atomic counter which was predictable.
+        // UUID v4 uses cryptographically secure random number generator.
+        let unique_id = uuid::Uuid::new_v4().to_string();
 
         let path = temp_dir.join(format!("upload-{}.tmp", unique_id));
         let file = fs::File::create(&path).await.map_err(|e| {

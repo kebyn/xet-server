@@ -462,6 +462,25 @@ async fn serve_raw_blob(
 
 /// Stream wrapper that computes SHA-256 hash incrementally and verifies after completion.
 /// C1 Fix: Avoids double-read by hashing during streaming, not before.
+///
+/// # I6: Known Limitation - Post-streaming Integrity Verification
+///
+/// This implementation performs integrity verification **after** streaming completes.
+/// If the hash doesn't match, data has already been sent to the client. This is an
+/// architectural limitation of streaming downloads for large files.
+///
+/// **Why this approach:**
+/// - Loading entire files into memory before sending would defeat the purpose of streaming
+/// - HTTP doesn't support trailer headers for hash verification in most clients
+/// - Pre-computing hash requires double-reading the file (performance cost)
+///
+/// **Mitigation strategies:**
+/// - Log errors for monitoring and alerting (already implemented)
+/// - Clients should verify OID after download (Git LFS protocol does this)
+/// - Use `verify_download_integrity` config for in-memory path (small files)
+/// - Consider using S3 multipart ETag for additional verification in future
+///
+/// This is the industry-standard approach for large file streaming with integrity checks.
 struct IntegrityVerifyingStream<S> {
     inner: S,
     hasher: Option<sha2::Sha256>,

@@ -30,6 +30,10 @@ struct TokenRow {
 /// Async SQLite-based token store with connection pooling
 pub struct TokenStore {
     pool: SqlitePool,
+    /// M4 fix: Server-side salt for token hashing.
+    /// Prevents offline dictionary attacks if database is compromised.
+    /// Tokens are already high-entropy (UUID), but salt adds defense-in-depth.
+    hash_salt: String,
 }
 
 impl TokenStore {
@@ -43,7 +47,14 @@ impl TokenStore {
             .await?;
 
         Self::init_tables(&pool).await?;
-        Ok(Self { pool })
+
+        // M4 fix: Use server-side salt for token hashing.
+        // In production, this should be loaded from environment or config.
+        // For now, use a static salt to demonstrate the pattern.
+        let hash_salt = std::env::var("HUB_TOKEN_HASH_SALT")
+            .unwrap_or_else(|_| "xet-hub-default-salt-2024".to_string());
+
+        Ok(Self { pool, hash_salt })
     }
 
     /// Create an in-memory TokenStore.
@@ -57,7 +68,12 @@ impl TokenStore {
             .await?;
 
         Self::init_tables(&pool).await?;
-        Ok(Self { pool })
+
+        // M4 fix: Use default salt for in-memory stores (testing)
+        let hash_salt = std::env::var("HUB_TOKEN_HASH_SALT")
+            .unwrap_or_else(|_| "xet-hub-test-salt".to_string());
+
+        Ok(Self { pool, hash_salt })
     }
 
     async fn init_tables(pool: &SqlitePool) -> Result<(), sqlx::Error> {
@@ -98,7 +114,7 @@ impl TokenStore {
         scope: &str,
     ) -> Result<String, sqlx::Error> {
         let token = format!("hf_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
-        let token_hash = Self::hash_token(&token);
+        let token_hash = self.hash_token(&token);
         let now = now_secs() as i64;
         let user_id = format!("user_{}", &token_hash[..16]);
 
@@ -137,7 +153,7 @@ impl TokenStore {
         scope: &str,
     ) -> Result<String, sqlx::Error> {
         let token = format!("hf_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
-        let token_hash = Self::hash_token(&token);
+        let token_hash = self.hash_token(&token);
         let now = now_secs() as i64;
 
         sqlx::query(
@@ -156,7 +172,7 @@ impl TokenStore {
 
     /// Validate a token. Returns None if invalid/expired/revoked.
     pub async fn validate_token(&self, token: &str) -> Result<Option<TokenInfo>, sqlx::Error> {
-        let token_hash = Self::hash_token(token);
+        let token_hash = self.hash_token(token);
         let now = now_secs() as i64;
 
         let result: Option<TokenRow> = sqlx::query_as(
@@ -195,7 +211,7 @@ impl TokenStore {
 
     /// Revoke a token
     pub async fn revoke_token(&self, token: &str) -> Result<bool, sqlx::Error> {
-        let token_hash = Self::hash_token(token);
+        let token_hash = self.hash_token(token);
         let now = now_secs() as i64;
 
         let result = sqlx::query(
@@ -231,14 +247,16 @@ impl TokenStore {
             .collect())
     }
 
-    /// Hash a token using SHA256
-    fn hash_token(token: &str) -> String {
-        hex::encode(Sha256::digest(token.as_bytes()))
+    /// Hash a token using SHA256 with server-side salt.
+    /// M4 fix: Salt prevents offline dictionary attacks if database is compromised.
+    fn hash_token(&self, token: &str) -> String {
+        let salted_token = format!("{}{}", self.hash_salt, token);
+        hex::encode(Sha256::digest(salted_token.as_bytes()))
     }
 
     /// Set expiration on a token (for testing)
     pub async fn set_token_expiration(&self, token: &str, expires_at: u64) -> Result<(), sqlx::Error> {
-        let token_hash = Self::hash_token(token);
+        let token_hash = self.hash_token(token);
 
         sqlx::query("UPDATE tokens SET expires_at = ?1 WHERE token_hash = ?2")
             .bind(expires_at as i64)
@@ -282,13 +300,14 @@ fn now_secs() -> u64 {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_hash_token() {
-        let hash1 = TokenStore::hash_token("hf_test123");
-        let hash2 = TokenStore::hash_token("hf_test123");
+    #[tokio::test]
+    async fn test_hash_token() {
+        let store = TokenStore::in_memory().await.unwrap();
+        let hash1 = store.hash_token("hf_test123");
+        let hash2 = store.hash_token("hf_test123");
         assert_eq!(hash1, hash2, "Same token should produce same hash");
 
-        let hash3 = TokenStore::hash_token("hf_test456");
+        let hash3 = store.hash_token("hf_test456");
         assert_ne!(hash1, hash3, "Different tokens should produce different hashes");
     }
 
