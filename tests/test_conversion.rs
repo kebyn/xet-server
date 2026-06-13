@@ -34,7 +34,10 @@ fn setup_test_env(
         Box::new(LocalStorage::new(tempdir.path().to_str().unwrap()).unwrap());
     let storage = Arc::new(storage);
     let index = Arc::new(MetadataIndex::new());
-    let config = ConversionConfig::default();
+    let mut config = ConversionConfig::default();
+    // Override min_conversion_size for tests — test files are smaller than the
+    // production default (64KB). Tests here verify conversion mechanics, not thresholds.
+    config.min_conversion_size = 0;
     (storage, index, config, tempdir)
 }
 
@@ -264,9 +267,12 @@ async fn test_convert_preserves_data() {
 
 #[tokio::test]
 async fn test_convert_too_small() {
-    let (storage, index, config, _tempdir) = setup_test_env();
+    let (storage, index, mut config, _tempdir) = setup_test_env();
 
-    // 500 bytes — below default min_conversion_size of 1024.
+    // Set min_conversion_size above the test file size to trigger TooSmall.
+    config.min_conversion_size = 1024;
+
+    // 500 bytes — below min_conversion_size of 1024.
     let data = vec![0xABu8; 500];
     let oid = upload_raw_blob(&storage, &data).await;
 
