@@ -112,6 +112,10 @@ impl Default for MetadataSettings {
 pub struct CasSettings {
     pub base_url: String,
     pub internal_timeout_seconds: u64,
+    /// Maximum download size in bytes for CAS responses.
+    /// Should match or exceed HUB_MAX_UPLOAD_SIZE.
+    /// Configure via `HUB_MAX_DOWNLOAD_SIZE` env var. Default: 512MB.
+    pub max_download_size: u64,
 }
 
 impl Default for CasSettings {
@@ -119,6 +123,7 @@ impl Default for CasSettings {
         CasSettings {
             base_url: "http://localhost:8081".to_string(),  // Changed from 3000 to match CAS default port
             internal_timeout_seconds: 30,
+            max_download_size: 512 * 1024 * 1024,
         }
     }
 }
@@ -197,6 +202,10 @@ impl HubConfig {
                     .ok()
                     .and_then(|t| t.parse().ok())
                     .unwrap_or(30),
+                max_download_size: env::var("HUB_MAX_DOWNLOAD_SIZE")
+                    .ok()
+                    .and_then(|t| t.parse().ok())
+                    .unwrap_or(512 * 1024 * 1024),
             },
             storage: StorageSettings {
                 inline_threshold_bytes: env::var("HUB_INLINE_THRESHOLD")
@@ -282,6 +291,9 @@ impl HubConfig {
         }
         if let Some(timeout) = env::var("HUB_CAS_TIMEOUT_SECS").ok().and_then(|t| t.parse().ok()) {
             config.cas.internal_timeout_seconds = timeout;
+        }
+        if let Some(size) = env::var("HUB_MAX_DOWNLOAD_SIZE").ok().and_then(|t| t.parse().ok()) {
+            config.cas.max_download_size = size;
         }
         if let Some(threshold) = env::var("HUB_INLINE_THRESHOLD").ok().and_then(|t| t.parse().ok()) {
             config.storage.inline_threshold_bytes = threshold;

@@ -257,6 +257,7 @@ async fn test_streaming_lfs_upload_success_via_mock_cas() {
     let cas_client = Arc::new(CasClient::new(&CasSettings {
         base_url: cas_url,
         internal_timeout_seconds: 30,
+        max_download_size: 512 * 1024 * 1024,
     }));
     let config = HubConfig::default();
 
@@ -300,6 +301,7 @@ async fn test_streaming_lfs_upload_hash_mismatch_returns_400() {
     let cas_client = Arc::new(CasClient::new(&CasSettings {
         base_url: cas_url,
         internal_timeout_seconds: 30,
+        max_download_size: 512 * 1024 * 1024,
     }));
     let config = HubConfig::default();
 
@@ -348,6 +350,7 @@ async fn test_streaming_lfs_upload_oversized_returns_413() {
     let cas_client = Arc::new(CasClient::new(&CasSettings {
         base_url: cas_url,
         internal_timeout_seconds: 30,
+        max_download_size: 512 * 1024 * 1024,
     }));
     let config = HubConfig::default();
 

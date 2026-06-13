@@ -37,6 +37,7 @@ pub trait CasClientTrait: Send + Sync {
 /// The client is `Send + Sync + Clone` and can be safely shared across tasks.
 pub struct CasClient {
     base_url: String,
+    max_download_size: u64,
     client: reqwest::Client,
 }
 
@@ -113,6 +114,7 @@ impl CasClient {
 
         Self {
             base_url: settings.base_url.trim_end_matches('/').to_string(),
+            max_download_size: settings.max_download_size,
             client,
         }
     }
@@ -222,10 +224,12 @@ impl CasClient {
                     .await
                     .map_err(|e| HubError::CasError(e.to_string()))?;
 
-                // Check size limit (512MB)
-                const MAX_DOWNLOAD_SIZE: u64 = 512 * 1024 * 1024;
-                if body.len() as u64 > MAX_DOWNLOAD_SIZE {
-                    return Err(HubError::CasError(format!("Download too large: {} bytes", body.len())));
+                // Check size limit
+                if body.len() as u64 > self.max_download_size {
+                    return Err(HubError::CasError(format!(
+                        "Download too large: {} bytes (max: {} bytes)",
+                        body.len(), self.max_download_size
+                    )));
                 }
 
                 Ok(body)
@@ -259,11 +263,10 @@ impl CasClient {
                 // Defense-in-depth: validate Content-Length against max size
                 // CAS is a trusted internal service, but this protects against CAS bugs
                 // that could cause unbounded streaming
-                const MAX_DOWNLOAD_SIZE: u64 = 512 * 1024 * 1024;
-                if content_length > MAX_DOWNLOAD_SIZE {
+                if content_length > self.max_download_size {
                     return Err(HubError::CasError(format!(
                         "Content-Length too large: {} bytes (max: {} bytes)",
-                        content_length, MAX_DOWNLOAD_SIZE
+                        content_length, self.max_download_size
                     )));
                 }
 
@@ -271,6 +274,16 @@ impl CasClient {
             }
             404 => Err(HubError::NotFound(format!("Object not found: {}", oid))),
             code => Err(HubError::CasError(format!("CAS returned {}", code))),
+        }
+    }
+
+    /// Check CAS health endpoint
+    pub async fn health_check(&self) -> Result<bool, HubError> {
+        let url = format!("{}/health", self.base_url);
+        match self.client.get(&url).send().await {
+            Ok(resp) if resp.status().is_success() => Ok(true),
+            Ok(_) => Ok(false),
+            Err(e) => Err(HubError::CasError(format!("Health check failed: {}", e))),
         }
     }
 }
@@ -285,6 +298,7 @@ mod tests {
         let settings = CasSettings {
             base_url: "http://localhost:3000".to_string(),
             internal_timeout_seconds: 30,
+            max_download_size: 512 * 1024 * 1024,
         };
         let client = CasClient::new(&settings);
         assert_eq!(client.base_url, "http://localhost:3000");
@@ -295,6 +309,7 @@ mod tests {
         let settings = CasSettings {
             base_url: "http://localhost:3000/".to_string(),
             internal_timeout_seconds: 30,
+            max_download_size: 512 * 1024 * 1024,
         };
         let client = CasClient::new(&settings);
         assert_eq!(client.base_url, "http://localhost:3000");
