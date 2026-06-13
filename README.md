@@ -327,9 +327,7 @@ hf download my-org/my-repo model.bin --local-dir ./downloaded
 | `HUB_SQLITE_PATH` | 元数据数据库路径 | `hub.db` |
 | `CAS_BASE_URL` | CAS 服务器 URL | `http://localhost:8081` |
 | `HUB_CAS_TIMEOUT_SECS` | CAS 请求超时（秒） | `30` |
-| `HUB_DATA_DIR` | Hub 数据目录 | `./data` |
 | `HUB_INLINE_THRESHOLD` | 内联文件阈值（字节） | `1048576` (1MB) |
-| `HUB_LFS_THRESHOLD` | LFS 文件阈值（字节） | `10485760` (10MB) |
 | `HUB_UPLOAD_TEMP_DIR` | 上传临时文件目录 | `/tmp/hub-uploads` |
 | `HUB_MAX_UPLOAD_SIZE` | 最大上传文件大小（字节） | `536870912` (512MB) |
 
