@@ -58,15 +58,16 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
     // Configure rate limiting for public endpoints only.
     // Internal endpoints (/internal/*) bypass rate limiting to avoid
     // disrupting Hub-to-CAS communication.
-    // Allow 60 requests per minute per IP address.
+    // Allow `rate_limit_rpm` requests per minute per IP address.
+    let rpm = config.server.rate_limit_rpm;
     let governor_conf = GovernorConfigBuilder::default()
         .per_second(60)  // 60 seconds window
-        .burst_size(60)   // 60 requests per window
+        .burst_size(rpm)   // rpm requests per window
         .key_extractor(GlobalKeyExtractor)
         .finish()
         .expect("Failed to configure rate limiter");
 
-    tracing::info!("Rate limiting: 60 requests/minute per IP for public endpoints (internal endpoints excluded)");
+    tracing::info!("Rate limiting: {} requests/minute per IP for public endpoints (internal endpoints excluded)", rpm);
 
     HttpServer::new(move || {
         App::new()

@@ -47,6 +47,12 @@ fn test_config_auth_settings() {
 }
 
 #[test]
+fn test_config_rate_limit_default() {
+    let config = ServerConfig::default();
+    assert_eq!(config.server.rate_limit_rpm, 60, "Default CAS rate limit should be 60 RPM");
+}
+
+#[test]
 fn test_config_serialization() {
     let config = ServerConfig::default();
     let json = serde_json::to_string(&config).unwrap();
