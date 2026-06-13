@@ -60,3 +60,32 @@ fn test_config_serialization() {
     assert_eq!(deserialized.server.port, config.server.port);
     assert_eq!(deserialized.auth.trusted_kids, config.auth.trusted_kids);
 }
+
+#[test]
+fn test_check_public_key_permissions_insecure() {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use tempfile::NamedTempFile;
+
+    let tmp = NamedTempFile::new().unwrap();
+    let path = tmp.path().to_str().unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o666)).unwrap();
+
+    let result = xet_server::config::check_public_key_permissions(path);
+    assert!(result.is_some(), "World-writable key file should produce a warning");
+    assert!(result.unwrap().contains("world-writable"));
+}
+
+#[test]
+fn test_check_public_key_permissions_secure() {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use tempfile::NamedTempFile;
+
+    let tmp = NamedTempFile::new().unwrap();
+    let path = tmp.path().to_str().unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let result = xet_server::config::check_public_key_permissions(path);
+    assert!(result.is_none(), "Secure key file should not produce a warning");
+}

@@ -19,6 +19,11 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
             .expect("Failed to load auth public key")
     );
 
+    // Check public key file permissions for security
+    if let Some(warning) = crate::config::check_public_key_permissions(&config.auth.public_key_path) {
+        tracing::warn!("{}", warning);
+    }
+
     let storage: Arc<Box<dyn StorageBackend>> = Arc::new(create_storage(&config.storage).await
         .expect("Failed to create storage backend"));
 
