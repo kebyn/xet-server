@@ -41,15 +41,16 @@ pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
 
     // Configure rate limiting for public API endpoints.
     // Internal endpoints (/internal/*) and health check bypass rate limiting.
-    // Allow 120 requests per minute per IP (higher than CAS since Hub serves more API calls).
+    // Allow configured requests per minute per IP (default 120, higher than CAS since Hub serves more API calls).
+    let rpm = config.server.rate_limit_rpm;
     let governor_conf = GovernorConfigBuilder::default()
         .per_second(60)  // 60 seconds window
-        .burst_size(120) // 120 requests per window
+        .burst_size(rpm) // configured requests per window
         .key_extractor(GlobalKeyExtractor)
         .finish()
         .expect("Failed to configure rate limiter");
 
-    tracing::info!("Rate limiting: 120 requests/minute per IP for public endpoints (internal/health excluded)");
+    tracing::info!("Rate limiting: {} requests/minute per IP for public endpoints (internal/health excluded)", rpm);
 
     HttpServer::new(move || {
         App::new()

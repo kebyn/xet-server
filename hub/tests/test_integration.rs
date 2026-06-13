@@ -420,3 +420,9 @@ async fn test_hub_config_no_dead_fields() {
     assert_eq!(config.storage.upload_temp_dir, "/tmp/hub-uploads");
     assert_eq!(config.storage.max_upload_size, 512 * 1024 * 1024);
 }
+
+#[actix_web::test]
+async fn test_hub_config_rate_limit_default() {
+    let config = HubConfig::default();
+    assert_eq!(config.server.rate_limit_rpm, 120, "Default Hub rate limit should be 120 RPM");
+}

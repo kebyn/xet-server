@@ -7,6 +7,10 @@ pub struct ServerSettings {
     pub host: String,
     pub port: u16,
     pub public_base_url: Option<String>,
+    /// Rate limit for public endpoints in requests per minute per IP.
+    /// Configure via `HUB_RATE_LIMIT_RPM` environment variable.
+    /// Default: 120 RPM.
+    pub rate_limit_rpm: u32,
 }
 
 impl ServerSettings {
@@ -61,6 +65,7 @@ impl Default for ServerSettings {
             host: "0.0.0.0".to_string(),
             port: 8080,
             public_base_url: None,
+            rate_limit_rpm: 120,
         }
     }
 }
@@ -157,6 +162,10 @@ impl HubConfig {
                     .and_then(|p| p.parse().ok())
                     .unwrap_or(8080),
                 public_base_url: env::var("HUB_PUBLIC_BASE_URL").ok(),
+                rate_limit_rpm: env::var("HUB_RATE_LIMIT_RPM")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(120),
             },
             auth: AuthSettings {
                 private_key_path: env::var("HUB_PRIVATE_KEY_PATH")
@@ -240,6 +249,9 @@ impl HubConfig {
                 );
             }
             config.server.public_base_url = Some(url);
+        }
+        if let Some(rpm) = env::var("HUB_RATE_LIMIT_RPM").ok().and_then(|v| v.parse().ok()) {
+            config.server.rate_limit_rpm = rpm;
         }
         if let Some(path) = env::var("HUB_PRIVATE_KEY_PATH").ok() {
             config.auth.private_key_path = path;
