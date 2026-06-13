@@ -22,13 +22,14 @@ impl ServerSettings {
         let url = url.trim_end_matches('/').to_string();
 
         // I1: Validate URL format using proper URL parsing if explicitly configured
+        // I2: Panic on invalid URL to fail fast at startup rather than at first request
         if self.public_base_url.is_some() {
             match url::Url::parse(&url) {
                 Ok(parsed) => {
                     if parsed.host().is_none() {
-                        tracing::error!(
+                        panic!(
                             "public_base_url '{}' is missing a valid host. \
-                            This will likely cause client connection failures.",
+                            This will cause client connection failures.",
                             url
                         );
                     }
@@ -41,7 +42,7 @@ impl ServerSettings {
                     }
                 }
                 Err(e) => {
-                    tracing::error!(
+                    panic!(
                         "public_base_url '{}' is not a valid URL: {}. \
                         This will cause client connection failures.",
                         url, e
@@ -106,7 +107,7 @@ pub struct CasSettings {
 impl Default for CasSettings {
     fn default() -> Self {
         CasSettings {
-            base_url: "http://localhost:3000".to_string(),
+            base_url: "http://localhost:8081".to_string(),  // Changed from 3000 to match CAS default port
             internal_timeout_seconds: 30,
         }
     }
@@ -120,6 +121,9 @@ pub struct StorageSettings {
     pub lfs_threshold_bytes: u64,
     /// Directory for temporary files during streaming uploads
     pub upload_temp_dir: String,
+    /// M2: Maximum upload size in bytes. Defaults to 512MB.
+    /// Configure via HUB_MAX_UPLOAD_SIZE environment variable.
+    pub max_upload_size: u64,
 }
 
 impl Default for StorageSettings {
@@ -129,6 +133,7 @@ impl Default for StorageSettings {
             inline_threshold_bytes: 1024 * 1024, // 1MB
             lfs_threshold_bytes: 10 * 1024 * 1024,   // 10MB
             upload_temp_dir: "/tmp/hub-uploads".to_string(),
+            max_upload_size: 512 * 1024 * 1024, // 512MB
         }
     }
 }
@@ -173,7 +178,7 @@ impl HubConfig {
             },
             cas: CasSettings {
                 base_url: env::var("CAS_BASE_URL")
-                    .unwrap_or_else(|_| "http://localhost:3000".to_string()),
+                    .unwrap_or_else(|_| "http://localhost:8081".to_string()),  // Changed from 3000 to match CAS default port
                 internal_timeout_seconds: env::var("HUB_CAS_TIMEOUT_SECS")
                     .ok()
                     .and_then(|t| t.parse().ok())
@@ -192,6 +197,10 @@ impl HubConfig {
                     .unwrap_or(10 * 1024 * 1024),
                 upload_temp_dir: env::var("HUB_UPLOAD_TEMP_DIR")
                     .unwrap_or_else(|_| "/tmp/hub-uploads".to_string()),
+                max_upload_size: env::var("HUB_MAX_UPLOAD_SIZE")
+                    .ok()
+                    .and_then(|t| t.parse().ok())
+                    .unwrap_or(512 * 1024 * 1024),
             },
         }
     }
@@ -222,10 +231,19 @@ impl HubConfig {
         }
         if let Some(url) = env::var("HUB_PUBLIC_BASE_URL").ok() {
             // M-3: Validate URL format when set via environment variable
+            // I2: Panic on invalid URL to fail fast at startup
             if let Err(e) = url::Url::parse(&url) {
-                tracing::error!(
+                panic!(
                     "HUB_PUBLIC_BASE_URL '{}' is not a valid URL: {}",
                     url, e
+                );
+            }
+            // Also validate host is present
+            let parsed = url::Url::parse(&url).unwrap();
+            if parsed.host().is_none() {
+                panic!(
+                    "HUB_PUBLIC_BASE_URL '{}' is missing a valid host",
+                    url
                 );
             }
             config.server.public_base_url = Some(url);
@@ -259,6 +277,9 @@ impl HubConfig {
         }
         if let Some(dir) = env::var("HUB_UPLOAD_TEMP_DIR").ok() {
             config.storage.upload_temp_dir = dir;
+        }
+        if let Some(size) = env::var("HUB_MAX_UPLOAD_SIZE").ok().and_then(|t| t.parse().ok()) {
+            config.storage.max_upload_size = size;
         }
 
         config

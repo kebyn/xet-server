@@ -188,7 +188,8 @@ pub async fn upload_xorb(
     //    reflect which concurrent writer actually won the race, but this only
     //    affects metrics/dedup accounting, not data integrity.
     // For strict dedup accounting, storage backends should implement put_if_absent.
-    let xorb_key = format!("xorbs/{}/{}", prefix, hash_str);
+    // C1 fix: Use xorbs/{hash} format to match conversion pipeline and LFS download.
+    let xorb_key = format!("xorbs/{}", hash_str);
     let already_exists = match storage.exists(&xorb_key).await {
         Ok(exists) => exists,
         Err(e) => {
@@ -298,7 +299,8 @@ pub async fn download_xorb(
     }
 
     // Fetch xorb from storage
-    let xorb_key = format!("xorbs/{}/{}", prefix, hash_str);
+    // C1 fix: Use xorbs/{hash} format to match conversion pipeline and LFS download.
+    let xorb_key = format!("xorbs/{}", hash_str);
     let xorb_data = match storage.get(&xorb_key).await {
         Ok(data) => {
             GLOBAL_METRICS.record_storage_operation();

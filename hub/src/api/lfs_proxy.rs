@@ -1,4 +1,5 @@
 use actix_web::{web, HttpRequest, HttpResponse};
+use futures_util::StreamExt;
 use crate::auth::token_store::TokenStore;
 use crate::auth::xet_signer::XetSigner;
 use crate::cas_client::CasClient;
@@ -52,6 +53,30 @@ fn extract_token(req: &HttpRequest) -> Option<String> {
     }
 
     None
+}
+
+/// Extract proxy token for LFS download/upload operations.
+/// Prefers query parameter token (?token=proxy_xxx) over Authorization header,
+/// because clients following 302 redirects from /resolve/ send their user token
+/// in the Authorization header, but the proxy token is in the URL query param.
+fn extract_proxy_token(req: &HttpRequest) -> Option<String> {
+    // First try query parameter (this is where proxy tokens are placed in redirects)
+    if let Some(query) = req.uri().query() {
+        for pair in query.split('&') {
+            if let Some((key, value)) = pair.split_once('=')
+                && key == "token" {
+                    if let Ok(decoded) = percent_encoding::percent_decode_str(value).decode_utf8() {
+                        let token = decoded.into_owned();
+                        if token.starts_with("proxy_") {
+                            return Some(token);
+                        }
+                    }
+                }
+        }
+    }
+
+    // Fall back to Authorization header
+    extract_token(req)
 }
 
 /// Rewrite URLs in batch response from CAS URLs to Hub URLs,
@@ -155,16 +180,21 @@ fn validate_proxy_token(
     // Verify signature, decode claims, and check proxy_ prefix (all in one pass)
     let claims = match signer.verify_proxy_token(token) {
         Some(claims) => claims,
-        None => return false,
+        None => {
+            tracing::error!("validate_proxy_token: verify_proxy_token failed for token starting with: {}...", &token[..token.len().min(30)]);
+            return false;
+        }
     };
 
     // Check token type (not checked by verify_proxy_token)
     if claims.token_type != "proxy" {
+        tracing::error!("validate_proxy_token: token_type mismatch: {} != proxy", claims.token_type);
         return false;
     }
 
     // Check key ID matches (defense-in-depth for key rotation scenarios)
     if claims.kid != signer.kid() {
+        tracing::error!("validate_proxy_token: kid mismatch: {} != {}", claims.kid, signer.kid());
         return false;
     }
 
@@ -174,16 +204,19 @@ fn validate_proxy_token(
         .unwrap()
         .as_secs();
     if claims.exp < now {
+        tracing::error!("validate_proxy_token: token expired: exp={} now={}", claims.exp, now);
         return false;
     }
 
     // Check OID matches
     if claims.oid.as_deref() != Some(expected_oid) {
+        tracing::error!("validate_proxy_token: oid mismatch: {:?} != {}", claims.oid, expected_oid);
         return false;
     }
 
     // Check operation matches
     if claims.operation.as_deref() != Some(expected_operation) {
+        tracing::error!("validate_proxy_token: operation mismatch: {:?} != {}", claims.operation, expected_operation);
         return false;
     }
 
@@ -271,7 +304,7 @@ pub async fn lfs_upload(
     cas_client: web::Data<std::sync::Arc<CasClient>>,
 ) -> HttpResponse {
     // Extract token
-    let token = match extract_token(&req) {
+    let token = match extract_proxy_token(&req) {
         Some(t) => t,
         None => {
             return HttpResponse::Unauthorized().json(serde_json::json!({
@@ -344,7 +377,8 @@ pub async fn lfs_upload(
     };
 
     let mut total_bytes: u64 = 0;
-    const MAX_UPLOAD_SIZE: u64 = 512 * 1024 * 1024; // 512MB
+    // M2: Use configurable max upload size from config
+    let max_upload_size = config.storage.max_upload_size;
 
     while let Some(chunk_result) = payload.next().await {
         let chunk = match chunk_result {
@@ -360,11 +394,11 @@ pub async fn lfs_upload(
         };
 
         total_bytes += chunk.len() as u64;
-        if total_bytes > MAX_UPLOAD_SIZE {
-            tracing::warn!("Upload too large: {} bytes (max {})", total_bytes, MAX_UPLOAD_SIZE);
+        if total_bytes > max_upload_size {
+            tracing::warn!("Upload too large: {} bytes (max {})", total_bytes, max_upload_size);
             // Temp file will be cleaned up by Drop
             return HttpResponse::PayloadTooLarge().json(serde_json::json!({
-                "error": format!("Upload too large ({} bytes), max allowed: {} bytes", total_bytes, MAX_UPLOAD_SIZE),
+                "error": format!("Upload too large ({} bytes), max allowed: {} bytes", total_bytes, max_upload_size),
                 "error_type": "PayloadTooLarge"
             }));
         }
@@ -438,7 +472,7 @@ pub async fn lfs_download(
     cas_client: web::Data<std::sync::Arc<CasClient>>,
 ) -> HttpResponse {
     // Extract token
-    let token = match extract_token(&req) {
+    let token = match extract_proxy_token(&req) {
         Some(t) => t,
         None => {
             return HttpResponse::Unauthorized().json(serde_json::json!({
@@ -470,10 +504,24 @@ pub async fn lfs_download(
     let (internal_token, _) = xet_signer.sign_internal();
 
     // Forward to CAS
-    match cas_client.proxy_lfs_download(&oid, &internal_token).await {
-        Ok(bytes) => HttpResponse::Ok()
-            .content_type("application/octet-stream")
-            .body(bytes),
+    // I6: Use streaming download to avoid loading entire file into memory
+    match cas_client.proxy_lfs_download_streaming(&oid, &internal_token).await {
+        Ok((content_length, resp)) => {
+            // Convert reqwest response body to actix-web streaming body
+            let stream = resp.bytes_stream();
+            let mapped_stream = stream.map(|result| {
+                result.map_err(|e| actix_web::Error::from(std::io::Error::other(e)))
+            });
+
+            let mut builder = HttpResponse::Ok();
+            builder.content_type("application/octet-stream");
+
+            if content_length > 0 {
+                builder.insert_header(("Content-Length", content_length.to_string()));
+            }
+
+            builder.streaming(mapped_stream)
+        }
         Err(e) => match e {
             crate::error::HubError::NotFound(_) => {
                 HttpResponse::NotFound().json(serde_json::json!({

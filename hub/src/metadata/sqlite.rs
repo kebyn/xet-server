@@ -55,6 +55,8 @@ CREATE TABLE IF NOT EXISTS file_tree (
 );
 
 CREATE INDEX IF NOT EXISTS idx_file_tree_prefix ON file_tree(repo_id, commit_id, path);
+-- M5: Index for GC referenced hash queries (SELECT DISTINCT cas_hash WHERE is_lfs = 1)
+CREATE INDEX IF NOT EXISTS idx_file_tree_cas_hash ON file_tree(is_lfs, cas_hash);
 "#;
 
 /// SQLite-based metadata store

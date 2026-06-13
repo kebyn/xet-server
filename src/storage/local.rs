@@ -196,12 +196,14 @@ impl StorageBackend for LocalStorage {
 }
 
 impl LocalStorage {
-    /// Recursively walk a directory, collecting keys relative to base_path.
-    async fn walk_dir(
+    /// M1: Recursively walk a directory, collecting entries with optional mtime.
+    /// Single implementation to reduce code duplication.
+    async fn walk_dir_impl(
         base_path: &Path,
         dir: &Path,
-        keys: &mut Vec<String>,
-    ) -> StorageResult<()> {
+        include_mtime: bool,
+    ) -> StorageResult<Vec<(String, Option<u64>)>> {
+        let mut results = Vec::new();
         let mut entries = fs::read_dir(dir).await.map_err(|e| {
             StorageError::Internal(format!("Failed to read dir {}: {}", dir.display(), e))
         })?;
@@ -215,7 +217,8 @@ impl LocalStorage {
             })?;
 
             if file_type.is_dir() {
-                Box::pin(Self::walk_dir(base_path, &path, keys)).await?;
+                let sub_results = Box::pin(Self::walk_dir_impl(base_path, &path, include_mtime)).await?;
+                results.extend(sub_results);
             } else if file_type.is_file() {
                 let key = path
                     .strip_prefix(base_path)
@@ -227,10 +230,35 @@ impl LocalStorage {
                     })?
                     .to_string_lossy()
                     .to_string();
-                keys.push(key);
+
+                let mtime = if include_mtime {
+                    match fs::metadata(&path).await {
+                        Ok(meta) => meta
+                            .modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_secs()),
+                        Err(_) => Some(0),
+                    }
+                } else {
+                    None
+                };
+
+                results.push((key, mtime));
             }
         }
 
+        Ok(results)
+    }
+
+    /// Recursively walk a directory, collecting keys relative to base_path.
+    async fn walk_dir(
+        base_path: &Path,
+        dir: &Path,
+        keys: &mut Vec<String>,
+    ) -> StorageResult<()> {
+        let entries = Self::walk_dir_impl(base_path, dir, false).await?;
+        keys.extend(entries.into_iter().map(|(key, _)| key));
         Ok(())
     }
 
@@ -240,48 +268,8 @@ impl LocalStorage {
         dir: &Path,
         entries_with_mtime: &mut Vec<(String, u64)>,
     ) -> StorageResult<()> {
-        let mut entries = fs::read_dir(dir).await.map_err(|e| {
-            StorageError::Internal(format!("Failed to read dir {}: {}", dir.display(), e))
-        })?;
-
-        while let Some(entry) = entries.next_entry().await.map_err(|e| {
-            StorageError::Internal(format!("Failed to read dir entry: {}", e))
-        })? {
-            let path = entry.path();
-            let file_type = entry.file_type().await.map_err(|e| {
-                StorageError::Internal(format!("Failed to get file type: {}", e))
-            })?;
-
-            if file_type.is_dir() {
-                Box::pin(Self::walk_dir_with_mtime(base_path, &path, entries_with_mtime)).await?;
-            } else if file_type.is_file() {
-                let key = path
-                    .strip_prefix(base_path)
-                    .map_err(|e| {
-                        StorageError::Internal(format!(
-                            "Failed to compute relative path: {}",
-                            e
-                        ))
-                    })?
-                    .to_string_lossy()
-                    .to_string();
-
-                // Get modification time
-                let mtime = match fs::metadata(&path).await {
-                    Ok(meta) => {
-                        meta.modified()
-                            .ok()
-                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                            .map(|d| d.as_secs())
-                            .unwrap_or(0)
-                    }
-                    Err(_) => 0,
-                };
-
-                entries_with_mtime.push((key, mtime));
-            }
-        }
-
+        let entries = Self::walk_dir_impl(base_path, dir, true).await?;
+        entries_with_mtime.extend(entries.into_iter().map(|(key, mtime)| (key, mtime.unwrap_or(0))));
         Ok(())
     }
 }

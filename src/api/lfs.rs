@@ -21,7 +21,6 @@ use crate::api::reconstruction::fetch_and_parse_shard;
 use crate::config::{ConversionConfig, ServerConfig};
 use crate::conversion::ConvertingOids;
 use crate::format::compression::decompress;
-use crate::format::shard::MDBShardFile;
 use crate::format::xorb::XorbChunkHeader;
 use crate::index::MetadataIndex;
 use crate::metrics::GLOBAL_METRICS;
@@ -77,7 +76,9 @@ pub async fn upload_lfs_object(
         }
     };
 
-    if !check_scope(&claims, "write") {
+    // Internal tokens from Hub are allowed
+    let is_internal = claims.sub == "hub-service" && claims.scope == "internal";
+    if !is_internal && !check_scope(&claims, "write") {
         GLOBAL_METRICS.record_request(403);
         GLOBAL_METRICS.record_latency(start);
         return HttpResponse::Forbidden().json(serde_json::json!({
@@ -246,6 +247,7 @@ pub async fn download_lfs_object(
     index: web::Data<MetadataIndex>,
     converting: web::Data<Arc<ConvertingOids>>,
     conversion_config: web::Data<ConversionConfig>,
+    config: web::Data<ServerConfig>,
     req: actix_web::HttpRequest,
 ) -> HttpResponse {
     let start = std::time::Instant::now();
@@ -283,7 +285,9 @@ pub async fn download_lfs_object(
         }
     };
 
-    if !check_scope(&claims, "read") {
+    // Internal tokens from Hub are allowed
+    let is_internal = claims.sub == "hub-service" && claims.scope == "internal";
+    if !is_internal && !check_scope(&claims, "read") {
         GLOBAL_METRICS.record_request(403);
         GLOBAL_METRICS.record_latency(start);
         return HttpResponse::Forbidden().json(serde_json::json!({
@@ -304,7 +308,7 @@ pub async fn download_lfs_object(
     match storage.exists(&object_key).await {
         Ok(true) => {
             // Raw blob exists — serve it and trigger lazy conversion in background
-            let response = serve_raw_blob(&oid, storage.clone(), start).await;
+            let response = serve_raw_blob(&oid, storage.clone(), config.clone(), start).await;
 
             if conversion_config.enabled && converting.try_acquire(&oid) {
                 let pipeline = crate::conversion::ConversionPipeline::new(
@@ -356,12 +360,60 @@ pub async fn download_lfs_object(
 /// Serve a raw blob from storage.
 /// Uses streaming file I/O when the backend supports it (e.g. local storage)
 /// to avoid loading multi-gigabyte files entirely into RAM.
+/// I3: Optionally verifies integrity by computing SHA-256 hash before streaming.
 async fn serve_raw_blob(
     oid: &str,
     storage: web::Data<Box<dyn StorageBackend>>,
+    config: web::Data<ServerConfig>,
     start: std::time::Instant,
 ) -> HttpResponse {
     let object_key = format!("lfs/objects/{}", oid);
+
+    // I3: Optional integrity verification before streaming
+    // Reads the file, computes SHA-256, and verifies it matches the OID.
+    // This catches storage corruption (bit rot) at the cost of one extra read.
+    if config.storage.verify_download_integrity {
+        let verify_data = match storage.get(&object_key).await {
+            Ok(data) => data,
+            Err(StorageError::NotFound(_)) => {
+                GLOBAL_METRICS.record_request(404);
+                GLOBAL_METRICS.record_latency(start);
+                return HttpResponse::NotFound().json(serde_json::json!({
+                    "error": format!("Object not found: {}", oid)
+                }));
+            }
+            Err(e) => {
+                error!("Failed to fetch object for integrity check {}: {}", oid, e);
+                GLOBAL_METRICS.record_request(500);
+                GLOBAL_METRICS.record_error();
+                GLOBAL_METRICS.record_latency(start);
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("Storage error: {}", e)
+                }));
+            }
+        };
+
+        // Compute SHA-256 hash
+        use sha2::{Sha256, Digest};
+        let mut hasher = Sha256::new();
+        hasher.update(&verify_data);
+        let computed_hash = format!("{:x}", hasher.finalize());
+
+        if computed_hash != oid {
+            error!(
+                "Integrity check failed for {}: computed {} != expected {}",
+                oid, computed_hash, oid
+            );
+            GLOBAL_METRICS.record_request(500);
+            GLOBAL_METRICS.record_error();
+            GLOBAL_METRICS.record_latency(start);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Integrity verification failed: stored content does not match OID"
+            }));
+        }
+
+        info!("Integrity check passed for {}", oid);
+    }
 
     // Try streaming path first (avoids loading entire file into memory)
     match storage.get_path(&object_key).await {
@@ -413,7 +465,7 @@ async fn serve_raw_blob(
         }
         Ok(None) => {
             // Non-file backend: fall back to in-memory get
-            serve_raw_blob_inmemory(oid, storage, start).await
+            serve_raw_blob_inmemory(oid, storage, config, start).await
         }
         Err(StorageError::NotFound(_)) => {
             GLOBAL_METRICS.record_request(404);
@@ -435,9 +487,12 @@ async fn serve_raw_blob(
 }
 
 /// Fallback: serve a raw blob by loading it entirely into memory.
+/// I3: If integrity verification is enabled, it was already done in serve_raw_blob
+/// before this fallback was called, so we don't need to verify again here.
 async fn serve_raw_blob_inmemory(
     oid: &str,
     storage: web::Data<Box<dyn StorageBackend>>,
+    _config: web::Data<ServerConfig>,
     start: std::time::Instant,
 ) -> HttpResponse {
     let object_key = format!("lfs/objects/{}", oid);
@@ -505,9 +560,10 @@ async fn reconstruct_from_xet(
     };
 
     // I4: Create custom streaming implementation
+    // M3: Refactored to use async_stream for improved readability
     // web::Data is internally Arc-wrapped
     let storage_arc = storage.clone().into_inner();
-    let stream = ReconstructionStream::new(storage_arc, shard_ids);
+    let stream = create_reconstruction_stream(storage_arc, shard_ids);
 
     // Wrap the stream with a metrics-recording wrapper that:
     // 1. Tracks total bytes streamed (for download_bytes metric)
@@ -607,241 +663,90 @@ where
 /// I4: True streaming implementation that processes one chunk at a time,
 /// avoiding loading the entire file into memory or using temporary files.
 ///
-/// State machine:
-/// 1. Fetch next shard (if needed)
-/// 2. Download next xorb (if needed)
-/// 3. Extract and decompress next chunk
-/// 4. Return chunk data
-/// 5. Repeat until all chunks processed
-// Type alias for the pinned boxed future that fetches and parses a shard.
-type ShardFetchFuture = Pin<Box<dyn std::future::Future<Output = Result<MDBShardFile, String>> + Send>>;
-// Type alias for the pinned boxed future that fetches xorb data.
-type XorbFetchFuture = Pin<Box<dyn std::future::Future<Output = Result<Vec<u8>, StorageError>> + Send>>;
-
-struct ReconstructionStream {
-    /// Storage backend for fetching xorbs
+/// M3: Refactored using async_stream::stream! for improved readability.
+/// The original manual Stream implementation had 223 lines of nested state machine code.
+/// This async/await version expresses the same logic more clearly.
+fn create_reconstruction_stream(
     storage: Arc<Box<dyn StorageBackend>>,
-    /// List of shard IDs to process
     shard_ids: Vec<String>,
-    /// Current shard index
-    current_shard_idx: usize,
-    /// Parsed shard data (cached)
-    current_shard: Option<MDBShardFile>,
-    /// Current chunk index within the shard
-    current_chunk_idx: usize,
-    /// Xorb entries from current shard (deduplicated)
-    xorb_entries: Vec<(String, usize, usize)>, // (xorb_hash, num_entries, chunk_offset)
-    /// Current xorb index
-    current_xorb_idx: usize,
-    /// Currently loaded xorb data
-    current_xorb_data: Option<Vec<u8>>,
-    /// Future for fetching the next shard
-    fetch_shard_future: Option<ShardFetchFuture>,
-    /// Future for fetching the next xorb
-    fetch_xorb_future: Option<XorbFetchFuture>,
-    /// Total bytes yielded (for metrics)
-    total_bytes: u64,
-    /// Whether the stream has completed
-    completed: bool,
-}
+) -> Pin<Box<dyn Stream<Item = Result<bytes::Bytes, String>> + Send>> {
+    use async_stream::stream;
 
-impl ReconstructionStream {
-    fn new(storage: Arc<Box<dyn StorageBackend>>, shard_ids: Vec<String>) -> Self {
-        Self {
-            storage,
-            shard_ids,
-            current_shard_idx: 0,
-            current_shard: None,
-            current_chunk_idx: 0,
-            xorb_entries: Vec::new(),
-            current_xorb_idx: 0,
-            current_xorb_data: None,
-            fetch_shard_future: None,
-            fetch_xorb_future: None,
-            total_bytes: 0,
-            completed: false,
-        }
-    }
-}
+    Box::pin(stream! {
+        for shard_id in &shard_ids {
+            // Fetch and parse shard
+            let shard = fetch_and_parse_shard(shard_id, &**storage)
+                .await
+                .map_err(|e| format!("Failed to fetch shard {}: {}", shard_id, e))?;
 
-impl Stream for ReconstructionStream {
-    type Item = Result<bytes::Bytes, String>;
+            // Extract xorb entries (deduplicated) with chunk offsets
+            let mut seen_xorbs = std::collections::HashSet::new();
+            let mut xorb_entries: Vec<(String, usize, usize)> = Vec::new();
+            let mut chunk_offset = 0;
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        if self.completed {
-            return Poll::Ready(None);
-        }
-
-        loop {
-            // If we're fetching a shard, poll that future first
-            if let Some(future) = self.fetch_shard_future.as_mut() {
-                match future.as_mut().poll(cx) {
-                    Poll::Ready(Ok(shard)) => {
-                        // Extract xorb entries from shard
-                        let mut seen_xorbs = std::collections::HashSet::new();
-                        self.xorb_entries.clear();
-                        let mut chunk_offset = 0;
-
-                        for xorb_entry in &shard.xorb_entries {
-                            let xorb_hash = xorb_entry.xorb_hash.to_hex();
-                            if seen_xorbs.insert(xorb_hash.clone()) {
-                                self.xorb_entries.push((
-                                    xorb_hash,
-                                    xorb_entry.num_entries as usize,
-                                    chunk_offset,
-                                ));
-                            }
-                            chunk_offset += xorb_entry.num_entries as usize;
-                        }
-
-                        self.current_shard = Some(shard);
-                        self.current_xorb_idx = 0;
-                        self.current_chunk_idx = 0;
-                        self.fetch_shard_future = None;
-                        // Continue to process xorb
-                    }
-                    Poll::Ready(Err(e)) => {
-                        self.completed = true;
-                        return Poll::Ready(Some(Err(e)));
-                    }
-                    Poll::Pending => return Poll::Pending,
+            for xorb_entry in &shard.xorb_entries {
+                let xorb_hash = xorb_entry.xorb_hash.to_hex();
+                if seen_xorbs.insert(xorb_hash.clone()) {
+                    xorb_entries.push((
+                        xorb_hash,
+                        xorb_entry.num_entries as usize,
+                        chunk_offset,
+                    ));
                 }
+                chunk_offset += xorb_entry.num_entries as usize;
             }
 
-            // If we're fetching a xorb, poll that future
-            if let Some(future) = self.fetch_xorb_future.as_mut() {
-                match future.as_mut().poll(cx) {
-                    Poll::Ready(Ok(data)) => {
-                        self.current_xorb_data = Some(data);
-                        self.fetch_xorb_future = None;
-                        // Continue to extract chunks from the xorb
-                    }
-                    Poll::Ready(Err(e)) => {
-                        self.completed = true;
-                        return Poll::Ready(Some(Err(format!("Failed to fetch xorb: {}", e))));
-                    }
-                    Poll::Pending => return Poll::Pending,
-                }
-            }
-
-            // Check if we need to fetch the next shard
-            if self.current_shard.is_none() {
-                if self.current_shard_idx >= self.shard_ids.len() {
-                    // All shards processed
-                    self.completed = true;
-                    return Poll::Ready(None);
-                }
-
-                // Create future for fetching shard asynchronously
-                let shard_id = self.shard_ids[self.current_shard_idx].clone();
-                let storage = self.storage.clone();
-                let shard_id_clone = shard_id.clone();
-
-                let future = Box::pin(async move {
-                    fetch_and_parse_shard(&shard_id_clone, &**storage)
-                        .await
-                        .map_err(|e| format!("Failed to fetch shard {}: {}", shard_id, e))
-                });
-                self.fetch_shard_future = Some(future);
-                self.current_shard_idx += 1;
-                // Continue loop to poll the future
-                continue;
-            }
-
-            // Check if we've processed all xorbs in current shard
-            if self.current_xorb_idx >= self.xorb_entries.len() {
-                // Move to next shard
-                self.current_shard = None;
-                self.current_xorb_data = None;
-                continue;
-            }
-
-            // Check if we need to download the next xorb
-            if self.current_xorb_data.is_none() {
-                let (xorb_hash, _, _) = &self.xorb_entries[self.current_xorb_idx];
+            // Process each xorb
+            for (xorb_hash, num_entries, xorb_chunk_offset) in xorb_entries {
+                // Fetch xorb data
                 let xorb_key = format!("xorbs/{}", xorb_hash);
-                let storage = self.storage.clone();
+                let xorb_data = storage.get(&xorb_key)
+                    .await
+                    .map_err(|e| format!("Failed to fetch xorb {}: {}", xorb_hash, e))?
+                    .to_vec();
 
-                // Create future for fetching xorb
-                let future = Box::pin(async move {
-                    storage.get(&xorb_key).await.map(|b| b.to_vec())
-                });
-                self.fetch_xorb_future = Some(future);
-                // Continue loop to poll the future
-                continue;
-            }
+                // Extract each chunk from the xorb
+                for chunk_idx in 0..num_entries {
+                    let global_chunk_idx = xorb_chunk_offset + chunk_idx;
+                    if global_chunk_idx >= shard.xorb_chunk_entries.len() {
+                        break;
+                    }
 
-            // Extract next chunk from current xorb
-            let shard = self.current_shard.as_ref().unwrap();
-            let xorb_data = self.current_xorb_data.as_ref().unwrap();
-            let (_, num_entries, chunk_offset) = self.xorb_entries[self.current_xorb_idx];
+                    let chunk_entry = &shard.xorb_chunk_entries[global_chunk_idx];
+                    let chunk_offset_bytes = chunk_entry.chunk_byte_range_start as usize;
 
-            // Check if we've processed all chunks in current xorb
-            if self.current_chunk_idx >= num_entries {
-                // Move to next xorb
-                self.current_xorb_idx += 1;
-                self.current_chunk_idx = 0;
-                self.current_xorb_data = None;
-                continue;
-            }
+                    // Read chunk header
+                    if chunk_offset_bytes + XorbChunkHeader::SIZE > xorb_data.len() {
+                        yield Err("Chunk offset out of bounds".to_string());
+                        return;
+                    }
 
-            // Get chunk entry
-            let global_chunk_idx = chunk_offset + self.current_chunk_idx;
-            if global_chunk_idx >= shard.xorb_chunk_entries.len() {
-                // Should not happen, but handle gracefully
-                self.current_xorb_idx += 1;
-                self.current_chunk_idx = 0;
-                self.current_xorb_data = None;
-                continue;
-            }
+                    let mut chunk_cursor = std::io::Cursor::new(&xorb_data[chunk_offset_bytes..]);
+                    let chunk_header = XorbChunkHeader::deserialize(&mut chunk_cursor)
+                        .map_err(|e| format!("Failed to parse chunk header: {}", e))?;
 
-            let chunk_entry = &shard.xorb_chunk_entries[global_chunk_idx];
-            let chunk_offset_bytes = chunk_entry.chunk_byte_range_start as usize;
+                    // Read compressed chunk data
+                    let data_start = chunk_offset_bytes + XorbChunkHeader::SIZE;
+                    let data_end = data_start + chunk_header.compressed_length as usize;
+                    if data_end > xorb_data.len() {
+                        yield Err("Chunk data out of bounds".to_string());
+                        return;
+                    }
 
-            // Read chunk header
-            if chunk_offset_bytes + 8 > xorb_data.len() {
-                self.completed = true;
-                return Poll::Ready(Some(Err("Chunk offset out of bounds".to_string())));
-            }
+                    let compressed_data = &xorb_data[data_start..data_end];
 
-            let mut chunk_cursor = std::io::Cursor::new(&xorb_data[chunk_offset_bytes..]);
-            let chunk_header = match XorbChunkHeader::deserialize(&mut chunk_cursor) {
-                Ok(h) => h,
-                Err(e) => {
-                    self.completed = true;
-                    return Poll::Ready(Some(Err(format!("Failed to parse chunk header: {}", e))));
+                    // Decompress chunk
+                    let decompressed = decompress(
+                        chunk_header.compression_scheme,
+                        compressed_data,
+                        chunk_header.uncompressed_length as usize,
+                    ).map_err(|e| format!("Failed to decompress chunk: {}", e))?;
+
+                    yield Ok(bytes::Bytes::from(decompressed));
                 }
-            };
-
-            // Read compressed chunk data
-            let data_start = chunk_offset_bytes + XorbChunkHeader::SIZE;
-            let data_end = data_start + chunk_header.compressed_length as usize;
-            if data_end > xorb_data.len() {
-                self.completed = true;
-                return Poll::Ready(Some(Err("Chunk data out of bounds".to_string())));
             }
-
-            let compressed_data = &xorb_data[data_start..data_end];
-
-            // Decompress chunk
-            let decompressed = match decompress(
-                chunk_header.compression_scheme,
-                compressed_data,
-                chunk_header.uncompressed_length as usize,
-            ) {
-                Ok(d) => d,
-                Err(e) => {
-                    self.completed = true;
-                    return Poll::Ready(Some(Err(format!("Failed to decompress chunk: {}", e))));
-                }
-            };
-
-            self.total_bytes += decompressed.len() as u64;
-            self.current_chunk_idx += 1;
-
-            return Poll::Ready(Some(Ok(bytes::Bytes::from(decompressed))));
         }
-    }
+    })
 }
 
 /// Check if there's enough disk space for an upload.

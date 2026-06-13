@@ -306,7 +306,8 @@ pub async fn get_reconstruction(
         for xorb_entry in &shard.xorb_entries {
             let xorb_hash = xorb_entry.xorb_hash.to_hex();
             let xorb_size = xorb_entry.num_bytes_in_xorb as u64;
-            let storage_path = format!("xorbs/default/{}", xorb_hash);
+            // C1 fix: Use xorbs/{hash} format to match conversion pipeline and LFS download.
+            let storage_path = format!("xorbs/{}", xorb_hash);
 
             // Only add to xorbs vec if not seen before
             if seen_xorbs.insert(xorb_hash.clone()) {

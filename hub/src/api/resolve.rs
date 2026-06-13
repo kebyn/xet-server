@@ -94,7 +94,22 @@ async fn handle_resolve(
     // I8: Build download URL using Hub's URL (not CAS internal URL)
     // Clients go through Hub, which proxies to CAS
     let hub_base_url = config.server.base_url();
-    let download_url = format!("{}/lfs/objects/{}", hub_base_url, file_entry.cas_hash);
+
+    // Generate a short-lived proxy token for the download
+    let xet_signer = req.app_data::<web::Data<std::sync::Arc<crate::auth::xet_signer::XetSigner>>>();
+    let proxy_token_param = if let Some(signer) = xet_signer {
+        let (proxy_token, _) = signer.sign_proxy(
+            "anonymous",
+            &file_entry.cas_hash,
+            "download",
+            &format!("{}/{}", namespace, repo_name),
+            &repo_type.to_string(),
+        );
+        format!("?token={}", proxy_token)
+    } else {
+        String::new()
+    };
+    let download_url = format!("{}/lfs/objects/{}{}", hub_base_url, file_entry.cas_hash, proxy_token_param);
 
     // Common HF Hub headers expected by huggingface_hub library
     // (commit_id is already an owned String from resolve_revision)
