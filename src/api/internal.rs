@@ -7,7 +7,7 @@ use actix_web::{web, HttpResponse};
 use serde::Serialize;
 use tracing::{info, warn};
 
-use crate::api::auth::{check_scope, extract_token_from_request, AuthVerifier};
+use crate::api::auth::{extract_token_from_request, is_internal_token, AuthVerifier};
 use crate::index::MetadataIndex;
 use crate::metrics::GLOBAL_METRICS;
 use crate::storage::StorageBackend;
@@ -68,12 +68,12 @@ pub async fn get_blob_state(
         }
     };
 
-    // Check for "internal" scope
-    if !check_scope(&claims, "internal") {
+    // I2 fix: Use is_internal_token() for defense-in-depth (checks sub + scope + token_type)
+    if !is_internal_token(&claims) {
         GLOBAL_METRICS.record_request(403);
         GLOBAL_METRICS.record_latency(start);
         return HttpResponse::Forbidden().json(ErrorResponse {
-            error: "Insufficient scope: requires 'internal'".to_string(),
+            error: "Internal endpoint requires internal token type and scope".to_string(),
         });
     }
 
@@ -179,12 +179,12 @@ pub async fn head_blob(
         }
     };
 
-    // Check for "internal" scope
-    if !check_scope(&claims, "internal") {
+    // I2 fix: Use is_internal_token() for defense-in-depth (checks sub + scope + token_type)
+    if !is_internal_token(&claims) {
         GLOBAL_METRICS.record_request(403);
         GLOBAL_METRICS.record_latency(start);
         return HttpResponse::Forbidden().json(ErrorResponse {
-            error: "Insufficient scope: requires 'internal'".to_string(),
+            error: "Internal endpoint requires internal token type and scope".to_string(),
         });
     }
 

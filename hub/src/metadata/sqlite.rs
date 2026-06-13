@@ -146,6 +146,9 @@ impl SqliteMetadataStore {
             .after_connect(|conn, _| Box::pin(async move {
                 sqlx::query("PRAGMA journal_mode = WAL;").execute(&mut *conn).await?;
                 sqlx::query("PRAGMA foreign_keys = ON;").execute(&mut *conn).await?;
+                // M4 fix: Wait up to 5 seconds for lock release instead of failing immediately
+                // with SQLITE_BUSY. Critical for concurrent write workloads.
+                sqlx::query("PRAGMA busy_timeout = 5000;").execute(&mut *conn).await?;
                 Ok(())
             }))
             .connect(path)
@@ -406,48 +409,39 @@ impl MetadataStore for SqliteMetadataStore {
         repo_id: i64,
         limit: Option<usize>,
     ) -> Result<Vec<Revision>, MetadataError> {
-        // Get HEAD first
-        let head_row = sqlx::query("SELECT commit_id FROM heads WHERE repo_id = ?1")
-            .bind(repo_id)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+        // M3 fix: Use recursive CTE instead of N+1 queries.
+        // Single SQL query walks the entire parent chain from HEAD.
+        // Use i64::MAX - 1 to avoid overflow when casting from usize.
+        let effective_limit = limit
+            .map(|l| l as i64)
+            .unwrap_or(i64::MAX - 1);
 
-        let head = match head_row {
-            Some(r) => r.try_get::<String, _>(0)
-                .map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
-            None => return Ok(Vec::new()),
-        };
-
-        // Walk the parent chain
-        let mut log = Vec::new();
-        let mut current = Some(head);
-        let limit = limit.unwrap_or(usize::MAX);
-
-        while let Some(commit_id) = current {
-            if log.len() >= limit {
-                break;
-            }
-
-            let row = sqlx::query(
-                "SELECT commit_id, repo_id, parent, message, author, created_at FROM revisions WHERE commit_id = ?1"
+        // The recursive step condition uses (ch.depth + 1 < ?2) so that
+        // the base case (depth=0) plus (limit-1) recursive steps yields
+        // exactly `limit` rows total.
+        let rows = sqlx::query(
+            "WITH RECURSIVE commit_history AS (
+                SELECT r.commit_id, r.repo_id, r.parent, r.message, r.author, r.created_at, 0 AS depth
+                FROM revisions r
+                INNER JOIN heads h ON r.commit_id = h.commit_id
+                WHERE h.repo_id = ?1
+                UNION ALL
+                SELECT r.commit_id, r.repo_id, r.parent, r.message, r.author, r.created_at, ch.depth + 1
+                FROM revisions r
+                INNER JOIN commit_history ch ON r.commit_id = ch.parent
+                WHERE ch.depth + 1 < ?2
             )
-            .bind(&commit_id)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+            SELECT commit_id, repo_id, parent, message, author, created_at
+            FROM commit_history
+            ORDER BY depth"
+        )
+        .bind(repo_id)
+        .bind(effective_limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
-            match row {
-                Some(r) => {
-                    let revision = row_to_revision(&r)?;
-                    current = revision.parent.clone();
-                    log.push(revision);
-                }
-                None => break, // Stop if revision not found
-            }
-        }
-
-        Ok(log)
+        rows.iter().map(row_to_revision).collect()
     }
 
     async fn add_file_entries(&self, entries: Vec<FileEntry>) -> Result<(), MetadataError> {

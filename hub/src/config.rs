@@ -18,44 +18,13 @@ impl ServerSettings {
     /// Returns `public_base_url` if configured, otherwise constructs from host:port.
     /// Trailing slashes are stripped to prevent malformed URLs when callers append paths.
     ///
-    /// # Panics
-    /// Panics if `public_base_url` is set but not a valid URL.
+    /// URL validation happens at config load time (see `from_file_or_env()`).
+    /// This method performs no validation — it trusts that the URL was validated on load.
     pub fn base_url(&self) -> String {
-        let url = self.public_base_url.clone()
-            .unwrap_or_else(|| format!("http://{}:{}", self.host, self.port));
-        let url = url.trim_end_matches('/').to_string();
-
-        // I1: Validate URL format using proper URL parsing if explicitly configured
-        // I2: Panic on invalid URL to fail fast at startup rather than at first request
-        if self.public_base_url.is_some() {
-            match url::Url::parse(&url) {
-                Ok(parsed) => {
-                    if parsed.host().is_none() {
-                        panic!(
-                            "public_base_url '{}' is missing a valid host. \
-                            This will cause client connection failures.",
-                            url
-                        );
-                    }
-                    if parsed.scheme() != "http" && parsed.scheme() != "https" {
-                        tracing::warn!(
-                            "public_base_url '{}' uses non-HTTP scheme '{}'. \
-                            This may cause issues with client URLs.",
-                            url, parsed.scheme()
-                        );
-                    }
-                }
-                Err(e) => {
-                    panic!(
-                        "public_base_url '{}' is not a valid URL: {}. \
-                        This will cause client connection failures.",
-                        url, e
-                    );
-                }
-            }
-        }
-
-        url
+        self.public_base_url.clone()
+            .unwrap_or_else(|| format!("http://{}:{}", self.host, self.port))
+            .trim_end_matches('/')
+            .to_string()
     }
 }
 
@@ -234,8 +203,19 @@ impl HubConfig {
     pub fn from_file(path: &str) -> Result<Self, String> {
         let content = std::fs::read_to_string(path)
             .map_err(|e| format!("Failed to read config file {}: {}", path, e))?;
-        toml::from_str(&content)
-            .map_err(|e| format!("Failed to parse config file {}: {}", path, e))
+        let config: Self = toml::from_str(&content)
+            .map_err(|e| format!("Failed to parse config file {}: {}", path, e))?;
+
+        // M1 fix: Validate URL at load time (same validation as from_file_or_env)
+        if let Some(ref url) = config.server.public_base_url {
+            let parsed = url::Url::parse(url)
+                .map_err(|e| format!("public_base_url '{}' is not a valid URL: {}", url, e))?;
+            if parsed.host().is_none() {
+                return Err(format!("public_base_url '{}' is missing a valid host", url));
+            }
+        }
+
+        Ok(config)
     }
 
     /// M3: Load configuration from file (if path provided) with environment variable overrides.

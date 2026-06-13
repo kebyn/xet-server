@@ -48,11 +48,17 @@ impl TokenStore {
 
         Self::init_tables(&pool).await?;
 
-        // M4 fix: Use server-side salt for token hashing.
-        // In production, this should be loaded from environment or config.
-        // For now, use a static salt to demonstrate the pattern.
-        let hash_salt = std::env::var("HUB_TOKEN_HASH_SALT")
-            .unwrap_or_else(|_| "xet-hub-default-salt-2024".to_string());
+        // I1 fix: Generate random salt if not configured (prevents weak default salt)
+        let hash_salt = match std::env::var("HUB_TOKEN_HASH_SALT") {
+            Ok(salt) => salt,
+            Err(_) => {
+                tracing::warn!(
+                    "HUB_TOKEN_HASH_SALT not set, generating random salt. \
+                    Set this in production for consistent hashing across restarts."
+                );
+                uuid::Uuid::new_v4().to_string()
+            }
+        };
 
         Ok(Self { pool, hash_salt })
     }

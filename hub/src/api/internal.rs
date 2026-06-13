@@ -35,8 +35,8 @@ pub async fn get_referenced_hashes(
         }
     };
 
-    // Verify token - use verify_xet_token for internal tokens
-    let claims = match xet_signer.verify_xet_token(&token) {
+    // Verify token - use verify_internal_token for internal tokens (I2 fix)
+    let claims = match xet_signer.verify_internal_token(&token) {
         Some(c) => c,
         None => {
             return HttpResponse::Unauthorized().json(serde_json::json!({
