@@ -136,22 +136,23 @@ fn row_to_file_entry(row: &sqlx::sqlite::SqliteRow) -> Result<FileEntry, Metadat
 
 impl SqliteMetadataStore {
     /// Create a new SQLite metadata store with connection pool
-    pub async fn new(path: &str) -> Result<Self, MetadataError> {
+    pub async fn new(path: &str, pool_size: u32) -> Result<Self, MetadataError> {
+        // S1 FIX: Use after_connect to ensure PRAGMA settings persist across connection pool recycling.
+        // PRAGMA settings are connection-level, not database-level, so they must be set on each new connection.
         let pool = SqlitePoolOptions::new()
-            .max_connections(5)
+            .max_connections(pool_size)
             .min_connections(1)
             .acquire_timeout(std::time::Duration::from_secs(5))
+            .after_connect(|conn, _| Box::pin(async move {
+                sqlx::query("PRAGMA journal_mode = WAL;").execute(&mut *conn).await?;
+                sqlx::query("PRAGMA foreign_keys = ON;").execute(&mut *conn).await?;
+                Ok(())
+            }))
             .connect(path)
             .await
             .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
         Self::init_pool(&pool).await?;
-
-        // I2: Enable WAL mode for better read/write concurrency.
-        sqlx::query("PRAGMA journal_mode = WAL;")
-            .execute(&pool)
-            .await
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
         Ok(Self { pool })
     }
@@ -162,8 +163,13 @@ impl SqliteMetadataStore {
         // multiple connections, each would see its own empty database. We use
         // max_connections(1) with file::memory:?cache=shared to ensure all
         // pool connections share the same in-memory database.
+        // S1 FIX: Use after_connect to ensure PRAGMA settings persist.
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
+            .after_connect(|conn, _| Box::pin(async move {
+                sqlx::query("PRAGMA foreign_keys = ON;").execute(&mut *conn).await?;
+                Ok(())
+            }))
             .connect("sqlite::memory:")
             .await
             .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
@@ -173,14 +179,10 @@ impl SqliteMetadataStore {
         Ok(Self { pool })
     }
 
-    /// Common pool initialization: enable foreign keys, create schema, set version.
+    /// Common pool initialization: create schema, set version.
+    /// Note: PRAGMA settings (journal_mode, foreign_keys) are set in after_connect callback
+    /// to ensure they persist across connection pool recycling (S1 fix).
     async fn init_pool(pool: &SqlitePool) -> Result<(), MetadataError> {
-        // I6: Enable foreign key constraints
-        sqlx::query("PRAGMA foreign_keys = ON;")
-            .execute(pool)
-            .await
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
-
         // Create tables
         sqlx::query(SCHEMA)
             .execute(pool)
@@ -330,9 +332,8 @@ impl MetadataStore for SqliteMetadataStore {
                 Ok(())
             }
             Err(e) => {
-                // Rollback is implicit when tx is dropped without commit.
-                // Explicitly rollback to surface any rollback errors as warnings.
-                let _ = sqlx::query("SELECT 1").execute(&mut *tx).await;
+                // I2 FIX: Rollback is implicit when tx is dropped without commit.
+                // Removed meaningless SELECT 1 statement.
                 drop(tx);
                 Err(e)
             }
@@ -545,8 +546,11 @@ impl MetadataStore for SqliteMetadataStore {
         entries: &[FileEntry],
         expected_parent: Option<&str>,
     ) -> Result<(), MetadataError> {
-        // Acquire a dedicated connection so we can issue BEGIN IMMEDIATE,
-        // which prevents SQLITE_BUSY when upgrading from read to write locks.
+        // S3 NOTE: Manual transaction control is necessary for BEGIN IMMEDIATE,
+        // which sqlx's Transaction API doesn't directly support.
+        // Tradeoff: If panic occurs between BEGIN and COMMIT/ROLLBACK, the connection
+        // may return to pool with an open transaction. However, sqlx will discard
+        // connections that error, and SQLite will auto-rollback when connection closes.
         let mut conn = self.pool.acquire().await
             .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
@@ -621,10 +625,12 @@ impl MetadataStore for SqliteMetadataStore {
 
         match result {
             Ok(()) => {
-                sqlx::query("COMMIT").execute(&mut *conn).await.ok();
+                sqlx::query("COMMIT").execute(&mut *conn).await
+                    .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
                 Ok(())
             }
             Err(e) => {
+                // Explicit ROLLBACK before returning error
                 sqlx::query("ROLLBACK").execute(&mut *conn).await.ok();
                 Err(e)
             }

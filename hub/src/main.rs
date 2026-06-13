@@ -15,7 +15,9 @@ async fn main() -> std::io::Result<()> {
         return create_token_command(&args[2..]).await;
     }
 
-    let config = HubConfig::from_env();
+    // S2 FIX: Use from_file_or_env() to support TOML configuration files.
+    // Previously only from_env() was called, making TOML config support dead code.
+    let config = HubConfig::from_file_or_env();
     start_server(config).await
 }
 
@@ -63,7 +65,7 @@ async fn create_token_command(args: &[String]) -> std::io::Result<()> {
     let name = name.unwrap_or("default-token");
     let db_path = db_path.unwrap_or("hub.db");
 
-    let token_store = TokenStore::new(db_path)
+    let token_store = TokenStore::new(db_path, 5)
         .await
         .map_err(std::io::Error::other)?;
 

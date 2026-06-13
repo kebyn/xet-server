@@ -456,3 +456,9 @@ async fn test_sign_proxy_uses_configured_ttl() {
         .as_secs();
     assert!(exp >= now + 598 && exp <= now + 602, "Proxy token TTL should use configured 600s value");
 }
+
+#[actix_web::test]
+async fn test_hub_config_db_pool_size_default() {
+    let config = HubConfig::default();
+    assert_eq!(config.metadata.db_pool_size, 5);
+}
