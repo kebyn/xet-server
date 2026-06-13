@@ -262,23 +262,18 @@ export HUB_CAS_TIMEOUT_SECS=60
 
 | 环境变量 | 描述 | 默认值 | 必需 |
 |---------|------|--------|------|
-| `HUB_DATA_DIR` | Hub 数据目录 | `./data` | 否 |
 | `HUB_INLINE_THRESHOLD` | 内联文件阈值（字节） | `1048576` (1MB) | 否 |
-| `HUB_LFS_THRESHOLD` | LFS 文件阈值（字节） | `10485760` (10MB) | 否 |
 | `HUB_UPLOAD_TEMP_DIR` | 上传临时文件目录 | `/tmp/hub-uploads` | 否 |
 | `HUB_MAX_UPLOAD_SIZE` | 最大上传文件大小（字节） | `536870912` (512MB) | 否 |
 
 **说明**：
 - `HUB_INLINE_THRESHOLD`: 小于此值的文件内联在 commit 中（regular 模式）
-- `HUB_LFS_THRESHOLD`: 大于此值的文件使用 LFS 路径（lfs 模式）
 - `HUB_UPLOAD_TEMP_DIR`: 流式上传时的临时文件存储目录，建议使用 SSD
 - `HUB_MAX_UPLOAD_SIZE`: 单个文件的最大上传大小限制
 
 **示例**：
 ```bash
-export HUB_DATA_DIR=/var/lib/xet/hub-data
 export HUB_INLINE_THRESHOLD=2097152  # 2MB
-export HUB_LFS_THRESHOLD=20971520    # 20MB
 export HUB_UPLOAD_TEMP_DIR=/fast-ssd/hub-uploads
 export HUB_MAX_UPLOAD_SIZE=1073741824  # 1GB
 ```
@@ -311,9 +306,7 @@ base_url = "http://localhost:8081"
 internal_timeout_seconds = 30
 
 [storage]
-data_dir = "/var/lib/xet/hub-data"
 inline_threshold_bytes = 1048576
-lfs_threshold_bytes = 10485760
 upload_temp_dir = "/fast-ssd/hub-uploads"
 max_upload_size = 536870912
 ```
@@ -376,7 +369,6 @@ export HUB_SQLITE_PATH=/var/lib/xet/hub-metadata.db
 export CAS_BASE_URL=http://cas-server:8081
 export HUB_CAS_TIMEOUT_SECS=60
 export HUB_INLINE_THRESHOLD=2097152  # 2MB
-export HUB_LFS_THRESHOLD=20971520    # 20MB
 ```
 
 ### S3 存储后端
@@ -550,7 +542,7 @@ ufw deny 8081/tcp from any except 10.0.0.0/8
 ```bash
 # 将临时文件目录放在 SSD 上
 export XET_UPLOAD_TEMP_DIR=/fast-ssd/xet-uploads
-export HUB_DATA_DIR=/fast-ssd/hub-data
+export HUB_UPLOAD_TEMP_DIR=/fast-ssd/hub-uploads
 ```
 
 ### 2. 内存使用

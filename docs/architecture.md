@@ -948,6 +948,54 @@ LFS 对象是原始文件的直接存储，使用 SHA-256 哈希标识。
 
 ---
 
+## 配置合理性改进 (2026-06-13)
+
+### 新增配置项
+
+| 环境变量 | 默认值 | 说明 |
+|----------|--------|------|
+| `XET_RATE_LIMIT_RPM` | `60` | CAS 公共端点速率限制（请求/分钟/IP） |
+| `HUB_RATE_LIMIT_RPM` | `120` | Hub 公共端点速率限制（请求/分钟/IP） |
+| `HUB_PROXY_TOKEN_TTL_SECONDS` | `300` | LFS Proxy Token 有效期（秒） |
+| `HUB_MAX_DOWNLOAD_SIZE` | `536870912` (512MB) | CAS 下载大小限制（应 >= HUB_MAX_UPLOAD_SIZE） |
+| `GC_HTTP_TIMEOUT_SECONDS` | `300` | GC 请求 Hub 的 HTTP 超时（秒） |
+| `HUB_DB_POOL_SIZE` | `5` | SQLite 连接池大小 |
+
+### 已删除的死代码配置
+
+- `HUB_LFS_THRESHOLD` — 从未在代码中使用
+- `HUB_DATA_DIR` — 从未在代码中使用
+
+### 默认值变更
+
+- `XET_MIN_CONVERSION_SIZE`: 1024 (1KB) → 65536 (64KB) — 减少小文件无效转换开销
+
+### 启动时校验
+
+- CAS 绑定到 localhost 时输出警告（分布式部署需设置 XET_HOST=0.0.0.0）
+- CAS 公钥文件权限检查（world-writable/group-writable 时输出安全警告）
+- GC 启用时验证 GC_HUB_INTERNAL_TOKEN 非空
+- XET_STORAGE_BACKEND 校验（必须为 local 或 s3）
+- Hub 启动时异步检查 CAS 连通性
+- Hub 相对路径配置警告（private_key.pem, hub.db）
+
+### 部署建议
+
+**S3 部署:**
+- 设置 `XET_UPLOAD_TEMP_DIR` 到有足够空间的分区
+- S3 认证使用标准 AWS 环境变量：`AWS_ACCESS_KEY_ID`、`AWS_SECRET_ACCESS_KEY`、`AWS_REGION`
+
+**企业集成:**
+- 根据并发量设置 `XET_RATE_LIMIT_RPM` 和 `HUB_RATE_LIMIT_RPM`
+- 将 `CAS_PUBLIC_KEY_PATH` 设为 `/etc/xet/hub-public-key.pem`（权限 0644）
+- 大仓库 GC 宽限期建议 `GC_GRACE_PERIOD_SECONDS=1800`（30分钟）
+
+**连接池调优:**
+- SQLite WAL 模式只支持 1 个并发写入者，增加 `HUB_DB_POOL_SIZE` 主要提升读并发
+- HTTP 连接池参数（pool_max_idle_per_host=10, pool_idle_timeout=90s, tcp_keepalive=60s）适合大多数场景
+
+---
+
 ## 相关文档
 
 - [Configuration Guide](configuration.md) - 配置选项详细说明
