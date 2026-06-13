@@ -197,6 +197,10 @@ pub struct GcConfig {
     pub hub_base_url: String,
     /// Internal token for authenticating with Hub's /internal/* endpoints
     pub hub_internal_token: String,
+    /// HTTP timeout in seconds for GC requests to Hub.
+    /// Configure via `GC_HTTP_TIMEOUT_SECONDS` environment variable.
+    /// Default: 300 (5 minutes).
+    pub http_timeout_seconds: u64,
 }
 
 impl Default for GcConfig {
@@ -208,6 +212,7 @@ impl Default for GcConfig {
             dry_run: true,              // Dry-run by default for safety
             hub_base_url: "http://localhost:8080".to_string(),
             hub_internal_token: String::new(),
+            http_timeout_seconds: 300,
         }
     }
 }
@@ -343,6 +348,13 @@ impl ServerConfig {
             .unwrap_or_else(|_| "http://localhost:8080".to_string());
         let gc_hub_internal_token = std::env::var("GC_HUB_INTERNAL_TOKEN")
             .unwrap_or_default();
+        let gc_http_timeout = match std::env::var("GC_HTTP_TIMEOUT_SECONDS") {
+            Ok(val) => val.parse().unwrap_or_else(|_| {
+                tracing::warn!("GC_HTTP_TIMEOUT_SECONDS '{}' is not a valid number, using default 300", val);
+                300
+            }),
+            Err(_) => 300,
+        };
 
         Self {
             server: ServerSettings { host, port, public_base_url, max_body_size_mb, rate_limit_rpm },
@@ -373,6 +385,7 @@ impl ServerConfig {
                 dry_run: gc_dry_run,
                 hub_base_url: gc_hub_base_url,
                 hub_internal_token: gc_hub_internal_token,
+                http_timeout_seconds: gc_http_timeout,
             },
         }
     }
@@ -413,4 +426,25 @@ pub fn check_public_key_permissions(path: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+/// Validate GC configuration and return warning messages for misconfigurations.
+pub fn validate_gc_config(config: &ServerConfig) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if config.gc.enabled {
+        if config.gc.hub_internal_token.is_empty() {
+            warnings.push(
+                "GC is enabled but GC_HUB_INTERNAL_TOKEN is empty. \
+                GC requires an internal token to query Hub's /internal/referenced-hashes endpoint. \
+                Set GC_HUB_INTERNAL_TOKEN to a valid token before enabling GC.".to_string(),
+            );
+        }
+        if config.gc.hub_base_url == "http://localhost:8080" && config.server.host != "127.0.0.1" {
+            warnings.push(
+                "GC is enabled with default hub_base_url (http://localhost:8080) but CAS is not bound to localhost. \
+                In distributed deployments, set GC_HUB_BASE_URL to the actual Hub address.".to_string(),
+            );
+        }
+    }
+    warnings
 }

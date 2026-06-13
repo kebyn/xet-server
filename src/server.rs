@@ -50,6 +50,10 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
     let converting = Arc::new(ConvertingOids::new());
 
     // GC: Garbage collector for orphaned blobs
+    // Validate GC configuration
+    for warning in crate::config::validate_gc_config(&config) {
+        tracing::warn!("{}", warning);
+    }
     let gc = Arc::new(GarbageCollector::new(storage.clone(), config.gc.clone()));
     let last_gc_stats = Arc::new(RwLock::new(None::<GcStats>));
 
