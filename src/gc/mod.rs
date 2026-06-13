@@ -187,25 +187,57 @@ impl GarbageCollector {
     }
 
     /// Scan all shards and collect referenced xorb hashes
+    /// I3 fix: Use concurrent shard fetching with bounded parallelism to reduce total GC time.
+    /// Processes shards in batches to avoid overwhelming the storage backend.
     async fn scan_referenced_xorbs(&self, shard_keys: &[String]) -> Result<HashSet<String>, String> {
         let mut referenced = HashSet::new();
 
-        for shard_key in shard_keys {
-            let data = self
-                .storage
-                .get(shard_key)
-                .await
-                .map_err(|e| format!("Failed to read shard {}: {}", shard_key, e))?;
+        // I3: Process shards concurrently with bounded parallelism
+        // Using chunks of 10 to balance parallelism with resource usage
+        const BATCH_SIZE: usize = 10;
 
-            // Parse shard to extract xorb references
-            // For now, we use a simplified approach - in production, parse the shard properly
-            // using MDBShardFile::parse() and iterate xorb_entries
-            if let Ok(shard) = crate::format::shard::MDBShardFile::parse(&data) {
-                for xorb_entry in &shard.xorb_entries {
-                    referenced.insert(hex::encode(xorb_entry.xorb_hash.as_bytes()));
+        for chunk in shard_keys.chunks(BATCH_SIZE) {
+            let mut handles = vec![];
+
+            for shard_key in chunk {
+                let storage = self.storage.clone();
+                let key = shard_key.clone();
+
+                let handle = tokio::spawn(async move {
+                    let data = storage.get(&key).await
+                        .map_err(|e| format!("Failed to read shard {}: {}", key, e))?;
+
+                    // Parse shard to extract xorb references
+                    // For now, we use a simplified approach - in production, parse the shard properly
+                    // using MDBShardFile::parse() and iterate xorb_entries
+                    let mut xorb_hashes = HashSet::new();
+                    if let Ok(shard) = crate::format::shard::MDBShardFile::parse(&data) {
+                        for xorb_entry in &shard.xorb_entries {
+                            xorb_hashes.insert(hex::encode(xorb_entry.xorb_hash.as_bytes()));
+                        }
+                    } else {
+                        warn!("Failed to parse shard {}, skipping xorb extraction", key);
+                    }
+
+                    Ok::<HashSet<String>, String>(xorb_hashes)
+                });
+
+                handles.push(handle);
+            }
+
+            // Wait for all tasks in this batch to complete
+            for handle in handles {
+                match handle.await {
+                    Ok(Ok(xorb_hashes)) => {
+                        referenced.extend(xorb_hashes);
+                    }
+                    Ok(Err(e)) => {
+                        return Err(e);
+                    }
+                    Err(e) => {
+                        return Err(format!("Task join error: {}", e));
+                    }
                 }
-            } else {
-                warn!("Failed to parse shard {}, skipping xorb extraction", shard_key);
             }
         }
 

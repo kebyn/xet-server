@@ -1,4 +1,30 @@
 //! S3/MinIO storage backend with streaming multipart upload support.
+//!
+//! # I7: S3 Lifecycle Rule Recommendation
+//!
+//! When using S3 storage backend, configure a lifecycle rule to automatically clean up
+//! incomplete multipart uploads. This is critical because:
+//!
+//! - Multipart uploads that fail mid-way (network error, server crash) leave orphaned parts
+//! - Orphaned parts continue to incur storage costs indefinitely
+//! - The `abort_multipart_upload` in this code is best-effort and may not execute during shutdown
+//!
+//! **Recommended S3 lifecycle rule:**
+//! ```json
+//! {
+//!   "Rules": [
+//!     {
+//!       "ID": "AbortIncompleteMultipartUploads",
+//!       "Status": "Enabled",
+//!       "Filter": { "Prefix": "" },
+//!       "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 }
+//!     }
+//!   ]
+//! }
+//! ```
+//!
+//! This will automatically abort any multipart upload that hasn't completed within 7 days,
+//! preventing orphaned parts from accumulating and incurring unnecessary costs.
 
 use super::{StorageBackend, StorageError, StorageResult};
 use async_trait::async_trait;

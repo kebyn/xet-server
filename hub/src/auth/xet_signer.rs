@@ -72,7 +72,8 @@ impl XetSigner {
 
     /// Internal helper to sign claims and produce a token
     /// Returns (token, expiration_timestamp)
-    fn sign_claims(&self, claims: XetClaims, prefix: &str) -> (String, u64) {
+    /// I1 fix: Return Result to propagate serialization errors instead of panicking
+    fn sign_claims(&self, claims: XetClaims, prefix: &str) -> Result<(String, u64), String> {
         let exp = claims.exp;
 
         let header = JwtHeader {
@@ -81,23 +82,30 @@ impl XetSigner {
             kid: self.kid.clone(),
         };
 
-        let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap());
-        let claims_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
+        // I1 fix: Use map_err instead of unwrap() to avoid panic on serialization failure
+        let header_b64 = URL_SAFE_NO_PAD.encode(
+            serde_json::to_vec(&header).map_err(|e| format!("Failed to serialize header: {}", e))?
+        );
+        let claims_b64 = URL_SAFE_NO_PAD.encode(
+            serde_json::to_vec(&claims).map_err(|e| format!("Failed to serialize claims: {}", e))?
+        );
 
         let signing_input = format!("{}.{}", header_b64, claims_b64);
         let signature = self.signing_key.sign(signing_input.as_bytes());
         let sig_b64 = URL_SAFE_NO_PAD.encode(signature.to_bytes());
 
-        (format!("{}{}.{}", prefix, signing_input, sig_b64), exp)
+        Ok((format!("{}{}.{}", prefix, signing_input, sig_b64), exp))
     }
 
     /// Sign and create a Xet access token
     /// Returns (token, expiration_timestamp)
+    /// I1 fix: Use unwrap_or_default() for system time to avoid panic on clock issues
     pub fn sign(&self, sub: &str, scope: &str, repo_id: &str, repo_type: &str, revision: &str) -> (String, u64) {
+        // I1 fix: Use unwrap_or_default() to avoid panic if system clock is before UNIX_EPOCH
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         let exp = now + self.ttl_seconds;
 
         let claims = XetClaims {
@@ -114,17 +122,23 @@ impl XetSigner {
             operation: None,
         };
 
-        self.sign_claims(claims, "xet_")
+        // sign_claims should not fail for valid claims, but we handle the error gracefully
+        self.sign_claims(claims, "xet_").unwrap_or_else(|e| {
+            tracing::error!("Failed to sign token: {}", e);
+            (String::new(), 0)
+        })
     }
 
     /// Sign and create a short-lived proxy token for LFS operations
     /// Proxy tokens are bound to a specific OID, operation (upload/download), and repository
     /// Returns (token, expiration_timestamp)
+    /// I1 fix: Use unwrap_or_default() for system time to avoid panic on clock issues
     pub fn sign_proxy(&self, sub: &str, oid: &str, operation: &str, repo_id: &str, repo_type: &str) -> (String, u64) {
+        // I1 fix: Use unwrap_or_default() to avoid panic if system clock is before UNIX_EPOCH
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         // Proxy tokens use configurable TTL (default 300s / 5 minutes)
         let exp = now + self.proxy_ttl_seconds;
 
@@ -142,17 +156,23 @@ impl XetSigner {
             operation: Some(operation.to_string()),
         };
 
-        self.sign_claims(claims, "proxy_")
+        // sign_claims should not fail for valid claims, but we handle the error gracefully
+        self.sign_claims(claims, "proxy_").unwrap_or_else(|e| {
+            tracing::error!("Failed to sign proxy token: {}", e);
+            (String::new(), 0)
+        })
     }
 
     /// Sign and create an internal token for Hub-to-CAS communication
     /// Internal tokens are short-lived (60 seconds) and can only access /internal/* endpoints
     /// Returns (token, expiration_timestamp)
+    /// I1 fix: Use unwrap_or_default() for system time to avoid panic on clock issues
     pub fn sign_internal(&self) -> (String, u64) {
+        // I1 fix: Use unwrap_or_default() to avoid panic if system clock is before UNIX_EPOCH
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         let exp = now + 60; // Short TTL for internal tokens
 
         let claims = XetClaims {
@@ -169,7 +189,12 @@ impl XetSigner {
             operation: None,
         };
 
-        self.sign_claims(claims, "xet_")
+        // C2 fix: Use internal_ prefix to distinguish from user tokens
+        // sign_claims should not fail for valid claims, but we handle the error gracefully
+        self.sign_claims(claims, "internal_").unwrap_or_else(|e| {
+            tracing::error!("Failed to sign internal token: {}", e);
+            (String::new(), 0)
+        })
     }
 
     /// Internal helper to verify a token's signature and decode its claims
@@ -218,11 +243,17 @@ impl XetSigner {
 
         let claims: XetClaims = serde_json::from_slice(&claims_json).ok()?;
 
+        // I2 fix: Verify kid matches expected to prevent key confusion attacks
+        if claims.kid != self.kid {
+            return None;
+        }
+
         // Check expiration
+        // I1 fix: Use unwrap_or(0) to avoid panic if system clock is before UNIX_EPOCH
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         if claims.exp < now {
             return None; // Token expired
         }

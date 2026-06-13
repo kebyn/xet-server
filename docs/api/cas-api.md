@@ -22,8 +22,10 @@ CAS (Content Addressable Storage) Server 是 Xet Server 的核心存储引擎，
 | `/lfs/objects/batch` | POST | Git LFS 批量 API (别名) | 需要 read/write |
 | `/internal/state/{oid}` | GET | 查询 blob 状态 | 需要 internal |
 | `/internal/blob/{oid}` | HEAD | 检查 blob 存在 | 需要 internal |
+| `/internal/gc/run` | POST | 手动触发垃圾回收 | 需要 internal |
+| `/internal/gc/status` | GET | 查询 GC 运行状态 | 需要 internal |
 | `/health` | GET | 健康检查 | 无需认证 |
-| `/metrics` | GET | Prometheus 指标 | 无需认证 |
+| `/metrics` | GET | Prometheus 指标 | 需要 internal |
 
 ---
 

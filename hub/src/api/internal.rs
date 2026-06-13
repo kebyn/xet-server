@@ -46,10 +46,11 @@ pub async fn get_referenced_hashes(
         }
     };
 
-    // Verify it's an internal token
-    if claims.scope != "internal" {
+    // Verify it's an internal token - check both scope and token_type for defense-in-depth
+    // C1 fix: Prevent proxy tokens from accessing internal endpoints
+    if claims.scope != "internal" || claims.token_type != "internal" {
         return HttpResponse::Forbidden().json(serde_json::json!({
-            "error": "Internal endpoint requires internal scope",
+            "error": "Internal endpoint requires internal token type and scope",
             "error_type": "AuthorizationError"
         }));
     }

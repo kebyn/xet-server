@@ -357,7 +357,7 @@ Content-Type: application/x-ndjson
    - `summary`: 提交信息（必需）
    - `parentRevision`: 父版本（可选）
 
-2. **File**（内联文件，最大 10MB）：
+2. **File**（内联文件，原始内容最大 10MB，Base64 编码后约 13.3MB）：
    ```json
    {
      "key": "file",
@@ -849,10 +849,11 @@ Authorization: Bearer hf_xxx
 
 ### 大文件处理
 
-**阈值**：
-- ≤ 1MB: 内联在 commit 中
-- 1-10MB: LFS 路径（存储为原始字节）
-- > 10MB: Xet 路径（分块/去重）
+**阈值**（Hub 端两分类）：
+- ≤ `HUB_INLINE_THRESHOLD`（默认 1MB）: 内联在 commit 中（regular 模式）
+- > `HUB_INLINE_THRESHOLD`: 通过 LFS 协议上传（lfs 模式）
+
+> **说明**：xorb/shard 格式转换是 CAS 服务端的异步后处理步骤，由转换管道自动完成，对客户端透明。Hub 端仅负责 two-way 分类（内联 vs LFS）。
 
 **LFS 指针文件**：
 ```

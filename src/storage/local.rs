@@ -238,7 +238,13 @@ impl LocalStorage {
                             .ok()
                             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                             .map(|d| d.as_secs()),
-                        Err(_) => Some(0),
+                        // M6 fix: Use current time instead of 0 to prevent GC from incorrectly
+                        // deleting files with unreadable metadata. If we use 0, the grace period
+                        // check (now - mtime > grace) would think the file is extremely old.
+                        Err(_) => Some(std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0)),
                     }
                 } else {
                     None
@@ -269,7 +275,14 @@ impl LocalStorage {
         entries_with_mtime: &mut Vec<(String, u64)>,
     ) -> StorageResult<()> {
         let entries = Self::walk_dir_impl(base_path, dir, true).await?;
-        entries_with_mtime.extend(entries.into_iter().map(|(key, mtime)| (key, mtime.unwrap_or(0))));
+        // M6 fix: Use current time instead of 0 for missing mtime to prevent GC from
+        // incorrectly deleting files. If mtime is 0, grace period check would think
+        // the file is extremely old and delete it.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        entries_with_mtime.extend(entries.into_iter().map(|(key, mtime)| (key, mtime.unwrap_or(now))));
         Ok(())
     }
 }

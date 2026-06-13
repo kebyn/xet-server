@@ -371,7 +371,7 @@ export CAS_TRUSTED_KIDS=hub-key-1,backup-key-1            # 受信任的密钥 I
 | `XET_CONVERSION_ENABLED` | 启用/禁用转换 | `true` |
 | `XET_CONVERSION_SCHEME` | 压缩方案（none/lz4/bg4lz4） | `lz4` |
 | `XET_DELETE_RAW_AFTER_CONVERSION` | 转换后删除原始 blob | `true` |
-| `XET_MIN_CONVERSION_SIZE` | 最小转换文件大小（字节） | `1024` (1KB) |
+| `XET_MIN_CONVERSION_SIZE` | 最小转换文件大小（字节） | `65536` (64KB) |
 | `XET_MAX_CONVERSION_SIZE` | 最大转换文件大小（字节） | `536870912` (512MB) |
 
 ### 性能考虑
@@ -419,6 +419,7 @@ export CAS_TRUSTED_KIDS=hub-key-1,backup-key-1            # 受信任的密钥 I
 | `GC_DRY_RUN` | 试运行模式（只报告不删除） | `true` |
 | `GC_HUB_BASE_URL` | Hub API URL | `http://localhost:8080` |
 | `GC_HUB_INTERNAL_TOKEN` | Hub 内部认证令牌 | 空 |
+| `GC_HTTP_TIMEOUT_SECONDS` | GC 请求 Hub 的 HTTP 超时（秒） | `300` (5 分钟) |
 
 ### 安全考虑
 
@@ -458,9 +459,11 @@ export CAS_TRUSTED_KIDS=hub-key-1,backup-key-1            # 受信任的密钥 I
 
 ### 配置
 
-当前为硬编码，未来计划添加环境变量配置：
-- `CAS_RATE_LIMIT_RPM`: CAS 每分钟请求数限制
-- `HUB_RATE_LIMIT_RPM`: Hub 每分钟请求数限制
+通过环境变量配置（默认值基于安全测试）：
+- `XET_RATE_LIMIT_RPM`: CAS 公共端点速率限制，默认 60 RPM
+- `HUB_RATE_LIMIT_RPM`: Hub 公共端点速率限制，默认 120 RPM
+
+> **注意**：CAS 使用 `XET_` 前缀（非 `CAS_`），与其他 CAS 配置保持一致。
 
 ### 最佳实践
 
@@ -948,51 +951,31 @@ LFS 对象是原始文件的直接存储，使用 SHA-256 哈希标识。
 
 ---
 
-## 配置合理性改进 (2026-06-13)
+## 配置变更历史
 
-### 新增配置项
+### 2026-06-13 配置合理性改进
 
-| 环境变量 | 默认值 | 说明 |
-|----------|--------|------|
-| `XET_RATE_LIMIT_RPM` | `60` | CAS 公共端点速率限制（请求/分钟/IP） |
-| `HUB_RATE_LIMIT_RPM` | `120` | Hub 公共端点速率限制（请求/分钟/IP） |
-| `HUB_PROXY_TOKEN_TTL_SECONDS` | `300` | LFS Proxy Token 有效期（秒） |
-| `HUB_MAX_DOWNLOAD_SIZE` | `536870912` (512MB) | CAS 下载大小限制（应 >= HUB_MAX_UPLOAD_SIZE） |
-| `GC_HTTP_TIMEOUT_SECONDS` | `300` | GC 请求 Hub 的 HTTP 超时（秒） |
-| `HUB_DB_POOL_SIZE` | `5` | SQLite 连接池大小 |
+**新增配置项**：
+- `XET_RATE_LIMIT_RPM` (60) - CAS 速率限制
+- `HUB_RATE_LIMIT_RPM` (120) - Hub 速率限制
+- `HUB_PROXY_TOKEN_TTL_SECONDS` (300) - Proxy Token TTL
+- `HUB_MAX_DOWNLOAD_SIZE` (512MB) - CAS 下载限制
+- `GC_HTTP_TIMEOUT_SECONDS` (300) - GC HTTP 超时
+- `HUB_DB_POOL_SIZE` (5) - SQLite 连接池大小
 
-### 已删除的死代码配置
+**默认值变更**：
+- `XET_MIN_CONVERSION_SIZE`: 1024 (1KB) → 65536 (64KB)
 
-- `HUB_LFS_THRESHOLD` — 从未在代码中使用
-- `HUB_DATA_DIR` — 从未在代码中使用
+**启动时校验**：
+- CAS 绑定 localhost 时输出警告
+- CAS 公钥文件权限检查
+- GC 启用时验证 internal token
+- XET_STORAGE_BACKEND 校验（local 或 s3）
+- Hub 启动时检查 CAS 连通性
 
-### 默认值变更
-
-- `XET_MIN_CONVERSION_SIZE`: 1024 (1KB) → 65536 (64KB) — 减少小文件无效转换开销
-
-### 启动时校验
-
-- CAS 绑定到 localhost 时输出警告（分布式部署需设置 XET_HOST=0.0.0.0）
-- CAS 公钥文件权限检查（world-writable/group-writable 时输出安全警告）
-- GC 启用时验证 GC_HUB_INTERNAL_TOKEN 非空
-- XET_STORAGE_BACKEND 校验（必须为 local 或 s3）
-- Hub 启动时异步检查 CAS 连通性
-- Hub 相对路径配置警告（private_key.pem, hub.db）
-
-### 部署建议
-
-**S3 部署:**
-- 设置 `XET_UPLOAD_TEMP_DIR` 到有足够空间的分区
-- S3 认证使用标准 AWS 环境变量：`AWS_ACCESS_KEY_ID`、`AWS_SECRET_ACCESS_KEY`、`AWS_REGION`
-
-**企业集成:**
-- 根据并发量设置 `XET_RATE_LIMIT_RPM` 和 `HUB_RATE_LIMIT_RPM`
-- 将 `CAS_PUBLIC_KEY_PATH` 设为 `/etc/xet/hub-public-key.pem`（权限 0644）
-- 大仓库 GC 宽限期建议 `GC_GRACE_PERIOD_SECONDS=1800`（30分钟）
-
-**连接池调优:**
-- SQLite WAL 模式只支持 1 个并发写入者，增加 `HUB_DB_POOL_SIZE` 主要提升读并发
-- HTTP 连接池参数（pool_max_idle_per_host=10, pool_idle_timeout=90s, tcp_keepalive=60s）适合大多数场景
+**已删除的死代码配置**：
+- `HUB_LFS_THRESHOLD`
+- `HUB_DATA_DIR`
 
 ---
 
