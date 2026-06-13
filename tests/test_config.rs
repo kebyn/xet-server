@@ -95,3 +95,10 @@ fn test_cas_default_host_is_localhost() {
     let config = ServerConfig::default();
     assert_eq!(config.server.host, "127.0.0.1", "CAS should default to localhost for dev safety");
 }
+
+#[test]
+fn test_min_conversion_size_default_64kb() {
+    let config = ServerConfig::default();
+    assert_eq!(config.conversion.min_conversion_size, 65536,
+        "Default min_conversion_size should be 64KB (65536 bytes)");
+}
