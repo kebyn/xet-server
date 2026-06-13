@@ -116,9 +116,7 @@ impl Default for CasSettings {
 /// Storage settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageSettings {
-    pub data_dir: String,
     pub inline_threshold_bytes: u64,
-    pub lfs_threshold_bytes: u64,
     /// Directory for temporary files during streaming uploads
     pub upload_temp_dir: String,
     /// M2: Maximum upload size in bytes. Defaults to 512MB.
@@ -129,9 +127,7 @@ pub struct StorageSettings {
 impl Default for StorageSettings {
     fn default() -> Self {
         StorageSettings {
-            data_dir: "./data".to_string(),
             inline_threshold_bytes: 1024 * 1024, // 1MB
-            lfs_threshold_bytes: 10 * 1024 * 1024,   // 10MB
             upload_temp_dir: "/tmp/hub-uploads".to_string(),
             max_upload_size: 512 * 1024 * 1024, // 512MB
         }
@@ -185,16 +181,10 @@ impl HubConfig {
                     .unwrap_or(30),
             },
             storage: StorageSettings {
-                data_dir: env::var("HUB_DATA_DIR")
-                    .unwrap_or_else(|_| "./data".to_string()),
                 inline_threshold_bytes: env::var("HUB_INLINE_THRESHOLD")
                     .ok()
                     .and_then(|t| t.parse().ok())
                     .unwrap_or(1024 * 1024),
-                lfs_threshold_bytes: env::var("HUB_LFS_THRESHOLD")
-                    .ok()
-                    .and_then(|t| t.parse().ok())
-                    .unwrap_or(10 * 1024 * 1024),
                 upload_temp_dir: env::var("HUB_UPLOAD_TEMP_DIR")
                     .unwrap_or_else(|_| "/tmp/hub-uploads".to_string()),
                 max_upload_size: env::var("HUB_MAX_UPLOAD_SIZE")
@@ -232,14 +222,17 @@ impl HubConfig {
         if let Some(url) = env::var("HUB_PUBLIC_BASE_URL").ok() {
             // M-3: Validate URL format when set via environment variable
             // I2: Panic on invalid URL to fail fast at startup
-            if let Err(e) = url::Url::parse(&url) {
-                panic!(
-                    "HUB_PUBLIC_BASE_URL '{}' is not a valid URL: {}",
-                    url, e
-                );
-            }
-            // Also validate host is present
-            let parsed = url::Url::parse(&url).unwrap();
+            // M1 FIX: Parse URL only once using match instead of parsing twice
+            let parsed = match url::Url::parse(&url) {
+                Ok(p) => p,
+                Err(e) => {
+                    panic!(
+                        "HUB_PUBLIC_BASE_URL '{}' is not a valid URL: {}",
+                        url, e
+                    );
+                }
+            };
+            // Validate host is present
             if parsed.host().is_none() {
                 panic!(
                     "HUB_PUBLIC_BASE_URL '{}' is missing a valid host",
@@ -266,14 +259,8 @@ impl HubConfig {
         if let Some(timeout) = env::var("HUB_CAS_TIMEOUT_SECS").ok().and_then(|t| t.parse().ok()) {
             config.cas.internal_timeout_seconds = timeout;
         }
-        if let Some(dir) = env::var("HUB_DATA_DIR").ok() {
-            config.storage.data_dir = dir;
-        }
         if let Some(threshold) = env::var("HUB_INLINE_THRESHOLD").ok().and_then(|t| t.parse().ok()) {
             config.storage.inline_threshold_bytes = threshold;
-        }
-        if let Some(threshold) = env::var("HUB_LFS_THRESHOLD").ok().and_then(|t| t.parse().ok()) {
-            config.storage.lfs_threshold_bytes = threshold;
         }
         if let Some(dir) = env::var("HUB_UPLOAD_TEMP_DIR").ok() {
             config.storage.upload_temp_dir = dir;

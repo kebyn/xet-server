@@ -412,3 +412,11 @@ async fn test_full_workflow() {
     let body: serde_json::Value = test::read_body_json(resp).await;
     assert!(body["accessToken"].as_str().unwrap().starts_with("xet_"));
 }
+
+#[actix_web::test]
+async fn test_hub_config_no_dead_fields() {
+    let config = HubConfig::from_env();
+    assert_eq!(config.storage.inline_threshold_bytes, 1024 * 1024);
+    assert_eq!(config.storage.upload_temp_dir, "/tmp/hub-uploads");
+    assert_eq!(config.storage.max_upload_size, 512 * 1024 * 1024);
+}
