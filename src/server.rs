@@ -24,6 +24,17 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
         tracing::warn!("{}", warning);
     }
 
+    // Validate storage backend
+    match config.storage.backend.as_str() {
+        "local" | "s3" => {},
+        invalid => {
+            return Err(std::io::Error::other(format!(
+                "Invalid XET_STORAGE_BACKEND '{}'. Must be 'local' or 's3'.",
+                invalid
+            )));
+        }
+    }
+
     let storage: Arc<Box<dyn StorageBackend>> = Arc::new(create_storage(&config.storage).await
         .expect("Failed to create storage backend"));
 
