@@ -97,12 +97,16 @@ impl Default for AuthSettings {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetadataSettings {
     pub sqlite_path: String,
+    /// SQLite connection pool size.
+    /// Configure via `HUB_DB_POOL_SIZE` env var. Default: 5.
+    pub db_pool_size: u32,
 }
 
 impl Default for MetadataSettings {
     fn default() -> Self {
         MetadataSettings {
             sqlite_path: "hub.db".to_string(),
+            db_pool_size: 5,
         }
     }
 }
@@ -194,6 +198,10 @@ impl HubConfig {
             metadata: MetadataSettings {
                 sqlite_path: env::var("HUB_SQLITE_PATH")
                     .unwrap_or_else(|_| "hub.db".to_string()),
+                db_pool_size: env::var("HUB_DB_POOL_SIZE")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(5),
             },
             cas: CasSettings {
                 base_url: env::var("CAS_BASE_URL")
@@ -285,6 +293,9 @@ impl HubConfig {
         }
         if let Some(path) = env::var("HUB_SQLITE_PATH").ok() {
             config.metadata.sqlite_path = path;
+        }
+        if let Some(size) = env::var("HUB_DB_POOL_SIZE").ok().and_then(|v| v.parse().ok()) {
+            config.metadata.db_pool_size = size;
         }
         if let Some(url) = env::var("CAS_BASE_URL").ok() {
             config.cas.base_url = url;

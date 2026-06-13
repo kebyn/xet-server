@@ -34,9 +34,9 @@ pub struct TokenStore {
 
 impl TokenStore {
     /// Create a new TokenStore with the given database path
-    pub async fn new(db_path: &str) -> Result<Self, sqlx::Error> {
+    pub async fn new(db_path: &str, pool_size: u32) -> Result<Self, sqlx::Error> {
         let pool = SqlitePoolOptions::new()
-            .max_connections(5)
+            .max_connections(pool_size)
             .min_connections(1)
             .acquire_timeout(std::time::Duration::from_secs(5))
             .connect(db_path)
