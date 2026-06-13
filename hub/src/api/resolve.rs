@@ -2,34 +2,7 @@ use actix_web::{web, HttpRequest, HttpResponse};
 use crate::auth::extract::{AuthUser, AuthRead};
 use crate::metadata::{MetadataStore, RepoType};
 use crate::config::HubConfig;
-
-/// Resolve a revision name/branch to a commit ID
-async fn resolve_revision(
-    metadata: &dyn MetadataStore,
-    repo_id: i64,
-    revision: &str,
-) -> Result<String, String> {
-    // If revision looks like a commit hash (long hex string), use it directly
-    if revision.len() >= 8 && revision.chars().all(|c| c.is_ascii_hexdigit()) {
-        // Check if it's a known revision
-        if metadata.get_revision(repo_id, revision).await.is_ok() {
-            return Ok(revision.to_string());
-        }
-        // I14: Return error for unknown commit hashes instead of falling through
-        return Err(format!("Revision not found: {}", revision));
-    }
-
-    // I14: Only allow "main" as a branch name (no arbitrary branch resolution yet)
-    if revision == "main" {
-        let head = metadata.get_head(repo_id).await.ok().flatten();
-        match head {
-            Some(h) => Ok(h),
-            None => Err("No HEAD found for repo".to_string()),
-        }
-    } else {
-        Err(format!("Revision not found: {} (only 'main' branch or commit hashes are supported)", revision))
-    }
-}
+use super::shared::resolve_revision;
 
 /// Internal helper for file resolve/download
 async fn handle_resolve(
@@ -105,13 +78,10 @@ async fn handle_resolve(
             &format!("{}/{}", namespace, repo_name),
             &repo_type.to_string(),
         );
-        // M3: Proxy tokens use base64url encoding (A-Za-z0-9_-) which is URL-safe,
-        // but we use percent-encoding for consistency and future-proofing
-        let encoded_token = percent_encoding::utf8_percent_encode(
-            &proxy_token,
-            percent_encoding::NON_ALPHANUMERIC
-        ).to_string();
-        format!("?token={}", encoded_token)
+        // Proxy tokens use base64url encoding (A-Za-z0-9_-) plus '.' separator
+        // and 'proxy_' prefix, all of which are URL-safe in query parameters.
+        // No percent-encoding needed.
+        format!("?token={}", proxy_token)
     } else {
         String::new()
     };
@@ -265,10 +235,9 @@ mod tests {
         assert_eq!(resp.status().as_u16(), 302);
         let location = resp.headers().get("Location").unwrap().to_str().unwrap();
         assert!(location.contains("hash123"));
-        // M2: Verify proxy token is included in redirect URL
-        // M3: Token is percent-encoded, so proxy_ becomes proxy%5F
+        // I-3: Proxy tokens use base64url encoding (URL-safe), no percent-encoding needed
         assert!(
-            location.contains("?token=proxy_") || location.contains("?token=proxy%5F"),
+            location.contains("?token=proxy_"),
             "Redirect URL should contain proxy token: {}", location
         );
         // Verify HF Hub compatibility headers

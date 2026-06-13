@@ -169,19 +169,18 @@ impl XetSigner {
         self.sign_claims(claims, "xet_")
     }
 
-    /// Verify a proxy token's signature and decode its claims
-    /// Returns Some(claims) if the signature is valid and claims can be decoded, None otherwise
-    #[must_use = "the result of token verification should be checked"]
-    pub fn verify_proxy_token(&self, token: &str) -> Option<XetClaims> {
+    /// Internal helper to verify a token's signature and decode its claims
+    /// Shared logic between verify_proxy_token and verify_xet_token
+    fn verify_token_inner(&self, token: &str, expected_prefix: &str) -> Option<XetClaims> {
         use ed25519_dalek::{Signature, Verifier};
 
-        // Check if it's a proxy token
-        if !token.starts_with("proxy_") {
+        // Check if it has the expected prefix
+        if !token.starts_with(expected_prefix) {
             return None;
         }
 
         // Parse JWT
-        let token_body = token.strip_prefix("proxy_")?;
+        let token_body = token.strip_prefix(expected_prefix)?;
 
         let parts: Vec<&str> = token_body.split('.').collect();
         if parts.len() != 3 {
@@ -226,6 +225,13 @@ impl XetSigner {
         }
 
         Some(claims)
+    }
+
+    /// Verify a proxy token's signature and decode its claims
+    /// Returns Some(claims) if the signature is valid and claims can be decoded, None otherwise
+    #[must_use = "the result of token verification should be checked"]
+    pub fn verify_proxy_token(&self, token: &str) -> Option<XetClaims> {
+        self.verify_token_inner(token, "proxy_")
     }
 
     /// Get the key ID
@@ -237,59 +243,7 @@ impl XetSigner {
     /// Returns Some(claims) if the signature is valid and claims can be decoded, None otherwise
     #[must_use = "the result of token verification should be checked"]
     pub fn verify_xet_token(&self, token: &str) -> Option<XetClaims> {
-        use ed25519_dalek::{Signature, Verifier};
-
-        // Check if it's a xet token
-        if !token.starts_with("xet_") {
-            return None;
-        }
-
-        // Parse JWT
-        let token_body = token.strip_prefix("xet_")?;
-
-        let parts: Vec<&str> = token_body.split('.').collect();
-        if parts.len() != 3 {
-            return None;
-        }
-
-        // Verify signature using ed25519-dalek
-        let signing_input = format!("{}.{}", parts[0], parts[1]);
-        let signature_bytes = match URL_SAFE_NO_PAD.decode(parts[2]) {
-            Ok(bytes) => bytes,
-            Err(_) => return None,
-        };
-
-        let signature = match Signature::from_slice(&signature_bytes) {
-            Ok(sig) => sig,
-            Err(_) => return None,
-        };
-
-        // Get verifying key from signing key
-        let verifying_key = self.signing_key.verifying_key();
-
-        // Verify signature
-        if verifying_key.verify(signing_input.as_bytes(), &signature).is_err() {
-            return None;
-        }
-
-        // Decode claims (signature is valid, so this should succeed)
-        let claims_json = match URL_SAFE_NO_PAD.decode(parts[1]) {
-            Ok(json) => json,
-            Err(_) => return None,
-        };
-
-        let claims: XetClaims = serde_json::from_slice(&claims_json).ok()?;
-
-        // Check expiration
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        if claims.exp < now {
-            return None; // Token expired
-        }
-
-        Some(claims)
+        self.verify_token_inner(token, "xet_")
     }
 }
 
