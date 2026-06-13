@@ -22,6 +22,7 @@ fn test_config_s3_settings() {
             s3_endpoint: Some("http://localhost:9000".to_string()),
             local_path: None,
             upload_temp_dir: None,
+            verify_download_integrity: false,
         },
         ..Default::default()
     };

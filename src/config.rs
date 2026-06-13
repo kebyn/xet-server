@@ -11,6 +11,29 @@ pub struct ServerConfig {
     pub auth: AuthConfig,
     pub conversion: ConversionConfig,
     pub gc: GcConfig,
+    /// I5: Configuration for metadata index persistence
+    pub index: IndexConfig,
+}
+
+/// I5: Metadata index persistence configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexConfig {
+    /// Enable persistent storage of the metadata index.
+    /// When enabled, the index is saved to SQLite and loaded on startup,
+    /// avoiding the need to scan all shards from storage on each restart.
+    pub persistence_enabled: bool,
+    /// Path to the SQLite database file for index persistence.
+    /// Only used when persistence_enabled is true.
+    pub db_path: String,
+}
+
+impl Default for IndexConfig {
+    fn default() -> Self {
+        Self {
+            persistence_enabled: false,
+            db_path: "./data/metadata_index.db".to_string(),
+        }
+    }
 }
 
 /// HTTP server settings
@@ -43,13 +66,14 @@ impl ServerSettings {
         let url = url.trim_end_matches('/').to_string();
 
         // M1: Validate URL format using proper URL parsing if explicitly configured
+        // I2: Panic on invalid URL to fail fast at startup rather than at first request
         if self.public_base_url.is_some() {
             match url::Url::parse(&url) {
                 Ok(parsed) => {
                     if parsed.host().is_none() {
-                        tracing::error!(
+                        panic!(
                             "public_base_url '{}' is missing a valid host. \
-                            This will likely cause client connection failures.",
+                            This will cause client connection failures.",
                             url
                         );
                     }
@@ -62,7 +86,7 @@ impl ServerSettings {
                     }
                 }
                 Err(e) => {
-                    tracing::error!(
+                    panic!(
                         "public_base_url '{}' is not a valid URL: {}. \
                         This will cause client connection failures.",
                         url, e
@@ -97,6 +121,11 @@ pub struct StorageConfig {
     /// For S3 or if unset, defaults to `/tmp/xet-uploads`.
     /// Configure via `XET_UPLOAD_TEMP_DIR` environment variable.
     pub upload_temp_dir: Option<String>,
+    /// I3: Enable integrity verification on LFS downloads.
+    /// When enabled, the server streams the file through SHA-256 hasher before sending
+    /// to verify the content matches the OID. This catches storage corruption (bit rot)
+    /// but adds CPU overhead. Disable for maximum performance on trusted storage.
+    pub verify_download_integrity: bool,
 }
 
 impl StorageConfig {
@@ -150,7 +179,7 @@ impl Default for ConversionConfig {
             compression_scheme: "lz4".to_string(),
             delete_raw_after_conversion: true,
             min_conversion_size: 1024,           // 1KB — skip tiny files
-            max_conversion_size: 500 * 1024 * 1024, // 500MB — prevent OOM on large blobs
+            max_conversion_size: 512 * 1024 * 1024, // 512MB — match Hub max_upload_size
         }
     }
 }
@@ -207,7 +236,7 @@ impl Default for ServerConfig {
         Self {
             server: ServerSettings {
                 host: "127.0.0.1".to_string(),
-                port: 8080,
+                port: 8081,  // Changed from 8080 to avoid conflict with Hub API
                 public_base_url: None,
                 max_body_size_mb: 2048,
             },
@@ -218,13 +247,15 @@ impl Default for ServerConfig {
                 s3_endpoint: None,
                 local_path: Some("./data".to_string()),
                 upload_temp_dir: None,
+                verify_download_integrity: false, // Disabled by default for performance
             },
             auth: AuthConfig {
-                public_key_path: "/tmp/xet-test-public-key.pem".to_string(),
-                trusted_kids: vec!["test-kid".to_string()],
+                public_key_path: "/tmp/xet-public-key.pem".to_string(),  // Unified with from_env() default
+                trusted_kids: vec!["hub-key-1".to_string()],  // Changed from "test-kid" to match Hub default
             },
             conversion: ConversionConfig::default(),
             gc: GcConfig::default(),
+            index: IndexConfig::default(),
         }
     }
 }
@@ -236,7 +267,7 @@ impl ServerConfig {
         let port = std::env::var("XET_PORT")
             .ok()
             .and_then(|p| p.parse().ok())
-            .unwrap_or(8080);
+            .unwrap_or(8081);  // Changed from 8080 to avoid conflict with Hub API
         let public_base_url = std::env::var("XET_PUBLIC_BASE_URL").ok();
         let max_body_size_mb = std::env::var("XET_MAX_BODY_SIZE_MB")
             .ok()
@@ -249,6 +280,10 @@ impl ServerConfig {
         let s3_endpoint = std::env::var("XET_S3_ENDPOINT").ok();
         let local_path = std::env::var("XET_LOCAL_PATH").ok();
         let upload_temp_dir = std::env::var("XET_UPLOAD_TEMP_DIR").ok();
+        let verify_download_integrity = std::env::var("XET_VERIFY_DOWNLOAD_INTEGRITY")
+            .ok()
+            .map(|v| v.to_lowercase() == "true" || v == "1")
+            .unwrap_or(false);
 
         // CAS-specific auth configuration
         let public_key_path = std::env::var("CAS_PUBLIC_KEY_PATH")
@@ -257,8 +292,8 @@ impl ServerConfig {
             .ok()
             .map(|s| s.split(',').map(|kid| kid.trim().to_string()).collect())
             .unwrap_or_else(|| {
-                tracing::warn!("CAS_TRUSTED_KIDS not set, using test default 'test-kid'. Set this explicitly in production.");
-                vec!["test-kid".to_string()]
+                tracing::warn!("CAS_TRUSTED_KIDS not set, using default 'hub-key-1'. Ensure this matches Hub's HUB_KID configuration.");
+                vec!["hub-key-1".to_string()]  // Changed from "test-kid" to match Hub default
             });
 
         // Conversion pipeline configuration
@@ -279,7 +314,7 @@ impl ServerConfig {
         let max_conversion_size = std::env::var("XET_MAX_CONVERSION_SIZE")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(500 * 1024 * 1024);
+            .unwrap_or(512 * 1024 * 1024);  // 512MB — match Hub max_upload_size
 
         // GC configuration
         let gc_enabled = std::env::var("GC_ENABLED")
@@ -303,6 +338,14 @@ impl ServerConfig {
         let gc_hub_internal_token = std::env::var("GC_HUB_INTERNAL_TOKEN")
             .unwrap_or_default();
 
+        // I5: Index persistence configuration
+        let index_persistence_enabled = std::env::var("XET_INDEX_PERSIST")
+            .ok()
+            .map(|v| v.to_lowercase() == "true" || v == "1")
+            .unwrap_or(false);
+        let index_db_path = std::env::var("XET_INDEX_DB_PATH")
+            .unwrap_or_else(|_| "./data/metadata_index.db".to_string());
+
         Self {
             server: ServerSettings { host, port, public_base_url, max_body_size_mb },
             storage: StorageConfig {
@@ -312,6 +355,7 @@ impl ServerConfig {
                 s3_endpoint,
                 local_path,
                 upload_temp_dir,
+                verify_download_integrity,
             },
             auth: AuthConfig {
                 public_key_path,
@@ -331,6 +375,10 @@ impl ServerConfig {
                 dry_run: gc_dry_run,
                 hub_base_url: gc_hub_base_url,
                 hub_internal_token: gc_hub_internal_token,
+            },
+            index: IndexConfig {
+                persistence_enabled: index_persistence_enabled,
+                db_path: index_db_path,
             },
         }
     }

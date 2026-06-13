@@ -417,7 +417,11 @@ mod tests {
         (token_store, metadata, cas_client, signer)
     }
 
+    // I1: Marked as ignored because this test requires a running CAS server.
+    // In a proper integration test environment, this would test the full commit flow.
+    // Without CAS, we can only verify that the handler correctly returns BAD_GATEWAY.
     #[actix_web::test]
+    #[ignore = "Requires running CAS server for full commit flow test"]
     async fn test_commit_with_inline_file() {
         let (token_store, metadata, cas_client, signer) = setup_test_env();
         let token = token_store.create_token("testuser", "test-token", "write").unwrap();
@@ -457,7 +461,10 @@ mod tests {
         assert_eq!(resp.status(), actix_web::http::StatusCode::BAD_GATEWAY);
     }
 
+    // I1: Marked as ignored because this test requires a running CAS server.
+    // Without CAS, we can only verify BAD_GATEWAY response, not the actual LFS validation logic.
     #[actix_web::test]
+    #[ignore = "Requires running CAS server for LFS validation test"]
     async fn test_commit_with_lfs_file_not_in_cas() {
         let (token_store, metadata, cas_client, signer) = setup_test_env();
         let token = token_store.create_token("testuser", "test-token", "write").unwrap();

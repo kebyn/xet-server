@@ -34,8 +34,8 @@ pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
     let cas_client = Arc::new(CasClient::new(&config.cas));
 
     let bind_addr = format!("{}:{}", config.server.host, config.server.port);
-    println!("Starting Hub API on {}", bind_addr);
-    println!("CAS: {}", config.cas.base_url);
+    tracing::info!("Starting Hub API on {}", bind_addr);
+    tracing::info!("CAS: {}", config.cas.base_url);
 
     // Configure rate limiting for public API endpoints.
     // Internal endpoints (/internal/*) and health check bypass rate limiting.
@@ -47,7 +47,7 @@ pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
         .finish()
         .expect("Failed to configure rate limiter");
 
-    println!("Rate limiting: 120 requests/minute per IP for public endpoints (internal/health excluded)");
+    tracing::info!("Rate limiting: 120 requests/minute per IP for public endpoints (internal/health excluded)");
 
     HttpServer::new(move || {
         App::new()
@@ -57,10 +57,10 @@ pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
             // Large LFS files use streaming upload via Git LFS protocol.
             .app_data(web::PayloadConfig::default().limit(50 * 1024 * 1024)) // 50MB
             .app_data(web::Data::new(config.clone()))
-            .app_data(web::Data::from(token_store.clone()))
-            .app_data(web::Data::from(metadata.clone()))
-            .app_data(web::Data::from(signer.clone()))
-            .app_data(web::Data::from(cas_client.clone()))
+            .app_data(web::Data::new(token_store.clone()))
+            .app_data(web::Data::new(metadata.clone()))
+            .app_data(web::Data::new(signer.clone()))
+            .app_data(web::Data::new(cas_client.clone()))
             // =============================================================
             // Non-rate-limited endpoints (registered at App level, before scope)
             // =============================================================

@@ -81,6 +81,7 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
             .app_data(web::Data::from(index.clone()))
             .app_data(web::Data::new(converting.clone()))
             .app_data(web::Data::new(config.clone()))
+            .app_data(web::Data::new(config.conversion.clone()))
             .app_data(web::Data::new(gc_for_app.clone()))
             .app_data(web::Data::new(stats_for_app.clone()))
             // =============================================================

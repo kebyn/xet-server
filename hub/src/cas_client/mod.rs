@@ -190,7 +190,8 @@ impl CasClient {
         }
     }
 
-    /// Download a blob from CAS via LFS endpoint
+    /// Download a blob from CAS via LFS endpoint (buffered version)
+    /// Loads entire file into memory. Use proxy_lfs_download_streaming for large files.
     pub async fn proxy_lfs_download(&self, oid: &str, token: &str) -> Result<bytes::Bytes, HubError> {
         let url = format!("{}/lfs/objects/{}", self.base_url, oid);
         let resp = self.client
@@ -214,6 +215,33 @@ impl CasClient {
                 }
 
                 Ok(body)
+            }
+            404 => Err(HubError::NotFound(format!("Object not found: {}", oid))),
+            code => Err(HubError::CasError(format!("CAS returned {}", code))),
+        }
+    }
+
+    /// Download a blob from CAS via LFS endpoint (streaming version)
+    /// I6: Returns a streaming response to avoid loading entire file into memory.
+    /// Memory usage is O(chunk_size) regardless of file size.
+    pub async fn proxy_lfs_download_streaming(
+        &self,
+        oid: &str,
+        token: &str,
+    ) -> Result<(u64, reqwest::Response), HubError> {
+        let url = format!("{}/lfs/objects/{}", self.base_url, oid);
+        let resp = self.client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await
+            .map_err(|e| HubError::CasError(format!("CAS request failed: {}", e)))?;
+
+        match resp.status().as_u16() {
+            200 => {
+                // Get content length if available
+                let content_length = resp.content_length().unwrap_or(0);
+                Ok((content_length, resp))
             }
             404 => Err(HubError::NotFound(format!("Object not found: {}", oid))),
             code => Err(HubError::CasError(format!("CAS returned {}", code))),

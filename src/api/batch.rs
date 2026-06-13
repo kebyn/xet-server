@@ -128,8 +128,10 @@ pub async fn batch_operation(
     };
 
     // Check scope based on operation
+    // Internal tokens from Hub (sub="hub-service", scope="internal") are allowed
     let required_scope = if body.operation == "upload" { "write" } else { "read" };
-    if !crate::api::auth::check_scope(&claims, required_scope) {
+    let is_internal = claims.sub == "hub-service" && claims.scope == "internal";
+    if !is_internal && !crate::api::auth::check_scope(&claims, required_scope) {
         GLOBAL_METRICS.record_request(403);
         GLOBAL_METRICS.record_latency(start);
         return HttpResponse::Forbidden().json(serde_json::json!({

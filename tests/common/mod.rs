@@ -92,10 +92,12 @@ pub fn test_config_with_key(kp: &KeyPair) -> TestContext {
             s3_endpoint: None,
             local_path: Some("./data".to_string()),
             upload_temp_dir: None,
+            verify_download_integrity: false,
         },
         auth: auth_config,
         conversion: ConversionConfig::default(),
         gc: xet_server::config::GcConfig::default(),
+        index: xet_server::config::IndexConfig::default(),
     };
 
     TestContext {
@@ -139,10 +141,12 @@ pub fn test_config_with_new_key() -> TestContext {
             s3_endpoint: None,
             local_path: Some("./data".to_string()),
             upload_temp_dir: None,
+            verify_download_integrity: false,
         },
         auth: auth_config,
         conversion: ConversionConfig::default(),
         gc: xet_server::config::GcConfig::default(),
+        index: xet_server::config::IndexConfig::default(),
     };
 
     TestContext {

@@ -266,7 +266,7 @@ impl GarbageCollector {
         all_xorbs
             .iter()
             .filter(|(key, mtime)| {
-                // Extract xorb hash from key (e.g., "xorbs/abcd1234..." -> "abcd1234...")
+                // Extract xorb hash from key (e.g., "xorbs/{hash}" -> "{hash}")
                 let xorb_hash = key.strip_prefix("xorbs/").unwrap_or(key);
 
                 let is_orphaned = !referenced.contains(xorb_hash);
