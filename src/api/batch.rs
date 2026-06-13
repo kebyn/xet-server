@@ -128,10 +128,9 @@ pub async fn batch_operation(
     };
 
     // Check scope based on operation
-    // Internal tokens from Hub (sub="hub-service", scope="internal") are allowed
+    // I1: Use shared helper for internal token check (defense-in-depth)
     let required_scope = if body.operation == "upload" { "write" } else { "read" };
-    let is_internal = claims.sub == "hub-service" && claims.scope == "internal";
-    if !is_internal && !crate::api::auth::check_scope(&claims, required_scope) {
+    if !crate::api::auth::is_internal_token(&claims) && !crate::api::auth::check_scope(&claims, required_scope) {
         GLOBAL_METRICS.record_request(403);
         GLOBAL_METRICS.record_latency(start);
         return HttpResponse::Forbidden().json(serde_json::json!({
@@ -150,13 +149,16 @@ pub async fn batch_operation(
     // Process each object
     let mut response_objects = Vec::new();
 
+    // Optimize: call base_url() once outside the loop instead of per-object
+    let base_url = config.server.base_url();
+
     for obj in &body.objects {
         let response_obj = match body.operation.as_str() {
             "upload" => {
                 // For upload, provide upload action
                 let upload_url = format!(
                     "{}/lfs/objects/{}",
-                    config.server.base_url(),
+                    base_url,
                     obj.oid
                 );
 
@@ -183,7 +185,7 @@ pub async fn batch_operation(
                 // For download, provide download action
                 let download_url = format!(
                     "{}/lfs/objects/{}",
-                    config.server.base_url(),
+                    base_url,
                     obj.oid
                 );
 

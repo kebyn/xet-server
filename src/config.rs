@@ -264,15 +264,21 @@ impl ServerConfig {
     /// Load configuration from environment variables with defaults
     pub fn from_env() -> Self {
         let host = std::env::var("XET_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
-        let port = std::env::var("XET_PORT")
-            .ok()
-            .and_then(|p| p.parse().ok())
-            .unwrap_or(8081);  // Changed from 8080 to avoid conflict with Hub API
+        let port = match std::env::var("XET_PORT") {
+            Ok(val) => val.parse().unwrap_or_else(|_| {
+                tracing::warn!("XET_PORT '{}' is not a valid port number, using default 8081", val);
+                8081
+            }),
+            Err(_) => 8081,  // Changed from 8080 to avoid conflict with Hub API
+        };
         let public_base_url = std::env::var("XET_PUBLIC_BASE_URL").ok();
-        let max_body_size_mb = std::env::var("XET_MAX_BODY_SIZE_MB")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(2048);
+        let max_body_size_mb = match std::env::var("XET_MAX_BODY_SIZE_MB") {
+            Ok(val) => val.parse().unwrap_or_else(|_| {
+                tracing::warn!("XET_MAX_BODY_SIZE_MB '{}' is not a valid number, using default 2048", val);
+                2048
+            }),
+            Err(_) => 2048,
+        };
 
         let backend = std::env::var("XET_STORAGE_BACKEND").unwrap_or_else(|_| "local".to_string());
         let s3_bucket = std::env::var("XET_S3_BUCKET").ok();
@@ -307,28 +313,40 @@ impl ServerConfig {
             .ok()
             .map(|v| v.to_lowercase() != "false" && v != "0")
             .unwrap_or(true);
-        let min_conversion_size = std::env::var("XET_MIN_CONVERSION_SIZE")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(1024);
-        let max_conversion_size = std::env::var("XET_MAX_CONVERSION_SIZE")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(512 * 1024 * 1024);  // 512MB — match Hub max_upload_size
+        let min_conversion_size = match std::env::var("XET_MIN_CONVERSION_SIZE") {
+            Ok(val) => val.parse().unwrap_or_else(|_| {
+                tracing::warn!("XET_MIN_CONVERSION_SIZE '{}' is not a valid number, using default 1024", val);
+                1024
+            }),
+            Err(_) => 1024,
+        };
+        let max_conversion_size = match std::env::var("XET_MAX_CONVERSION_SIZE") {
+            Ok(val) => val.parse().unwrap_or_else(|_| {
+                tracing::warn!("XET_MAX_CONVERSION_SIZE '{}' is not a valid number, using default 512MB", val);
+                512 * 1024 * 1024
+            }),
+            Err(_) => 512 * 1024 * 1024,  // 512MB — match Hub max_upload_size
+        };
 
         // GC configuration
         let gc_enabled = std::env::var("GC_ENABLED")
             .ok()
             .map(|v| v.to_lowercase() == "true" || v == "1")
             .unwrap_or(false);
-        let gc_interval = std::env::var("GC_INTERVAL_SECONDS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(3600);
-        let gc_grace_period = std::env::var("GC_GRACE_PERIOD_SECONDS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(600);
+        let gc_interval = match std::env::var("GC_INTERVAL_SECONDS") {
+            Ok(val) => val.parse().unwrap_or_else(|_| {
+                tracing::warn!("GC_INTERVAL_SECONDS '{}' is not a valid number, using default 3600", val);
+                3600
+            }),
+            Err(_) => 3600,
+        };
+        let gc_grace_period = match std::env::var("GC_GRACE_PERIOD_SECONDS") {
+            Ok(val) => val.parse().unwrap_or_else(|_| {
+                tracing::warn!("GC_GRACE_PERIOD_SECONDS '{}' is not a valid number, using default 600", val);
+                600
+            }),
+            Err(_) => 600,
+        };
         let gc_dry_run = std::env::var("GC_DRY_RUN")
             .ok()
             .map(|v| v.to_lowercase() != "false" && v != "0")
