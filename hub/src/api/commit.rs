@@ -211,7 +211,15 @@ async fn handle_commit(
     }
 
     // Generate internal token for CAS operations
-    let (internal_token, _) = signer.sign_internal();
+    let (internal_token, _) = match signer.sign_internal() {
+        Ok(result) => result,
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to sign internal token: {}", e),
+                "error_type": "InternalError"
+            }));
+        }
+    };
 
     // Generate new commit ID
     let timestamp = now_timestamp();

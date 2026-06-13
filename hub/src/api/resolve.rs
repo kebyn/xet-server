@@ -71,17 +71,25 @@ async fn handle_resolve(
     // Generate a short-lived proxy token for the download
     let xet_signer = req.app_data::<web::Data<std::sync::Arc<crate::auth::xet_signer::XetSigner>>>();
     let proxy_token_param = if let Some(signer) = xet_signer {
-        let (proxy_token, _) = signer.sign_proxy(
+        // I2 fix: Handle signing errors gracefully - if we can't sign, omit the token
+        match signer.sign_proxy(
             "anonymous",
             &file_entry.cas_hash,
             "download",
             &format!("{}/{}", namespace, repo_name),
             &repo_type.to_string(),
-        );
-        // Proxy tokens use base64url encoding (A-Za-z0-9_-) plus '.' separator
-        // and 'proxy_' prefix, all of which are URL-safe in query parameters.
-        // No percent-encoding needed.
-        format!("?token={}", proxy_token)
+        ) {
+            Ok((proxy_token, _)) => {
+                // Proxy tokens use base64url encoding (A-Za-z0-9_-) plus '.' separator
+                // and 'proxy_' prefix, all of which are URL-safe in query parameters.
+                // No percent-encoding needed.
+                format!("?token={}", proxy_token)
+            }
+            Err(e) => {
+                tracing::error!("Failed to sign proxy token for resolve: {}", e);
+                String::new()
+            }
+        }
     } else {
         String::new()
     };
@@ -98,17 +106,25 @@ async fn handle_resolve(
         let cas_client = req.app_data::<web::Data<std::sync::Arc<crate::cas_client::CasClient>>>();
 
         if let (Some(signer), Some(cas)) = (xet_signer, cas_client) {
-            let (internal_token, _) = signer.sign_internal();
-            match cas.proxy_lfs_download(&file_entry.cas_hash, &internal_token).await {
-                Ok(data) => {
-                    return HttpResponse::Ok()
-                        .content_type("application/octet-stream")
-                        .insert_header(("X-Repo-Commit", commit_id.as_str()))
-                        .insert_header(("ETag", format!("\"{}\"", file_entry.cas_hash)))
-                        .body(data);
+            // I2 fix: Handle signing errors - if we can't sign internal token, skip CAS fetch
+            match signer.sign_internal() {
+                Ok((internal_token, _)) => {
+                    match cas.proxy_lfs_download(&file_entry.cas_hash, &internal_token).await {
+                        Ok(data) => {
+                            return HttpResponse::Ok()
+                                .content_type("application/octet-stream")
+                                .insert_header(("X-Repo-Commit", commit_id.as_str()))
+                                .insert_header(("ETag", format!("\"{}\"", file_entry.cas_hash)))
+                                .body(data);
+                        }
+                        Err(e) => {
+                            tracing::warn!("CAS inline fetch failed for {}: {}", file_entry.cas_hash, e);
+                            // Fall through to redirect
+                        }
+                    }
                 }
                 Err(e) => {
-                    tracing::warn!("CAS inline fetch failed for {}: {}", file_entry.cas_hash, e);
+                    tracing::error!("Failed to sign internal token for CAS download: {}", e);
                     // Fall through to redirect
                 }
             }

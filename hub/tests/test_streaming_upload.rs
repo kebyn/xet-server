@@ -51,7 +51,7 @@ async fn test_streaming_lfs_upload_no_auth() {
 async fn test_streaming_lfs_upload_invalid_oid() {
     let (xet_signer, cas_client, config) = setup_lfs_test_env();
     // Generate a valid proxy token for a bad OID
-    let (proxy_token, _) = xet_signer.sign_proxy("testuser", "bad_oid", "upload", "", "");
+    let (proxy_token, _) = xet_signer.sign_proxy("testuser", "bad_oid", "upload", "", "").unwrap();
 
     let app = test::init_service(
         App::new()
@@ -106,7 +106,7 @@ async fn test_streaming_lfs_upload_wrong_operation() {
     let (xet_signer, cas_client, config) = setup_lfs_test_env();
     let oid = "a".repeat(64);
     // Generate a proxy token for "download" but try to use it for upload
-    let (proxy_token, _) = xet_signer.sign_proxy("testuser", &oid, "download", "", "");
+    let (proxy_token, _) = xet_signer.sign_proxy("testuser", &oid, "download", "", "").unwrap();
 
     let app = test::init_service(
         App::new()
@@ -138,7 +138,7 @@ async fn test_streaming_lfs_upload_cas_unreachable() {
     // With streaming, memory stays bounded and the payload is forwarded to CAS.
     let content = vec![42u8; 1024 * 1024]; // 1MB
     let oid = hex::encode(Sha256::digest(&content));
-    let (proxy_token, _) = xet_signer.sign_proxy("testuser", &oid, "upload", "", "");
+    let (proxy_token, _) = xet_signer.sign_proxy("testuser", &oid, "upload", "", "").unwrap();
 
     let app = test::init_service(
         App::new()
@@ -168,7 +168,7 @@ async fn test_streaming_lfs_upload_query_token() {
 
     let content = vec![0u8; 100];
     let oid = hex::encode(Sha256::digest(&content));
-    let (proxy_token, _) = xet_signer.sign_proxy("testuser", &oid, "upload", "", "");
+    let (proxy_token, _) = xet_signer.sign_proxy("testuser", &oid, "upload", "", "").unwrap();
 
     let app = test::init_service(
         App::new()
@@ -264,7 +264,7 @@ async fn test_streaming_lfs_upload_success_via_mock_cas() {
     // Send a 1MB payload through streaming
     let content = vec![42u8; 1024 * 1024];
     let oid = hex::encode(Sha256::digest(&content));
-    let (proxy_token, _) = xet_signer.sign_proxy("testuser", &oid, "upload", "", "");
+    let (proxy_token, _) = xet_signer.sign_proxy("testuser", &oid, "upload", "", "").unwrap();
 
     let app = test::init_service(
         App::new()
@@ -306,7 +306,7 @@ async fn test_streaming_lfs_upload_hash_mismatch_returns_400() {
     let config = HubConfig::default();
 
     let oid = "a".repeat(64);
-    let (proxy_token, _) = xet_signer.sign_proxy("testuser", &oid, "upload", "", "");
+    let (proxy_token, _) = xet_signer.sign_proxy("testuser", &oid, "upload", "", "").unwrap();
 
     let app = test::init_service(
         App::new()
@@ -356,7 +356,7 @@ async fn test_streaming_lfs_upload_oversized_returns_413() {
 
     let content = vec![0u8; 100];
     let oid = hex::encode(Sha256::digest(&content));
-    let (proxy_token, _) = xet_signer.sign_proxy("testuser", &oid, "upload", "", "");
+    let (proxy_token, _) = xet_signer.sign_proxy("testuser", &oid, "upload", "", "").unwrap();
 
     let app = test::init_service(
         App::new()

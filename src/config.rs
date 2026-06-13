@@ -122,7 +122,9 @@ impl StorageConfig {
         } else if let Some(local_path) = &self.local_path {
             PathBuf::from(local_path).join(".tmp")
         } else {
-            PathBuf::from("/tmp/xet-uploads")
+            // I1 fix: Use app-specific directory instead of /tmp for security.
+            // /tmp is world-writable and vulnerable to symlink attacks.
+            PathBuf::from("./data/.tmp")
         }
     }
 }
@@ -254,6 +256,26 @@ impl Default for ServerConfig {
 }
 
 impl ServerConfig {
+    /// Validate configuration parameters.
+    /// Panics on invalid values to fail fast at startup.
+    /// I4 fix: Prevent zero values that would cause service unavailability.
+    fn validate(&self) {
+        if self.server.rate_limit_rpm == 0 {
+            panic!("XET_RATE_LIMIT_RPM must be > 0 (got 0). This would disable rate limiting.");
+        }
+        if self.server.max_body_size_mb == 0 {
+            panic!("XET_MAX_BODY_SIZE_MB must be > 0 (got 0). This would prevent all uploads.");
+        }
+        if self.gc.enabled {
+            if self.gc.interval_seconds == 0 {
+                panic!("GC_INTERVAL_SECONDS must be > 0 when GC is enabled (got 0).");
+            }
+            if self.gc.grace_period_seconds == 0 {
+                tracing::warn!("GC_GRACE_PERIOD_SECONDS is 0. This disables the grace period and may cause race conditions with concurrent uploads.");
+            }
+        }
+    }
+
     /// Load configuration from environment variables with defaults
     pub fn from_env() -> Self {
         let host = std::env::var("XET_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
@@ -364,7 +386,7 @@ impl ServerConfig {
             Err(_) => 300,
         };
 
-        Self {
+        let config = Self {
             server: ServerSettings { host, port, public_base_url, max_body_size_mb, rate_limit_rpm },
             storage: StorageConfig {
                 backend,
@@ -395,7 +417,9 @@ impl ServerConfig {
                 hub_internal_token: gc_hub_internal_token,
                 http_timeout_seconds: gc_http_timeout,
             },
-        }
+        };
+        config.validate();
+        config
     }
 }
 

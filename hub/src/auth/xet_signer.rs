@@ -100,7 +100,8 @@ impl XetSigner {
     /// Sign and create a Xet access token
     /// Returns (token, expiration_timestamp)
     /// I1 fix: Use unwrap_or_default() for system time to avoid panic on clock issues
-    pub fn sign(&self, sub: &str, scope: &str, repo_id: &str, repo_type: &str, revision: &str) -> (String, u64) {
+    /// I2 fix: Return Result to propagate serialization errors instead of returning empty string
+    pub fn sign(&self, sub: &str, scope: &str, repo_id: &str, repo_type: &str, revision: &str) -> Result<(String, u64), String> {
         // I1 fix: Use unwrap_or_default() to avoid panic if system clock is before UNIX_EPOCH
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -122,18 +123,15 @@ impl XetSigner {
             operation: None,
         };
 
-        // sign_claims should not fail for valid claims, but we handle the error gracefully
-        self.sign_claims(claims, "xet_").unwrap_or_else(|e| {
-            tracing::error!("Failed to sign token: {}", e);
-            (String::new(), 0)
-        })
+        self.sign_claims(claims, "xet_")
     }
 
     /// Sign and create a short-lived proxy token for LFS operations
     /// Proxy tokens are bound to a specific OID, operation (upload/download), and repository
     /// Returns (token, expiration_timestamp)
     /// I1 fix: Use unwrap_or_default() for system time to avoid panic on clock issues
-    pub fn sign_proxy(&self, sub: &str, oid: &str, operation: &str, repo_id: &str, repo_type: &str) -> (String, u64) {
+    /// I2 fix: Return Result to propagate serialization errors instead of returning empty string
+    pub fn sign_proxy(&self, sub: &str, oid: &str, operation: &str, repo_id: &str, repo_type: &str) -> Result<(String, u64), String> {
         // I1 fix: Use unwrap_or_default() to avoid panic if system clock is before UNIX_EPOCH
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -156,18 +154,15 @@ impl XetSigner {
             operation: Some(operation.to_string()),
         };
 
-        // sign_claims should not fail for valid claims, but we handle the error gracefully
-        self.sign_claims(claims, "proxy_").unwrap_or_else(|e| {
-            tracing::error!("Failed to sign proxy token: {}", e);
-            (String::new(), 0)
-        })
+        self.sign_claims(claims, "proxy_")
     }
 
     /// Sign and create an internal token for Hub-to-CAS communication
     /// Internal tokens are short-lived (60 seconds) and can only access /internal/* endpoints
     /// Returns (token, expiration_timestamp)
     /// I1 fix: Use unwrap_or_default() for system time to avoid panic on clock issues
-    pub fn sign_internal(&self) -> (String, u64) {
+    /// I2 fix: Return Result to propagate serialization errors instead of returning empty string
+    pub fn sign_internal(&self) -> Result<(String, u64), String> {
         // I1 fix: Use unwrap_or_default() to avoid panic if system clock is before UNIX_EPOCH
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -190,11 +185,7 @@ impl XetSigner {
         };
 
         // C2 fix: Use internal_ prefix to distinguish from user tokens
-        // sign_claims should not fail for valid claims, but we handle the error gracefully
-        self.sign_claims(claims, "internal_").unwrap_or_else(|e| {
-            tracing::error!("Failed to sign internal token: {}", e);
-            (String::new(), 0)
-        })
+        self.sign_claims(claims, "internal_")
     }
 
     /// Internal helper to verify a token's signature and decode its claims
@@ -305,7 +296,7 @@ mod tests {
         let signing_key = generate_test_key();
         let signer = XetSigner::new(signing_key, "test-key-1", 3600, 300);
 
-        let (token, exp) = signer.sign("user123", "read", "namespace/model", "model", "main");
+        let (token, exp) = signer.sign("user123", "read", "namespace/model", "model", "main").unwrap();
 
         assert!(token.starts_with("xet_"), "Token should start with xet_");
 
@@ -328,7 +319,7 @@ mod tests {
         let signing_key = generate_test_key();
         let signer = XetSigner::new(signing_key, "test-key-2", 3600, 300);
 
-        let (token, _) = signer.sign("user123", "write", "namespace/model", "dataset", "v1.0");
+        let (token, _) = signer.sign("user123", "write", "namespace/model", "dataset", "v1.0").unwrap();
 
         // Decode and verify claims
         let token_body = token.strip_prefix("xet_").unwrap();
@@ -358,7 +349,7 @@ mod tests {
         let signer = XetSigner::from_pem(pem_bytes, "pem-key", 3600, 300).unwrap();
 
         // Verify by signing something
-        let (token, _) = signer.sign("user", "read", "repo", "model", "main");
+        let (token, _) = signer.sign("user", "read", "repo", "model", "main").unwrap();
         assert!(token.starts_with("xet_"));
     }
 
@@ -370,8 +361,8 @@ mod tests {
         let signer1 = XetSigner::new(key1, "key1", 3600, 300);
         let signer2 = XetSigner::new(key2, "key2", 3600, 300);
 
-        let (token1, _) = signer1.sign("user", "read", "repo", "model", "main");
-        let (token2, _) = signer2.sign("user", "read", "repo", "model", "main");
+        let (token1, _) = signer1.sign("user", "read", "repo", "model", "main").unwrap();
+        let (token2, _) = signer2.sign("user", "read", "repo", "model", "main").unwrap();
 
         assert_ne!(token1, token2, "Different keys should produce different signatures");
     }
@@ -381,7 +372,7 @@ mod tests {
         let signing_key = generate_test_key();
         let signer = XetSigner::new(signing_key, "test-key-proxy", 3600, 300);
 
-        let (token, exp) = signer.sign_proxy("user123", "abc123def456", "upload", "", "");
+        let (token, exp) = signer.sign_proxy("user123", "abc123def456", "upload", "", "").unwrap();
 
         assert!(token.starts_with("proxy_"), "Proxy token should start with proxy_");
 
@@ -404,7 +395,7 @@ mod tests {
         let signing_key = generate_test_key();
         let signer = XetSigner::new(signing_key, "test-key-proxy-2", 3600, 300);
 
-        let (token, _) = signer.sign_proxy("user456", "oid789xyz", "download", "", "");
+        let (token, _) = signer.sign_proxy("user456", "oid789xyz", "download", "", "").unwrap();
 
         // Decode and verify claims
         let token_body = token.strip_prefix("proxy_").unwrap();
@@ -425,7 +416,7 @@ mod tests {
         let signing_key = generate_test_key();
         let signer = XetSigner::new(signing_key, "test-key-verify", 3600, 300);
 
-        let (token, _) = signer.sign_proxy("user", "oid123", "upload", "", "");
+        let (token, _) = signer.sign_proxy("user", "oid123", "upload", "", "").unwrap();
 
         // Valid token should verify
         assert!(signer.verify_proxy_token(&token).is_some(), "Valid proxy token should verify");
@@ -436,7 +427,7 @@ mod tests {
         let signing_key = generate_test_key();
         let signer = XetSigner::new(signing_key, "test-key-verify-2", 3600, 300);
 
-        let (token, _) = signer.sign_proxy("user", "oid123", "upload", "", "");
+        let (token, _) = signer.sign_proxy("user", "oid123", "upload", "", "").unwrap();
 
         // Tamper with the token
         let tampered_token = format!("{}tampered", &token[..token.len()-8]);
@@ -450,7 +441,7 @@ mod tests {
         let signing_key = generate_test_key();
         let signer = XetSigner::new(signing_key, "test-key-verify-3", 3600, 300);
 
-        let (token, _) = signer.sign_proxy("user", "oid123", "upload", "", "");
+        let (token, _) = signer.sign_proxy("user", "oid123", "upload", "", "").unwrap();
 
         // Change prefix from proxy_ to xet_
         let wrong_prefix_token = format!("xet_{}", &token[6..]);
@@ -479,7 +470,7 @@ mod tests {
         let signer1 = XetSigner::new(key1, "key1", 3600, 300);
         let signer2 = XetSigner::new(key2, "key2", 3600, 300);
 
-        let (token, _) = signer1.sign_proxy("user", "oid123", "upload", "", "");
+        let (token, _) = signer1.sign_proxy("user", "oid123", "upload", "", "").unwrap();
 
         // Token signed with key1 should not verify with key2
         assert!(signer2.verify_proxy_token(&token).is_none(), "Token should not verify with different key");

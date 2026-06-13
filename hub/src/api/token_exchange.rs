@@ -60,13 +60,21 @@ async fn do_exchange(
     // I2: Sign the xet token with the requested scope, not the user's full scope
     // This prevents a read token from getting write permissions via exchange
     let repo_id = format!("{}/{}", path_namespace, path_repo);
-    let (xet_token, exp) = xet_signer.sign(
+    let (xet_token, exp) = match xet_signer.sign(
         &info.user_id,
         required_scope,  // Use requested scope, not info.scope
         &repo_id,
         &repo_type.to_string(),
         &revision,
-    );
+    ) {
+        Ok(result) => result,
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to sign token: {}", e),
+                "error_type": "InternalError"
+            }));
+        }
+    };
 
     HttpResponse::Ok().json(TokenExchangeResponse {
         access_token: xet_token,
