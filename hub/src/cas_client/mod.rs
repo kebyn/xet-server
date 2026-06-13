@@ -20,6 +20,17 @@ pub struct BlobState {
     pub sha256: String,
 }
 
+/// Trait defining the CAS client interface.
+/// Allows mocking for unit tests without requiring a real CAS server.
+#[async_trait::async_trait]
+pub trait CasClientTrait: Send + Sync {
+    /// HEAD a blob to check existence and state
+    async fn head_blob(&self, oid: &str, internal_token: &str) -> Result<BlobState, HubError>;
+
+    /// Proxy LFS upload to CAS
+    async fn proxy_lfs_upload(&self, oid: &str, data: bytes::Bytes, token: &str) -> Result<(), CasUploadError>;
+}
+
 /// CAS HTTP client for communicating with the content addressable storage.
 ///
 /// Uses reqwest with connection pooling for efficient HTTP communication.
@@ -29,25 +40,10 @@ pub struct CasClient {
     client: reqwest::Client,
 }
 
-impl CasClient {
-    /// Create a new CAS client from settings
-    pub fn new(settings: &CasSettings) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(settings.internal_timeout_seconds))
-            .pool_max_idle_per_host(10)
-            .pool_idle_timeout(Duration::from_secs(90))
-            .tcp_keepalive(Duration::from_secs(60))
-            .build()
-            .expect("Failed to build reqwest client");
-
-        Self {
-            base_url: settings.base_url.trim_end_matches('/').to_string(),
-            client,
-        }
-    }
-
+#[async_trait::async_trait]
+impl CasClientTrait for CasClient {
     /// HEAD a blob to check existence and state
-    pub async fn head_blob(&self, oid: &str, internal_token: &str) -> Result<BlobState, HubError> {
+    async fn head_blob(&self, oid: &str, internal_token: &str) -> Result<BlobState, HubError> {
         let url = format!("{}/internal/blob/{}", self.base_url, oid);
         let resp = self.client
             .head(&url)
@@ -79,6 +75,45 @@ impl CasClient {
             }
             404 => Err(HubError::NotFound(format!("Blob not found: {}", oid))),
             code => Err(HubError::CasError(format!("CAS returned {}", code))),
+        }
+    }
+
+    /// Upload a blob to CAS via LFS endpoint (buffered version)
+    async fn proxy_lfs_upload(&self, oid: &str, data: bytes::Bytes, token: &str) -> Result<(), CasUploadError> {
+        let url = format!("{}/lfs/objects/{}", self.base_url, oid);
+        let resp = self.client
+            .put(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/octet-stream")
+            .body(data)
+            .send()
+            .await
+            .map_err(|e| CasUploadError { status: 502, message: format!("CAS request failed: {}", e) })?;
+
+        let status = resp.status().as_u16();
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            let body = resp.text().await.map_err(|e| CasUploadError { status, message: format!("Failed to read CAS response: {}", e) })?;
+            Err(CasUploadError { status, message: body })
+        }
+    }
+}
+
+impl CasClient {
+    /// Create a new CAS client from settings
+    pub fn new(settings: &CasSettings) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(settings.internal_timeout_seconds))
+            .pool_max_idle_per_host(10)
+            .pool_idle_timeout(Duration::from_secs(90))
+            .tcp_keepalive(Duration::from_secs(60))
+            .build()
+            .expect("Failed to build reqwest client");
+
+        Self {
+            base_url: settings.base_url.trim_end_matches('/').to_string(),
+            client,
         }
     }
 
@@ -129,27 +164,6 @@ impl CasClient {
         }
 
         Ok(resp_body)
-    }
-
-    /// Upload a blob to CAS via LFS endpoint (buffered version)
-    pub async fn proxy_lfs_upload(&self, oid: &str, data: bytes::Bytes, token: &str) -> Result<(), CasUploadError> {
-        let url = format!("{}/lfs/objects/{}", self.base_url, oid);
-        let resp = self.client
-            .put(&url)
-            .header("Authorization", format!("Bearer {}", token))
-            .header("Content-Type", "application/octet-stream")
-            .body(data)
-            .send()
-            .await
-            .map_err(|e| CasUploadError { status: 502, message: format!("CAS request failed: {}", e) })?;
-
-        let status = resp.status().as_u16();
-        if resp.status().is_success() {
-            Ok(())
-        } else {
-            let body = resp.text().await.map_err(|e| CasUploadError { status, message: format!("Failed to read CAS response: {}", e) })?;
-            Err(CasUploadError { status, message: body })
-        }
     }
 
     /// Upload a blob to CAS from a file path (streaming version)
@@ -241,6 +255,18 @@ impl CasClient {
             200 => {
                 // Get content length if available
                 let content_length = resp.content_length().unwrap_or(0);
+
+                // Defense-in-depth: validate Content-Length against max size
+                // CAS is a trusted internal service, but this protects against CAS bugs
+                // that could cause unbounded streaming
+                const MAX_DOWNLOAD_SIZE: u64 = 512 * 1024 * 1024;
+                if content_length > MAX_DOWNLOAD_SIZE {
+                    return Err(HubError::CasError(format!(
+                        "Content-Length too large: {} bytes (max: {} bytes)",
+                        content_length, MAX_DOWNLOAD_SIZE
+                    )));
+                }
+
                 Ok((content_length, resp))
             }
             404 => Err(HubError::NotFound(format!("Object not found: {}", oid))),

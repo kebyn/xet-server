@@ -1,7 +1,7 @@
 use actix_web::{test, App, web};
 use hub_api::auth::token_store::TokenStore;
 use hub_api::auth::xet_signer::XetSigner;
-use hub_api::cas_client::CasClient;
+use hub_api::cas_client::{CasClient, CasClientTrait};
 use hub_api::config::{HubConfig, CasSettings, ServerSettings, AuthSettings, MetadataSettings, StorageSettings};
 use hub_api::metadata::{MetadataStore, SqliteMetadataStore, RepoType, Revision, FileEntry};
 use ed25519_dalek::SigningKey;
@@ -13,7 +13,7 @@ type TestEnv = (
     Arc<TokenStore>,
     Arc<XetSigner>,
     Arc<dyn MetadataStore>,
-    Arc<CasClient>,
+    Arc<dyn CasClientTrait>,
     HubConfig,
     String, // plaintext token
 );
@@ -32,7 +32,7 @@ async fn setup_test_env() -> TestEnv {
     let metadata: Arc<dyn MetadataStore> = Arc::new(SqliteMetadataStore::in_memory().await.unwrap());
 
     // Create CAS client
-    let cas_client = Arc::new(CasClient::new(&CasSettings::default()));
+    let cas_client: Arc<dyn CasClientTrait> = Arc::new(CasClient::new(&CasSettings::default()));
 
     // Create test config
     let config = HubConfig {

@@ -5,6 +5,11 @@ use crate::auth::xet_signer::XetSigner;
 use crate::cas_client::CasClient;
 use crate::config::HubConfig;
 
+/// Maximum number of objects allowed in a single batch request.
+/// Mirrors CAS-side limit for defense-in-depth — reject oversized batches early
+/// at the Hub rather than forwarding to CAS and returning 502.
+const MAX_BATCH_SIZE: usize = 1000;
+
 /// Extract token from Authorization header (Bearer/Basic) or query parameter (?token=...).
 ///
 /// **Security note:** Query parameter tokens leak in server logs, proxy logs (nginx/CloudFlare),
@@ -264,6 +269,16 @@ pub async fn lfs_batch(
             }));
         }
     };
+
+    // Validate batch size before forwarding to CAS (defense-in-depth)
+    if let Some(objects) = body.get("objects").and_then(|o| o.as_array()) {
+        if objects.len() > MAX_BATCH_SIZE {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Too many objects: {} exceeds limit of {}", objects.len(), MAX_BATCH_SIZE),
+                "error_type": "ValidationError"
+            }));
+        }
+    }
 
     // Generate internal token for CAS
     let (internal_token, _) = xet_signer.sign_internal();

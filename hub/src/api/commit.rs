@@ -1,7 +1,7 @@
 use actix_web::{web, HttpResponse};
 use crate::auth::extract::{AuthUser, AuthWrite};
 use crate::auth::xet_signer::XetSigner;
-use crate::cas_client::CasClient;
+use crate::cas_client::CasClientTrait;
 use crate::metadata::{FileEntry, MetadataStore, RepoType, Revision};
 use sha2::{Sha256, Digest};
 use serde::{Deserialize, Serialize};
@@ -95,7 +95,7 @@ async fn handle_commit(
     body: String,
     repo_type: RepoType,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
-    cas_client: web::Data<std::sync::Arc<CasClient>>,
+    cas_client: web::Data<std::sync::Arc<dyn CasClientTrait>>,
     signer: web::Data<std::sync::Arc<XetSigner>>,
 ) -> HttpResponse {
     // Check body size limit (20MB) to prevent memory exhaustion
@@ -263,6 +263,14 @@ async fn handle_commit(
 
     // Process LFS files - verify they exist in CAS (C2)
     for lfs_op in lfs_files {
+        // Validate OID format before CAS verification (defense-in-depth)
+        if lfs_op.oid.len() != 64 || !lfs_op.oid.chars().all(|c| c.is_ascii_hexdigit()) {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Invalid LFS OID format for {}: expected 64-character hex string", lfs_op.path),
+                "error_type": "ValidationError"
+            }));
+        }
+
         // Verify LFS file exists in CAS before accepting
         match cas_client.head_blob(&lfs_op.oid, &internal_token).await {
             Ok(_) => { /* blob exists, proceed */ }
@@ -365,7 +373,7 @@ pub async fn commit_model(
     path: web::Path<(String, String, String)>,
     body: String,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
-    cas_client: web::Data<std::sync::Arc<CasClient>>,
+    cas_client: web::Data<std::sync::Arc<dyn CasClientTrait>>,
     signer: web::Data<std::sync::Arc<XetSigner>>,
 ) -> HttpResponse {
     handle_commit(auth, path, body, RepoType::Model, metadata, cas_client, signer).await
@@ -377,7 +385,7 @@ pub async fn commit_dataset(
     path: web::Path<(String, String, String)>,
     body: String,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
-    cas_client: web::Data<std::sync::Arc<CasClient>>,
+    cas_client: web::Data<std::sync::Arc<dyn CasClientTrait>>,
     signer: web::Data<std::sync::Arc<XetSigner>>,
 ) -> HttpResponse {
     handle_commit(auth, path, body, RepoType::Dataset, metadata, cas_client, signer).await
@@ -389,7 +397,7 @@ pub async fn commit_space(
     path: web::Path<(String, String, String)>,
     body: String,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
-    cas_client: web::Data<std::sync::Arc<CasClient>>,
+    cas_client: web::Data<std::sync::Arc<dyn CasClientTrait>>,
     signer: web::Data<std::sync::Arc<XetSigner>>,
 ) -> HttpResponse {
     handle_commit(auth, path, body, RepoType::Space, metadata, cas_client, signer).await
@@ -401,29 +409,81 @@ mod tests {
     use actix_web::{test as actix_test, App};
     use crate::auth::token_store::TokenStore;
     use crate::metadata::SqliteMetadataStore;
-    use crate::config::CasSettings;
+    use crate::cas_client::{BlobState, CasUploadError};
+    use crate::error::HubError;
     use ed25519_dalek::SigningKey;
     use rand::rngs::OsRng;
 
-    async fn setup_test_env() -> (std::sync::Arc<TokenStore>, std::sync::Arc<dyn MetadataStore>, std::sync::Arc<CasClient>, std::sync::Arc<XetSigner>) {
+    /// Mock CAS client for testing without a real CAS server
+    struct MockCasClient {
+        /// OIDs that should be considered as existing in CAS
+        existing_oids: std::collections::HashSet<String>,
+        /// Whether uploads should succeed
+        allow_uploads: bool,
+    }
+
+    impl MockCasClient {
+        fn new() -> Self {
+            Self {
+                existing_oids: std::collections::HashSet::new(),
+                allow_uploads: true,
+            }
+        }
+
+        fn with_existing_oid(mut self, oid: &str) -> Self {
+            self.existing_oids.insert(oid.to_string());
+            self
+        }
+
+        fn with_upload_failure(mut self) -> Self {
+            self.allow_uploads = false;
+            self
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CasClientTrait for MockCasClient {
+        async fn head_blob(&self, oid: &str, _internal_token: &str) -> Result<BlobState, HubError> {
+            if self.existing_oids.contains(oid) {
+                Ok(BlobState {
+                    state: "raw_only".to_string(),
+                    xet_file_id: None,
+                    size: 0,
+                    sha256: oid.to_string(),
+                })
+            } else {
+                Err(HubError::NotFound(format!("Blob not found: {}", oid)))
+            }
+        }
+
+        async fn proxy_lfs_upload(&self, _oid: &str, _data: bytes::Bytes, _token: &str) -> Result<(), CasUploadError> {
+            if self.allow_uploads {
+                Ok(())
+            } else {
+                Err(CasUploadError {
+                    status: 500,
+                    message: "Mock CAS upload failure".to_string(),
+                })
+            }
+        }
+    }
+
+    async fn setup_test_env_with_mock(mock_cas: MockCasClient) -> (std::sync::Arc<TokenStore>, std::sync::Arc<dyn MetadataStore>, std::sync::Arc<dyn CasClientTrait>, std::sync::Arc<XetSigner>) {
         let token_store = std::sync::Arc::new(TokenStore::in_memory().await.unwrap());
         let metadata: std::sync::Arc<dyn MetadataStore> = std::sync::Arc::new(
             SqliteMetadataStore::in_memory().await.unwrap()
         );
-        let cas_client = std::sync::Arc::new(CasClient::new(&CasSettings::default()));
-        // Generate a test signing key
+        let cas_client: std::sync::Arc<dyn CasClientTrait> = std::sync::Arc::new(mock_cas);
         let signing_key = SigningKey::generate(&mut OsRng);
         let signer = std::sync::Arc::new(XetSigner::new(signing_key, "test-key", 3600));
         (token_store, metadata, cas_client, signer)
     }
 
-    // I1: Marked as ignored because this test requires a running CAS server.
-    // In a proper integration test environment, this would test the full commit flow.
-    // Without CAS, we can only verify that the handler correctly returns BAD_GATEWAY.
+    // Test commit with inline file using mock CAS
     #[actix_web::test]
-    #[ignore = "Requires running CAS server for full commit flow test"]
     async fn test_commit_with_inline_file() {
-        let (token_store, metadata, cas_client, signer) = setup_test_env().await;
+        let mock_cas = MockCasClient::new();
+        let (token_store, metadata, cas_client, signer) = setup_test_env_with_mock(mock_cas).await;
         let token = token_store.create_token("testuser", "test-token", "write").await.unwrap();
 
         // Create repo
@@ -455,18 +515,15 @@ mod tests {
             .to_request();
 
         let resp = actix_test::call_service(&app, req).await;
-        // Note: This will fail with CasError since CAS is not running, but we can verify the structure
-        // In a real test environment with mock CAS, this would succeed
-        // For now, we expect a BadGateway error since CAS is not available
-        assert_eq!(resp.status(), actix_web::http::StatusCode::BAD_GATEWAY);
+        // With mock CAS that allows uploads, the commit should succeed
+        assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
     }
 
-    // I1: Marked as ignored because this test requires a running CAS server.
-    // Without CAS, we can only verify BAD_GATEWAY response, not the actual LFS validation logic.
+    // Test commit with LFS file that doesn't exist in CAS using mock
     #[actix_web::test]
-    #[ignore = "Requires running CAS server for LFS validation test"]
     async fn test_commit_with_lfs_file_not_in_cas() {
-        let (token_store, metadata, cas_client, signer) = setup_test_env().await;
+        let mock_cas = MockCasClient::new(); // No existing OIDs
+        let (token_store, metadata, cas_client, signer) = setup_test_env_with_mock(mock_cas).await;
         let token = token_store.create_token("testuser", "test-token", "write").await.unwrap();
 
         // Create repo
@@ -482,8 +539,12 @@ mod tests {
         ).await;
 
         // NDJSON body with LFS file that doesn't exist in CAS
-        let body = "{\"key\":\"header\",\"value\":{\"summary\":\"Add model\",\"parentRevision\":null}}\n\
-                   {\"key\":\"lfsFile\",\"value\":{\"path\":\"model.bin\",\"oid\":\"nonexistent123\",\"size\":1073741824}}";
+        let oid = "a".repeat(64);
+        let body = format!(
+            "{{\"key\":\"header\",\"value\":{{\"summary\":\"Add model\",\"parentRevision\":null}}}}\n\
+             {{\"key\":\"lfsFile\",\"value\":{{\"path\":\"model.bin\",\"oid\":\"{}\",\"size\":1073741824}}}}",
+            oid
+        );
 
         let req = actix_test::TestRequest::post()
             .uri("/api/models/testuser/my-model/commit/main")
@@ -493,14 +554,49 @@ mod tests {
             .to_request();
 
         let resp = actix_test::call_service(&app, req).await;
-        // Since CAS is not running, we get BadGateway (502) instead of UnprocessableEntity (422)
-        // In a real test with mock CAS, this would return 422 for non-existent LFS file
-        assert_eq!(resp.status(), actix_web::http::StatusCode::BAD_GATEWAY);
+        // Mock CAS will return NotFound for the LFS file, so we expect UnprocessableEntity (422)
+        assert_eq!(resp.status(), actix_web::http::StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    // Test commit with invalid LFS OID format (defense-in-depth validation)
+    #[actix_web::test]
+    async fn test_commit_with_invalid_lfs_oid_format() {
+        let mock_cas = MockCasClient::new();
+        let (token_store, metadata, cas_client, signer) = setup_test_env_with_mock(mock_cas).await;
+        let token = token_store.create_token("testuser", "test-token", "write").await.unwrap();
+
+        // Create repo
+        metadata.create_repo("testuser", "my-model", RepoType::Model, false).await.unwrap();
+
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(token_store.clone()))
+                .app_data(web::Data::new(metadata.clone()))
+                .app_data(web::Data::new(cas_client.clone()))
+                .app_data(web::Data::new(signer.clone()))
+                .route("/api/models/{ns}/{repo}/commit/{revision}", web::post().to(commit_model))
+        ).await;
+
+        // NDJSON body with LFS file that has invalid OID format (too short, not 64 chars)
+        let body = "{\"key\":\"header\",\"value\":{\"summary\":\"Add model\",\"parentRevision\":null}}\n\
+                   {\"key\":\"lfsFile\",\"value\":{\"path\":\"model.bin\",\"oid\":\"tooshort\",\"size\":1073741824}}";
+
+        let req = actix_test::TestRequest::post()
+            .uri("/api/models/testuser/my-model/commit/main")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .insert_header(("Content-Type", "application/x-ndjson"))
+            .set_payload(body)
+            .to_request();
+
+        let resp = actix_test::call_service(&app, req).await;
+        // OID format validation should reject with BadRequest (400)
+        assert_eq!(resp.status(), actix_web::http::StatusCode::BAD_REQUEST);
     }
 
     #[actix_web::test]
-    async fn test_commit_atomic_rejects_mismatched_parent() {
-        let (token_store, metadata, cas_client, signer) = setup_test_env().await;
+    async fn test_commitAtomic_rejects_mismatched_parent() {
+        let mock_cas = MockCasClient::new();
+        let (token_store, metadata, cas_client, signer) = setup_test_env_with_mock(mock_cas).await;
         let token = token_store.create_token("testuser", "test-token", "write").await.unwrap();
 
         // Create repo and initial commit
@@ -544,7 +640,8 @@ mod tests {
 
     #[actix_web::test]
     async fn test_commit_read_only_token() {
-        let (token_store, metadata, cas_client, signer) = setup_test_env().await;
+        let mock_cas = MockCasClient::new();
+        let (token_store, metadata, cas_client, signer) = setup_test_env_with_mock(mock_cas).await;
         let token = token_store.create_token("testuser", "test-token", "read").await.unwrap();
 
         // Create repo
@@ -574,7 +671,8 @@ mod tests {
 
     #[actix_web::test]
     async fn test_commit_inline_file_too_large() {
-        let (token_store, metadata, cas_client, signer) = setup_test_env().await;
+        let mock_cas = MockCasClient::new();
+        let (token_store, metadata, cas_client, signer) = setup_test_env_with_mock(mock_cas).await;
         let token = token_store.create_token("testuser", "test-token", "write").await.unwrap();
 
         // Create repo
