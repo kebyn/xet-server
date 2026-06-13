@@ -48,6 +48,16 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
     let bind_addr = format!("{}:{}", config.server.host, config.server.port);
 
     tracing::info!("Starting Xet Storage server on {}", bind_addr);
+
+    // Warn if CAS is bound to localhost only — common gotcha for distributed deployments
+    if config.server.host == "127.0.0.1" || config.server.host == "localhost" {
+        tracing::warn!(
+            "CAS server bound to {} only. Remote clients (including Hub on another host) cannot connect. \
+            Set XET_HOST=0.0.0.0 for remote access.",
+            config.server.host
+        );
+    }
+
     tracing::info!("Storage backend: {}", config.storage.backend);
     tracing::info!("Max upload size: {} MB", config.server.max_body_size_mb);
     tracing::info!("Conversion: {}", if config.conversion.enabled { "enabled" } else { "disabled" });

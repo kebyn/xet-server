@@ -89,3 +89,9 @@ fn test_check_public_key_permissions_secure() {
     let result = xet_server::config::check_public_key_permissions(path);
     assert!(result.is_none(), "Secure key file should not produce a warning");
 }
+
+#[test]
+fn test_cas_default_host_is_localhost() {
+    let config = ServerConfig::default();
+    assert_eq!(config.server.host, "127.0.0.1", "CAS should default to localhost for dev safety");
+}
