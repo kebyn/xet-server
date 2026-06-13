@@ -434,6 +434,12 @@ async fn test_hub_config_proxy_token_ttl_default() {
 }
 
 #[actix_web::test]
+async fn test_cas_settings_max_download_size_default() {
+    let settings = CasSettings::default();
+    assert_eq!(settings.max_download_size, 512 * 1024 * 1024);
+}
+
+#[actix_web::test]
 async fn test_sign_proxy_uses_configured_ttl() {
     use ed25519_dalek::SigningKey;
     use rand::rngs::OsRng;
