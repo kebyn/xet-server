@@ -64,6 +64,15 @@ pub struct XetClaims {
     pub iat: u64,
     /// Key ID identifying the signing key
     pub kid: String,
+    /// Token type: "user" (default), "proxy", or "internal"
+    /// I1: Added for defense-in-depth to distinguish internal service tokens
+    #[serde(default = "default_token_type")]
+    pub token_type: String,
+}
+
+/// Default token type for backward compatibility with older tokens
+fn default_token_type() -> String {
+    "user".to_string()
 }
 
 /// Ed25519 key pair for signing and verification
@@ -227,6 +236,20 @@ pub fn check_scope(claims: &XetClaims, required_scope: &str) -> bool {
     }
     // Check for the specific required scope
     claims.scope.split_whitespace().any(|s| s == required_scope)
+}
+
+/// I1: Check if claims represent an internal service token from Hub.
+///
+/// Internal tokens are issued by the Hub for Hub-to-CAS communication.
+/// They have: sub="hub-service", scope="internal", token_type="internal".
+///
+/// This is a defense-in-depth check that verifies all three fields to prevent
+/// a buggy/misconfigured TokenStore from accidentally creating a user token
+/// with sub="hub-service" that could bypass scope checks.
+pub fn is_internal_token(claims: &XetClaims) -> bool {
+    claims.sub == "hub-service"
+        && claims.scope == "internal"
+        && claims.token_type == "internal"
 }
 
 /// Pre-loaded verification keys for authentication.

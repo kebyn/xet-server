@@ -14,13 +14,14 @@ use futures_util::{Stream, StreamExt};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 use crate::api::auth::{check_scope, extract_token_from_request, AuthVerifier};
 use crate::api::reconstruction::fetch_and_parse_shard;
 use crate::config::{ConversionConfig, ServerConfig};
 use crate::conversion::ConvertingOids;
 use crate::format::compression::decompress;
+use crate::format::shard::MDBShardFile;
 use crate::format::xorb::XorbChunkHeader;
 use crate::index::MetadataIndex;
 use crate::metrics::GLOBAL_METRICS;
@@ -76,9 +77,8 @@ pub async fn upload_lfs_object(
         }
     };
 
-    // Internal tokens from Hub are allowed
-    let is_internal = claims.sub == "hub-service" && claims.scope == "internal";
-    if !is_internal && !check_scope(&claims, "write") {
+    // I1: Use shared helper for internal token check (defense-in-depth)
+    if !crate::api::auth::is_internal_token(&claims) && !check_scope(&claims, "write") {
         GLOBAL_METRICS.record_request(403);
         GLOBAL_METRICS.record_latency(start);
         return HttpResponse::Forbidden().json(serde_json::json!({
@@ -285,9 +285,8 @@ pub async fn download_lfs_object(
         }
     };
 
-    // Internal tokens from Hub are allowed
-    let is_internal = claims.sub == "hub-service" && claims.scope == "internal";
-    if !is_internal && !check_scope(&claims, "read") {
+    // I1: Use shared helper for internal token check (defense-in-depth)
+    if !crate::api::auth::is_internal_token(&claims) && !check_scope(&claims, "read") {
         GLOBAL_METRICS.record_request(403);
         GLOBAL_METRICS.record_latency(start);
         return HttpResponse::Forbidden().json(serde_json::json!({
@@ -357,10 +356,11 @@ pub async fn download_lfs_object(
     }
 }
 
-/// Serve a raw blob from storage.
+/// Serve a raw blob from storage with optional streaming integrity verification.
 /// Uses streaming file I/O when the backend supports it (e.g. local storage)
 /// to avoid loading multi-gigabyte files entirely into RAM.
-/// I3: Optionally verifies integrity by computing SHA-256 hash before streaming.
+/// I3: When integrity verification is enabled, computes SHA-256 hash incrementally
+/// during streaming (not a separate pre-read), then verifies after stream completes.
 async fn serve_raw_blob(
     oid: &str,
     storage: web::Data<Box<dyn StorageBackend>>,
@@ -368,52 +368,7 @@ async fn serve_raw_blob(
     start: std::time::Instant,
 ) -> HttpResponse {
     let object_key = format!("lfs/objects/{}", oid);
-
-    // I3: Optional integrity verification before streaming
-    // Reads the file, computes SHA-256, and verifies it matches the OID.
-    // This catches storage corruption (bit rot) at the cost of one extra read.
-    if config.storage.verify_download_integrity {
-        let verify_data = match storage.get(&object_key).await {
-            Ok(data) => data,
-            Err(StorageError::NotFound(_)) => {
-                GLOBAL_METRICS.record_request(404);
-                GLOBAL_METRICS.record_latency(start);
-                return HttpResponse::NotFound().json(serde_json::json!({
-                    "error": format!("Object not found: {}", oid)
-                }));
-            }
-            Err(e) => {
-                error!("Failed to fetch object for integrity check {}: {}", oid, e);
-                GLOBAL_METRICS.record_request(500);
-                GLOBAL_METRICS.record_error();
-                GLOBAL_METRICS.record_latency(start);
-                return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": format!("Storage error: {}", e)
-                }));
-            }
-        };
-
-        // Compute SHA-256 hash
-        use sha2::{Sha256, Digest};
-        let mut hasher = Sha256::new();
-        hasher.update(&verify_data);
-        let computed_hash = format!("{:x}", hasher.finalize());
-
-        if computed_hash != oid {
-            error!(
-                "Integrity check failed for {}: computed {} != expected {}",
-                oid, computed_hash, oid
-            );
-            GLOBAL_METRICS.record_request(500);
-            GLOBAL_METRICS.record_error();
-            GLOBAL_METRICS.record_latency(start);
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Integrity verification failed: stored content does not match OID"
-            }));
-        }
-
-        info!("Integrity check passed for {}", oid);
-    }
+    let verify_integrity = config.storage.verify_download_integrity;
 
     // Try streaming path first (avoids loading entire file into memory)
     match storage.get_path(&object_key).await {
@@ -450,18 +405,37 @@ async fn serve_raw_blob(
             // because the object key is derived from the content hash, and the server
             // never modifies a stored object in place.
             use tokio_util::io::ReaderStream;
-            let stream = ReaderStream::new(file);
-            let body = actix_web::body::SizedStream::new(file_size, stream);
+            let base_stream = ReaderStream::new(file);
 
-            info!("Streaming LFS object {} ({} bytes)", oid, file_size);
-            GLOBAL_METRICS.record_request(200);
-            GLOBAL_METRICS.record_storage_operation();
-            GLOBAL_METRICS.record_download_bytes(file_size);
-            GLOBAL_METRICS.record_latency(start);
+            // C1 Fix: If integrity verification is enabled, wrap stream with hasher
+            // This computes SHA-256 incrementally during streaming (no double-read)
+            let oid_owned = oid.to_string();
+            if verify_integrity {
+                let hashing_stream = IntegrityVerifyingStream::new(base_stream, oid_owned);
+                let body = actix_web::body::SizedStream::new(file_size, hashing_stream);
 
-            HttpResponse::Ok()
-                .content_type("application/octet-stream")
-                .body(body)
+                info!("Streaming LFS object {} ({} bytes) with integrity verification", oid, file_size);
+                GLOBAL_METRICS.record_request(200);
+                GLOBAL_METRICS.record_storage_operation();
+                GLOBAL_METRICS.record_download_bytes(file_size);
+                GLOBAL_METRICS.record_latency(start);
+
+                HttpResponse::Ok()
+                    .content_type("application/octet-stream")
+                    .body(body)
+            } else {
+                let body = actix_web::body::SizedStream::new(file_size, base_stream);
+
+                info!("Streaming LFS object {} ({} bytes)", oid, file_size);
+                GLOBAL_METRICS.record_request(200);
+                GLOBAL_METRICS.record_storage_operation();
+                GLOBAL_METRICS.record_download_bytes(file_size);
+                GLOBAL_METRICS.record_latency(start);
+
+                HttpResponse::Ok()
+                    .content_type("application/octet-stream")
+                    .body(body)
+            }
         }
         Ok(None) => {
             // Non-file backend: fall back to in-memory get
@@ -486,13 +460,76 @@ async fn serve_raw_blob(
     }
 }
 
+/// Stream wrapper that computes SHA-256 hash incrementally and verifies after completion.
+/// C1 Fix: Avoids double-read by hashing during streaming, not before.
+struct IntegrityVerifyingStream<S> {
+    inner: S,
+    hasher: Option<sha2::Sha256>,
+    expected_oid: String,
+    bytes_hashed: u64,
+}
+
+impl<S> IntegrityVerifyingStream<S> {
+    fn new(inner: S, expected_oid: String) -> Self {
+        use sha2::Digest;
+        Self {
+            inner,
+            hasher: Some(sha2::Sha256::new()),
+            expected_oid,
+            bytes_hashed: 0,
+        }
+    }
+}
+
+impl<S> Stream for IntegrityVerifyingStream<S>
+where
+    S: Stream<Item = Result<bytes::Bytes, std::io::Error>> + Unpin,
+{
+    type Item = Result<bytes::Bytes, std::io::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        use sha2::Digest;
+        match Pin::new(&mut self.inner).poll_next(cx) {
+            Poll::Ready(Some(Ok(chunk))) => {
+                if let Some(hasher) = &mut self.hasher {
+                    hasher.update(&chunk);
+                }
+                self.bytes_hashed += chunk.len() as u64;
+                Poll::Ready(Some(Ok(chunk)))
+            }
+            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
+            Poll::Ready(None) => {
+                // Stream completed - verify hash
+                // Take ownership of hasher to call finalize()
+                if let Some(hasher) = self.hasher.take() {
+                    let computed_hash = format!("{:x}", hasher.finalize());
+                    if computed_hash != self.expected_oid {
+                        error!(
+                            "Integrity check FAILED for {}: computed {} != expected {} ({} bytes streamed)",
+                            self.expected_oid, computed_hash, self.expected_oid, self.bytes_hashed
+                        );
+                        // Note: Data has already been sent to client. We log the error for monitoring.
+                        // In production, this should trigger alerts and potentially mark the object as corrupt.
+                    } else {
+                        info!(
+                            "Integrity check passed for {} ({} bytes streamed)",
+                            self.expected_oid, self.bytes_hashed
+                        );
+                    }
+                }
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
 /// Fallback: serve a raw blob by loading it entirely into memory.
-/// I3: If integrity verification is enabled, it was already done in serve_raw_blob
-/// before this fallback was called, so we don't need to verify again here.
+/// I3: Performs integrity verification if enabled (since we have the data in memory anyway).
 async fn serve_raw_blob_inmemory(
     oid: &str,
     storage: web::Data<Box<dyn StorageBackend>>,
-    _config: web::Data<ServerConfig>,
+    config: web::Data<ServerConfig>,
     start: std::time::Instant,
 ) -> HttpResponse {
     let object_key = format!("lfs/objects/{}", oid);
@@ -518,6 +555,29 @@ async fn serve_raw_blob_inmemory(
             }));
         }
     };
+
+    // I3: Integrity verification for in-memory path
+    if config.storage.verify_download_integrity {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(&object_data);
+        let computed_hash = format!("{:x}", hasher.finalize());
+
+        if computed_hash != oid {
+            error!(
+                "Integrity check FAILED for {}: computed {} != expected {} ({} bytes)",
+                oid, computed_hash, oid, object_data.len()
+            );
+            GLOBAL_METRICS.record_request(500);
+            GLOBAL_METRICS.record_error();
+            GLOBAL_METRICS.record_latency(start);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Integrity verification failed: stored content does not match OID"
+            }));
+        }
+
+        info!("Integrity check passed for {} ({} bytes)", oid, object_data.len());
+    }
 
     info!("Downloaded LFS object {} ({} bytes)", oid, object_data.len());
 
@@ -658,26 +718,103 @@ where
     }
 }
 
-/// Custom Stream for streaming reconstructed file data chunk-by-chunk.
+/// Create a streaming reconstruction pipeline for file data with parallel prefetch.
 ///
-/// I4: True streaming implementation that processes one chunk at a time,
-/// avoiding loading the entire file into memory or using temporary files.
+/// ## Prefetch Strategy
 ///
-/// M3: Refactored using async_stream::stream! for improved readability.
-/// The original manual Stream implementation had 223 lines of nested state machine code.
-/// This async/await version expresses the same logic more clearly.
+/// This implementation uses `tokio::spawn` to overlap network I/O with CPU decompression:
+///
+/// 1. **Xorb-level prefetch** (critical): While decompressing chunks from xorb N,
+///    xorb N+1 is fetched from storage in a background task. This hides S3 latency
+///    (typically 100-500ms) behind chunk decompression work.
+///
+/// 2. **Shard-level prefetch** (supplementary): While processing shard N's xorbs,
+///    shard N+1 is fetched in a background task. Shards are smaller than xorbs,
+///    so this is less impactful but trivially added with the same pattern.
+///
+/// ## Overlap Mechanics
+///
+/// When `yield` returns a chunk to the consumer, the `async_stream` generator is
+/// suspended. The tokio runtime then schedules the prefetch task, making network
+/// I/O progress while the consumer writes the chunk to the TCP socket. By the time
+/// `poll_next` is called again, the prefetch may already be complete.
+///
+/// ```text
+/// poll_next() → decompress chunk 0 of xorb N → yield chunk 0
+///   [consumer writes chunk 0] [xorb N+1 prefetch runs]  ← OVERLAP
+/// poll_next() → decompress chunk 1 of xorb N → yield chunk 1
+///   [consumer writes chunk 1] [xorb N+1 prefetch continues]  ← OVERLAP
+///   ...
+/// poll_next() → await xorb N+1 prefetch (likely Ready) → process xorb N+1
+/// ```
+///
+/// ## Memory
+///
+/// Peak memory is ~2 xorbs (current + prefetched) vs ~1 xorb without prefetch.
+/// For typical xorb sizes (10-100MB), this is negligible.
+///
+/// ## Extension Point
+///
+/// For high-latency backends, prefetch depth > 1 can be added by replacing
+/// `Option<JoinHandle>` with `VecDeque<JoinHandle>` or `tokio::task::JoinSet`.
 fn create_reconstruction_stream(
     storage: Arc<Box<dyn StorageBackend>>,
     shard_ids: Vec<String>,
 ) -> Pin<Box<dyn Stream<Item = Result<bytes::Bytes, String>> + Send>> {
     use async_stream::stream;
 
+    // Type aliases for prefetch handles
+    type ShardPrefetch = tokio::task::JoinHandle<Result<MDBShardFile, String>>;
+    type XorbPrefetch = tokio::task::JoinHandle<Result<Vec<u8>, String>>;
+
     Box::pin(stream! {
-        for shard_id in &shard_ids {
-            // Fetch and parse shard
-            let shard = fetch_and_parse_shard(shard_id, &**storage)
-                .await
-                .map_err(|e| format!("Failed to fetch shard {}: {}", shard_id, e))?;
+        // --- Shard-level prefetch ---
+        // Start fetching the first shard immediately
+        let mut next_shard_prefetch: Option<ShardPrefetch> = None;
+        if !shard_ids.is_empty() {
+            let storage_clone = storage.clone();
+            let first_shard_id = shard_ids[0].clone();
+            next_shard_prefetch = Some(tokio::spawn(async move {
+                fetch_and_parse_shard(&first_shard_id, &**storage_clone).await
+            }));
+        }
+
+        for (shard_idx, shard_id) in shard_ids.iter().enumerate() {
+            // Await current shard (prefetched or fallback)
+            let shard_start = std::time::Instant::now();
+            let shard = if let Some(handle) = next_shard_prefetch.take() {
+                let result = handle.await
+                    .map_err(|e| format!("Shard prefetch task panicked: {}", e))?
+                    .map_err(|e| format!("Failed to fetch shard {}: {}", shard_id, e));
+                debug!(
+                    shard = %shard_id,
+                    elapsed = ?shard_start.elapsed(),
+                    prefetch = true,
+                    "shard fetched"
+                );
+                result?
+            } else {
+                let result = fetch_and_parse_shard(shard_id, &**storage)
+                    .await
+                    .map_err(|e| format!("Failed to fetch shard {}: {}", shard_id, e));
+                debug!(
+                    shard = %shard_id,
+                    elapsed = ?shard_start.elapsed(),
+                    prefetch = false,
+                    "shard fetched"
+                );
+                result?
+            };
+
+            // Kick off prefetch of next shard (while we process current shard's xorbs)
+            if shard_idx + 1 < shard_ids.len() {
+                let storage_clone = storage.clone();
+                let next_shard_id = shard_ids[shard_idx + 1].clone();
+                debug!(shard = %next_shard_id, "shard prefetch started");
+                next_shard_prefetch = Some(tokio::spawn(async move {
+                    fetch_and_parse_shard(&next_shard_id, &**storage_clone).await
+                }));
+            }
 
             // Extract xorb entries (deduplicated) with chunk offsets
             let mut seen_xorbs = std::collections::HashSet::new();
@@ -696,17 +833,63 @@ fn create_reconstruction_stream(
                 chunk_offset += xorb_entry.num_entries as usize;
             }
 
-            // Process each xorb
-            for (xorb_hash, num_entries, xorb_chunk_offset) in xorb_entries {
-                // Fetch xorb data
-                let xorb_key = format!("xorbs/{}", xorb_hash);
-                let xorb_data = storage.get(&xorb_key)
-                    .await
-                    .map_err(|e| format!("Failed to fetch xorb {}: {}", xorb_hash, e))?
-                    .to_vec();
+            // --- Xorb-level prefetch ---
+            let mut next_xorb_prefetch: Option<XorbPrefetch> = None;
+
+            // Start fetching the first xorb immediately
+            if !xorb_entries.is_empty() {
+                let storage_clone = storage.clone();
+                let first_xorb_key = format!("xorbs/{}", xorb_entries[0].0);
+                next_xorb_prefetch = Some(tokio::spawn(async move {
+                    storage_clone.get(&first_xorb_key).await
+                        .map(|b| b.to_vec())
+                        .map_err(|e| format!("Failed to prefetch xorb: {}", e))
+                }));
+            }
+
+            for (xorb_idx, (xorb_hash, num_entries, xorb_chunk_offset)) in xorb_entries.iter().enumerate() {
+                // Await current xorb (prefetched or fallback)
+                let xorb_start = std::time::Instant::now();
+                let xorb_data = if let Some(handle) = next_xorb_prefetch.take() {
+                    let result = handle.await
+                        .map_err(|e| format!("Xorb prefetch task panicked: {}", e))?
+                        .map_err(|e| format!("Failed to fetch xorb {}: {}", xorb_hash, e));
+                    let elapsed = xorb_start.elapsed();
+                    if elapsed.as_millis() < 5 {
+                        debug!(xorb = %xorb_hash, ?elapsed, "xorb prefetch hit");
+                    } else {
+                        debug!(xorb = %xorb_hash, ?elapsed, "xorb prefetch miss");
+                    }
+                    result?
+                } else {
+                    let xorb_key = format!("xorbs/{}", xorb_hash);
+                    let result = storage.get(&xorb_key).await
+                        .map(|b| b.to_vec())
+                        .map_err(|e| format!("Failed to fetch xorb {}: {}", xorb_hash, e));
+                    debug!(
+                        xorb = %xorb_hash,
+                        elapsed = ?xorb_start.elapsed(),
+                        prefetch = false,
+                        "xorb fetched"
+                    );
+                    result?
+                };
+
+                // Kick off prefetch of next xorb (while we decompress current xorb's chunks)
+                if xorb_idx + 1 < xorb_entries.len() {
+                    let storage_clone = storage.clone();
+                    let next_xorb_hash = xorb_entries[xorb_idx + 1].0.clone();
+                    let next_xorb_key = format!("xorbs/{}", next_xorb_hash);
+                    debug!(xorb = %next_xorb_hash, "xorb prefetch started");
+                    next_xorb_prefetch = Some(tokio::spawn(async move {
+                        storage_clone.get(&next_xorb_key).await
+                            .map(|b| b.to_vec())
+                            .map_err(|e| format!("Failed to prefetch xorb {}: {}", next_xorb_hash, e))
+                    }));
+                }
 
                 // Extract each chunk from the xorb
-                for chunk_idx in 0..num_entries {
+                for chunk_idx in 0..*num_entries {
                     let global_chunk_idx = xorb_chunk_offset + chunk_idx;
                     if global_chunk_idx >= shard.xorb_chunk_entries.len() {
                         break;

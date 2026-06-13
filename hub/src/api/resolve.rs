@@ -105,7 +105,13 @@ async fn handle_resolve(
             &format!("{}/{}", namespace, repo_name),
             &repo_type.to_string(),
         );
-        format!("?token={}", proxy_token)
+        // M3: Proxy tokens use base64url encoding (A-Za-z0-9_-) which is URL-safe,
+        // but we use percent-encoding for consistency and future-proofing
+        let encoded_token = percent_encoding::utf8_percent_encode(
+            &proxy_token,
+            percent_encoding::NON_ALPHANUMERIC
+        ).to_string();
+        format!("?token={}", encoded_token)
     } else {
         String::new()
     };
@@ -188,14 +194,14 @@ mod tests {
     use crate::auth::token_store::TokenStore;
     use crate::metadata::{FileEntry, Revision, SqliteMetadataStore};
 
-    fn setup_test_env_with_files() -> (
+    async fn setup_test_env_with_files() -> (
         std::sync::Arc<TokenStore>,
         std::sync::Arc<dyn MetadataStore>,
         HubConfig,
     ) {
-        let token_store = std::sync::Arc::new(TokenStore::in_memory().unwrap());
+        let token_store = std::sync::Arc::new(TokenStore::in_memory().await.unwrap());
         let metadata: std::sync::Arc<dyn MetadataStore> = std::sync::Arc::new(
-            SqliteMetadataStore::in_memory().unwrap()
+            SqliteMetadataStore::in_memory().await.unwrap()
         );
         let config = HubConfig::default();
         (token_store, metadata, config)
@@ -203,8 +209,14 @@ mod tests {
 
     #[actix_web::test]
     async fn test_resolve_existing_file() {
-        let (token_store, metadata, config) = setup_test_env_with_files();
-        let token = token_store.create_token("testuser", "test-token", "read").unwrap();
+        let (token_store, metadata, config) = setup_test_env_with_files().await;
+        let token = token_store.create_token("testuser", "test-token", "read").await.unwrap();
+
+        // M2: Create XetSigner for testing proxy token generation
+        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let xet_signer = std::sync::Arc::new(
+            crate::auth::xet_signer::XetSigner::new(signing_key, "test-kid", 3600)
+        );
 
         // Create repo and add files
         let repo = metadata.create_repo("testuser", "my-model", RepoType::Model, false).await.unwrap();
@@ -238,6 +250,8 @@ mod tests {
                 .app_data(web::Data::new(token_store.clone()))
                 .app_data(web::Data::new(metadata.clone()))
                 .app_data(web::Data::new(config.clone()))
+                // M2: Register XetSigner to test proxy token generation
+                .app_data(web::Data::new(xet_signer.clone()))
                 .route("/{ns}/{repo}/resolve/{revision}/{path}", web::get().to(resolve_model))
         ).await;
 
@@ -251,6 +265,12 @@ mod tests {
         assert_eq!(resp.status().as_u16(), 302);
         let location = resp.headers().get("Location").unwrap().to_str().unwrap();
         assert!(location.contains("hash123"));
+        // M2: Verify proxy token is included in redirect URL
+        // M3: Token is percent-encoded, so proxy_ becomes proxy%5F
+        assert!(
+            location.contains("?token=proxy_") || location.contains("?token=proxy%5F"),
+            "Redirect URL should contain proxy token: {}", location
+        );
         // Verify HF Hub compatibility headers
         assert!(resp.headers().get("X-Repo-Commit").is_some());
         assert!(resp.headers().get("X-Linked-Size").is_some());
@@ -259,8 +279,8 @@ mod tests {
 
     #[actix_web::test]
     async fn test_resolve_missing_file() {
-        let (token_store, metadata, config) = setup_test_env_with_files();
-        let token = token_store.create_token("testuser", "test-token", "read").unwrap();
+        let (token_store, metadata, config) = setup_test_env_with_files().await;
+        let token = token_store.create_token("testuser", "test-token", "read").await.unwrap();
 
         // Create repo with no files
         let repo = metadata.create_repo("testuser", "my-model", RepoType::Model, false).await.unwrap();
