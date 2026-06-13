@@ -1,5 +1,7 @@
 # CAS_STATE_DB_PATH 回滚报告
 
+> **历史记录** — CAS_STATE_DB_PATH 配置已被回滚移除，CAS 不使用 SQLite。本文档保留作为决策记录。
+
 ## 回滚原因
 
 经过深入代码分析，发现 **CAS_STATE_DB_PATH 配置实际上不需要**。

@@ -50,10 +50,16 @@
 ├── README.md                              # 项目主文档
 ├── HF_XET_INTEGRATION_GUIDE.md           # HuggingFace 集成指南
 ├── HUB_UPLOAD_DOWNLOAD_TEST_REPORT.md    # 测试报告
+├── async_sqlite_migration_analysis.md    # SQLite 异步迁移分析（已完成）
+├── cas_sqlite_dependency_analysis.md     # CAS SQLite 依赖分析（已完成）
 │
 ├── docs/
-│   ├── configuration.md                   # 配置指南
-│   ├── architecture.md                    # 架构文档
+│   ├── README.md                         # 本文档索引
+│   ├── configuration.md                  # 配置指南
+│   ├── architecture.md                   # 架构文档
+│   ├── DOCUMENTATION_SYNC_COMPLETION_REPORT.md  # 文档同步完成报告
+│   ├── CAS_STATE_DB_PATH_ROLLBACK.md     # CAS_STATE_DB_PATH 回滚记录
+│   ├── CONFIG_FIXES_PHASE1.md            # Phase 1 配置修复记录
 │   │
 │   ├── api/                              # API 文档
 │   │   ├── cas-api.md                    # CAS API 参考
@@ -72,6 +78,19 @@
 │           ├── 2026-06-10-cas-modifications.md
 │           └── 2026-06-10-hub-api-service.md
 ```
+
+## 分析报告
+
+### 已完成的技术分析
+
+- **[SQLite 异步迁移分析](../async_sqlite_migration_analysis.md)** - TokenStore 从 rusqlite 迁移到 sqlx（✅ 已完成 2026-06-13，commit 1486507）
+- **[CAS SQLite 依赖分析](../cas_sqlite_dependency_analysis.md)** - CAS 移除 SQLite 依赖（✅ 已完成 2026-06-13，commit 2491af1）
+
+### 修复记录
+
+- **[文档同步完成报告](DOCUMENTATION_SYNC_COMPLETION_REPORT.md)** - 60+ 文档问题修复记录（2026-06-12）
+- **[CAS_STATE_DB_PATH 回滚记录](CAS_STATE_DB_PATH_ROLLBACK.md)** - 删除不存在的配置项（2026-06-12）
+- **[Phase 1 配置修复记录](CONFIG_FIXES_PHASE1.md)** - 端口冲突、阈值不匹配等修复（2026-06-12）
 
 ## 快速导航
 
@@ -99,18 +118,20 @@
 
 | 文档 | 状态 | 最后更新 |
 |------|------|----------|
-| README.md | ✅ 完成 | 2026-06-12 |
+| README.md | ✅ 完成 | 2026-06-13 |
 | HF_XET_INTEGRATION_GUIDE.md | ✅ 完成 | 2026-06-12 |
-| 配置指南 | ✅ 完成 | 2026-06-12 |
-| 架构文档 | ✅ 完成 | 2026-06-12 |
+| 配置指南 | ✅ 完成 | 2026-06-13 |
+| 架构文档 | ✅ 完成 | 2026-06-13 |
 | CAS API 文档 | ✅ 完成 | 2026-06-12 |
 | Hub API 文档 | ✅ 完成 | 2026-06-12 |
 | 认证文档 | ✅ 完成 | 2026-06-12 |
 | Metrics 设计 | ✅ 完成 | 2026-06-11 |
 | HF Testing 设计 | ✅ 完成 | 2026-06-11 |
 | Hub API 设计 | ✅ 完成 | 2026-06-12 |
+| SQLite 迁移分析 | ✅ 已完成 | 2026-06-13 |
+| CAS SQLite 分析 | ✅ 已完成 | 2026-06-13 |
 
 ---
 
-**最后更新**: 2026-06-12  
+**最后更新**: 2026-06-13  
 **维护者**: Xet Server Team
