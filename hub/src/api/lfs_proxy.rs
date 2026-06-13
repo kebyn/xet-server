@@ -161,13 +161,29 @@ fn rewrite_batch_urls(
                     // Generate proxy tokens for each operation
                     // Note: repo_id and repo_type are empty because LFS batch API doesn't include repo context
                     // The token is still bound to OID + operation, which provides sufficient security
+                    // I2 fix: Handle signing errors gracefully - skip objects that fail to sign
                     if let Some(upload_action) = actions.get_mut("upload") {
-                        let (proxy_token, _) = signer.sign_proxy(username, &oid, "upload", "", "");
-                        rewrite_action_url(upload_action, &hub_url, &proxy_token);
+                        match signer.sign_proxy(username, &oid, "upload", "", "") {
+                            Ok((proxy_token, _)) => rewrite_action_url(upload_action, &hub_url, &proxy_token),
+                            Err(e) => {
+                                tracing::error!("Failed to sign proxy token for upload {}: {}", oid, e);
+                                // Remove the action if we can't sign a token for it
+                                if let Some(actions_obj) = actions.as_object_mut() {
+                                    actions_obj.remove("upload");
+                                }
+                            }
+                        }
                     }
                     if let Some(download_action) = actions.get_mut("download") {
-                        let (proxy_token, _) = signer.sign_proxy(username, &oid, "download", "", "");
-                        rewrite_action_url(download_action, &hub_url, &proxy_token);
+                        match signer.sign_proxy(username, &oid, "download", "", "") {
+                            Ok((proxy_token, _)) => rewrite_action_url(download_action, &hub_url, &proxy_token),
+                            Err(e) => {
+                                tracing::error!("Failed to sign proxy token for download {}: {}", oid, e);
+                                if let Some(actions_obj) = actions.as_object_mut() {
+                                    actions_obj.remove("download");
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -320,7 +336,16 @@ pub async fn lfs_batch(
     }
 
     // Generate internal token for CAS
-    let (internal_token, _) = xet_signer.sign_internal();
+    // I2 fix: Handle signing errors - return HTTP 500 if we can't create internal token
+    let (internal_token, _) = match xet_signer.sign_internal() {
+        Ok(result) => result,
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to sign internal token: {}", e),
+                "error_type": "InternalError"
+            }));
+        }
+    };
 
     // Forward to CAS
     let mut response = match cas_client.proxy_batch(&body, &internal_token).await {
@@ -505,7 +530,17 @@ pub async fn lfs_upload(
     }
 
     // Stream temp file to CAS
-    let (internal_token, _) = xet_signer.sign_internal();
+    let (internal_token, _) = match xet_signer.sign_internal() {
+        Ok(result) => result,
+        Err(e) => {
+            // Clean up temp file
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to sign internal token: {}", e),
+                "error_type": "InternalError"
+            }));
+        }
+    };
     let file_size = total_bytes;
 
     let result = cas_client.proxy_lfs_upload_from_path(
@@ -568,7 +603,16 @@ pub async fn lfs_download(
     }
 
     // Generate internal token for CAS
-    let (internal_token, _) = xet_signer.sign_internal();
+    // I2 fix: Handle signing errors - return HTTP 500 if we can't create internal token
+    let (internal_token, _) = match xet_signer.sign_internal() {
+        Ok(result) => result,
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to sign internal token: {}", e),
+                "error_type": "InternalError"
+            }));
+        }
+    };
 
     // C3 fix: Use streaming download with runtime size enforcement
     match cas_client.proxy_lfs_download_streaming(&oid, &internal_token).await {
@@ -751,7 +795,7 @@ mod tests {
     #[test]
     fn test_validate_proxy_token_valid() {
         let signer = create_test_signer();
-        let (token, _) = signer.sign_proxy("testuser", "abc123def456", "upload", "", "");
+        let (token, _) = signer.sign_proxy("testuser", "abc123def456", "upload", "", "").unwrap();
 
         let result = validate_proxy_token(&token, "abc123def456", "upload", &signer);
         assert!(result, "Valid proxy token should be accepted");
@@ -762,7 +806,7 @@ mod tests {
         let signer = create_test_signer();
         // Create a token that expires immediately (we can't easily test this without mocking time)
         // For now, we'll just verify the validation logic works
-        let (token, _) = signer.sign_proxy("testuser", "abc123def456", "upload", "", "");
+        let (token, _) = signer.sign_proxy("testuser", "abc123def456", "upload", "", "").unwrap();
 
         let result = validate_proxy_token(&token, "abc123def456", "upload", &signer);
         assert!(result, "Non-expired token should be accepted");
@@ -771,7 +815,7 @@ mod tests {
     #[test]
     fn test_validate_proxy_token_wrong_oid() {
         let signer = create_test_signer();
-        let (token, _) = signer.sign_proxy("testuser", "abc123def456", "upload", "", "");
+        let (token, _) = signer.sign_proxy("testuser", "abc123def456", "upload", "", "").unwrap();
 
         // Try to validate with wrong OID
         let result = validate_proxy_token(&token, "wrongoid", "upload", &signer);
@@ -781,7 +825,7 @@ mod tests {
     #[test]
     fn test_validate_proxy_token_wrong_operation() {
         let signer = create_test_signer();
-        let (token, _) = signer.sign_proxy("testuser", "abc123def456", "upload", "", "");
+        let (token, _) = signer.sign_proxy("testuser", "abc123def456", "upload", "", "").unwrap();
 
         // Try to validate with wrong operation
         let result = validate_proxy_token(&token, "abc123def456", "download", &signer);
@@ -791,7 +835,7 @@ mod tests {
     #[test]
     fn test_validate_proxy_token_invalid_signature() {
         let signer = create_test_signer();
-        let (token, _) = signer.sign_proxy("testuser", "abc123def456", "upload", "", "");
+        let (token, _) = signer.sign_proxy("testuser", "abc123def456", "upload", "", "").unwrap();
 
         // Tamper with the token
         let tampered_token = format!("{}x", &token[..token.len()-1]);
@@ -804,7 +848,7 @@ mod tests {
     fn test_validate_proxy_token_non_proxy_token() {
         let signer = create_test_signer();
         // Create a regular user token instead of proxy token
-        let (user_token, _) = signer.sign("testuser", "read", "repo", "model", "main");
+        let (user_token, _) = signer.sign("testuser", "read", "repo", "model", "main").unwrap();
 
         let result = validate_proxy_token(&user_token, "abc123def456", "upload", &signer);
         assert!(!result, "User token should be rejected as proxy token");
@@ -825,7 +869,7 @@ mod tests {
     #[test]
     fn test_validate_proxy_token_wrong_token_type() {
         let signer = create_test_signer();
-        let (token, _) = signer.sign_proxy("testuser", "abc123def456", "upload", "", "");
+        let (token, _) = signer.sign_proxy("testuser", "abc123def456", "upload", "", "").unwrap();
 
         // Manually tamper with the token_type claim
         use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -864,7 +908,7 @@ mod tests {
         let signer2 = XetSigner::new(signing_key2, "key-id-2", 3600, 300);
 
         // Sign token with signer1
-        let (token, _) = signer1.sign_proxy("testuser", "abc123def456", "upload", "", "");
+        let (token, _) = signer1.sign_proxy("testuser", "abc123def456", "upload", "", "").unwrap();
 
         // Try to validate with signer2 (different kid)
         let result = validate_proxy_token(&token, "abc123def456", "upload", &signer2);

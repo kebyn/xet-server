@@ -48,15 +48,16 @@ impl TokenStore {
 
         Self::init_tables(&pool).await?;
 
-        // I1 fix: Generate random salt if not configured (prevents weak default salt)
+        // C1 fix: Use environment variable if set, otherwise persist generated salt to database.
+        // This ensures tokens survive restarts even without explicit configuration.
         let hash_salt = match std::env::var("HUB_TOKEN_HASH_SALT") {
-            Ok(salt) => salt,
+            Ok(salt) => {
+                tracing::info!("Using token hash salt from HUB_TOKEN_HASH_SALT environment variable");
+                salt
+            }
             Err(_) => {
-                tracing::warn!(
-                    "HUB_TOKEN_HASH_SALT not set, generating random salt. \
-                    Set this in production for consistent hashing across restarts."
-                );
-                uuid::Uuid::new_v4().to_string()
+                // No env var - get or generate persistent salt from database
+                Self::get_or_generate_hash_salt(&pool).await?
             }
         };
 
@@ -75,7 +76,8 @@ impl TokenStore {
 
         Self::init_tables(&pool).await?;
 
-        // M4 fix: Use default salt for in-memory stores (testing)
+        // For in-memory stores (testing), use a fixed salt for consistency within the test.
+        // In-memory databases don't persist across restarts anyway, so persistence doesn't matter.
         let hash_salt = std::env::var("HUB_TOKEN_HASH_SALT")
             .unwrap_or_else(|_| "xet-hub-test-salt".to_string());
 
@@ -109,7 +111,59 @@ impl TokenStore {
         .execute(pool)
         .await?;
 
+        // C1 fix: Create config table for persisting critical configuration
+        // This ensures hash salt survives restarts even without env var
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS _config (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            )"
+        )
+        .execute(pool)
+        .await?;
+
         Ok(())
+    }
+
+    /// Get or generate persistent hash salt from database.
+    /// C1 fix: Ensures token hashes remain consistent across restarts.
+    async fn get_or_generate_hash_salt(pool: &SqlitePool) -> Result<String, sqlx::Error> {
+        const SALT_KEY: &str = "token_hash_salt";
+
+        // Try to load existing salt from database
+        let result: Option<(String,)> = sqlx::query_as(
+            "SELECT value FROM _config WHERE key = ?1"
+        )
+        .bind(SALT_KEY)
+        .fetch_optional(pool)
+        .await?;
+
+        if let Some((salt,)) = result {
+            tracing::info!("Loaded persistent token hash salt from database");
+            return Ok(salt);
+        }
+
+        // No salt found - generate and persist a new one
+        let new_salt = uuid::Uuid::new_v4().to_string();
+        let now = now_secs() as i64;
+
+        sqlx::query(
+            "INSERT INTO _config (key, value, created_at) VALUES (?1, ?2, ?3)"
+        )
+        .bind(SALT_KEY)
+        .bind(&new_salt)
+        .bind(now)
+        .execute(pool)
+        .await?;
+
+        tracing::warn!(
+            "Generated and persisted new token hash salt. \
+            This salt will be used for all future restarts. \
+            For multi-instance deployments, set HUB_TOKEN_HASH_SALT environment variable."
+        );
+
+        Ok(new_salt)
     }
 
     /// Create a new user and token (admin setup). Returns the plaintext hf_ token.

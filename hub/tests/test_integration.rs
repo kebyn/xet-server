@@ -417,7 +417,7 @@ async fn test_full_workflow() {
 async fn test_hub_config_no_dead_fields() {
     let config = HubConfig::from_env();
     assert_eq!(config.storage.inline_threshold_bytes, 1024 * 1024);
-    assert_eq!(config.storage.upload_temp_dir, "/tmp/hub-uploads");
+    assert_eq!(config.storage.upload_temp_dir, "./data/hub-uploads");  // I1 fix: Use app-specific dir instead of /tmp
     assert_eq!(config.storage.max_upload_size, 512 * 1024 * 1024);
 }
 
@@ -449,7 +449,7 @@ async fn test_sign_proxy_uses_configured_ttl() {
     let signing_key = SigningKey::generate(&mut csprng);
     let signer = XetSigner::new(signing_key, "test-key", 3600, 600);
 
-    let (_token, exp) = signer.sign_proxy("user", "oid123", "upload", "repo", "model");
+    let (_token, exp) = signer.sign_proxy("user", "oid123", "upload", "repo", "model").unwrap();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()

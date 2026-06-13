@@ -105,7 +105,10 @@ impl Default for CasSettings {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageSettings {
     pub inline_threshold_bytes: u64,
-    /// Directory for temporary files during streaming uploads
+    /// Directory for temporary files during streaming uploads.
+    /// I1 fix: Use application-specific directory instead of /tmp for security.
+    /// /tmp is world-writable and vulnerable to symlink attacks.
+    /// Configure via HUB_UPLOAD_TEMP_DIR environment variable.
     pub upload_temp_dir: String,
     /// M2: Maximum upload size in bytes. Defaults to 512MB.
     /// Configure via HUB_MAX_UPLOAD_SIZE environment variable.
@@ -116,7 +119,7 @@ impl Default for StorageSettings {
     fn default() -> Self {
         StorageSettings {
             inline_threshold_bytes: 1024 * 1024, // 1MB
-            upload_temp_dir: "/tmp/hub-uploads".to_string(),
+            upload_temp_dir: "./data/hub-uploads".to_string(),  // I1 fix: Use app-specific dir instead of /tmp
             max_upload_size: 512 * 1024 * 1024, // 512MB
         }
     }
@@ -135,9 +138,30 @@ pub struct HubConfig {
 
 
 impl HubConfig {
+    /// Validate configuration parameters.
+    /// Panics on invalid values to fail fast at startup.
+    /// I4 fix: Prevent zero values that would cause service unavailability.
+    fn validate(&self) {
+        if self.server.rate_limit_rpm == 0 {
+            panic!("HUB_RATE_LIMIT_RPM must be > 0 (got 0). This would disable rate limiting.");
+        }
+        if self.metadata.db_pool_size == 0 {
+            panic!("HUB_DB_POOL_SIZE must be > 0 (got 0). This would prevent all database operations.");
+        }
+        if self.auth.token_ttl_seconds == 0 {
+            panic!("HUB_TOKEN_TTL_SECONDS must be > 0 (got 0). Tokens would expire immediately.");
+        }
+        if self.auth.proxy_token_ttl_seconds == 0 {
+            panic!("HUB_PROXY_TOKEN_TTL_SECONDS must be > 0 (got 0). Proxy tokens would expire immediately.");
+        }
+        if self.storage.max_upload_size == 0 {
+            panic!("HUB_MAX_UPLOAD_SIZE must be > 0 (got 0). This would prevent all uploads.");
+        }
+    }
+
     /// Load configuration from environment variables
     pub fn from_env() -> Self {
-        HubConfig {
+        let config = HubConfig {
             server: ServerSettings {
                 host: env::var("HUB_HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
                 port: env::var("HUB_PORT")
@@ -190,13 +214,15 @@ impl HubConfig {
                     .and_then(|t| t.parse().ok())
                     .unwrap_or(1024 * 1024),
                 upload_temp_dir: env::var("HUB_UPLOAD_TEMP_DIR")
-                    .unwrap_or_else(|_| "/tmp/hub-uploads".to_string()),
+                    .unwrap_or_else(|_| "./data/hub-uploads".to_string()),  // I1 fix: Use app-specific dir instead of /tmp
                 max_upload_size: env::var("HUB_MAX_UPLOAD_SIZE")
                     .ok()
                     .and_then(|t| t.parse().ok())
                     .unwrap_or(512 * 1024 * 1024),
             },
-        }
+        };
+        config.validate();
+        config
     }
 
     /// M3: Load configuration from a TOML file
@@ -296,6 +322,7 @@ impl HubConfig {
             config.storage.max_upload_size = size;
         }
 
+        config.validate();
         config
     }
 }
