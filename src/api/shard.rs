@@ -263,6 +263,7 @@ mod tests {
             exp: now + 3600,
             iat: now,
             kid,
+            token_type: "user".to_string(),
         };
         sign_xet_token(&claims, kp).unwrap()
     }
