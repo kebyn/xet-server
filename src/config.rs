@@ -11,29 +11,6 @@ pub struct ServerConfig {
     pub auth: AuthConfig,
     pub conversion: ConversionConfig,
     pub gc: GcConfig,
-    /// I5: Configuration for metadata index persistence
-    pub index: IndexConfig,
-}
-
-/// I5: Metadata index persistence configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IndexConfig {
-    /// Enable persistent storage of the metadata index.
-    /// When enabled, the index is saved to SQLite and loaded on startup,
-    /// avoiding the need to scan all shards from storage on each restart.
-    pub persistence_enabled: bool,
-    /// Path to the SQLite database file for index persistence.
-    /// Only used when persistence_enabled is true.
-    pub db_path: String,
-}
-
-impl Default for IndexConfig {
-    fn default() -> Self {
-        Self {
-            persistence_enabled: false,
-            db_path: "./data/metadata_index.db".to_string(),
-        }
-    }
 }
 
 /// HTTP server settings
@@ -255,7 +232,6 @@ impl Default for ServerConfig {
             },
             conversion: ConversionConfig::default(),
             gc: GcConfig::default(),
-            index: IndexConfig::default(),
         }
     }
 }
@@ -356,14 +332,6 @@ impl ServerConfig {
         let gc_hub_internal_token = std::env::var("GC_HUB_INTERNAL_TOKEN")
             .unwrap_or_default();
 
-        // I5: Index persistence configuration
-        let index_persistence_enabled = std::env::var("XET_INDEX_PERSIST")
-            .ok()
-            .map(|v| v.to_lowercase() == "true" || v == "1")
-            .unwrap_or(false);
-        let index_db_path = std::env::var("XET_INDEX_DB_PATH")
-            .unwrap_or_else(|_| "./data/metadata_index.db".to_string());
-
         Self {
             server: ServerSettings { host, port, public_base_url, max_body_size_mb },
             storage: StorageConfig {
@@ -393,10 +361,6 @@ impl ServerConfig {
                 dry_run: gc_dry_run,
                 hub_base_url: gc_hub_base_url,
                 hub_internal_token: gc_hub_internal_token,
-            },
-            index: IndexConfig {
-                persistence_enabled: index_persistence_enabled,
-                db_path: index_db_path,
             },
         }
     }
