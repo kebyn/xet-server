@@ -13,12 +13,14 @@ pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
     // Initialize token store (uses same DB as metadata for simplicity)
     let token_store = Arc::new(
         TokenStore::new(&config.metadata.sqlite_path)
+            .await
             .map_err(|e| std::io::Error::other(format!("Failed to create token store: {}", e)))?
     );
 
     // Initialize metadata store
     let metadata: Arc<dyn MetadataStore> = Arc::new(
         SqliteMetadataStore::new(&config.metadata.sqlite_path)
+            .await
             .map_err(|e| std::io::Error::other(format!("Failed to create metadata store: {}", e)))?
     );
 

@@ -181,7 +181,9 @@ fn validate_proxy_token(
     let claims = match signer.verify_proxy_token(token) {
         Some(claims) => claims,
         None => {
-            tracing::error!("validate_proxy_token: verify_proxy_token failed for token starting with: {}...", &token[..token.len().min(30)]);
+            // M1: Use safe slicing to avoid panic on non-ASCII boundaries
+            let token_preview = token.get(..30).unwrap_or(token);
+            tracing::error!("validate_proxy_token: verify_proxy_token failed for token starting with: {}...", token_preview);
             return false;
         }
     };
@@ -247,7 +249,7 @@ pub async fn lfs_batch(
         }
     };
 
-    let token_info = match token_store.validate_token(&token) {
+    let token_info = match token_store.validate_token(&token).await {
         Ok(Some(info)) => info,
         Ok(None) => {
             return HttpResponse::Unauthorized().json(serde_json::json!({

@@ -405,10 +405,10 @@ mod tests {
     use ed25519_dalek::SigningKey;
     use rand::rngs::OsRng;
 
-    fn setup_test_env() -> (std::sync::Arc<TokenStore>, std::sync::Arc<dyn MetadataStore>, std::sync::Arc<CasClient>, std::sync::Arc<XetSigner>) {
-        let token_store = std::sync::Arc::new(TokenStore::in_memory().unwrap());
+    async fn setup_test_env() -> (std::sync::Arc<TokenStore>, std::sync::Arc<dyn MetadataStore>, std::sync::Arc<CasClient>, std::sync::Arc<XetSigner>) {
+        let token_store = std::sync::Arc::new(TokenStore::in_memory().await.unwrap());
         let metadata: std::sync::Arc<dyn MetadataStore> = std::sync::Arc::new(
-            SqliteMetadataStore::in_memory().unwrap()
+            SqliteMetadataStore::in_memory().await.unwrap()
         );
         let cas_client = std::sync::Arc::new(CasClient::new(&CasSettings::default()));
         // Generate a test signing key
@@ -423,8 +423,8 @@ mod tests {
     #[actix_web::test]
     #[ignore = "Requires running CAS server for full commit flow test"]
     async fn test_commit_with_inline_file() {
-        let (token_store, metadata, cas_client, signer) = setup_test_env();
-        let token = token_store.create_token("testuser", "test-token", "write").unwrap();
+        let (token_store, metadata, cas_client, signer) = setup_test_env().await;
+        let token = token_store.create_token("testuser", "test-token", "write").await.unwrap();
 
         // Create repo
         metadata.create_repo("testuser", "my-model", RepoType::Model, false).await.unwrap();
@@ -466,8 +466,8 @@ mod tests {
     #[actix_web::test]
     #[ignore = "Requires running CAS server for LFS validation test"]
     async fn test_commit_with_lfs_file_not_in_cas() {
-        let (token_store, metadata, cas_client, signer) = setup_test_env();
-        let token = token_store.create_token("testuser", "test-token", "write").unwrap();
+        let (token_store, metadata, cas_client, signer) = setup_test_env().await;
+        let token = token_store.create_token("testuser", "test-token", "write").await.unwrap();
 
         // Create repo
         metadata.create_repo("testuser", "my-model", RepoType::Model, false).await.unwrap();
@@ -500,8 +500,8 @@ mod tests {
 
     #[actix_web::test]
     async fn test_commit_atomic_rejects_mismatched_parent() {
-        let (token_store, metadata, cas_client, signer) = setup_test_env();
-        let token = token_store.create_token("testuser", "test-token", "write").unwrap();
+        let (token_store, metadata, cas_client, signer) = setup_test_env().await;
+        let token = token_store.create_token("testuser", "test-token", "write").await.unwrap();
 
         // Create repo and initial commit
         let repo = metadata.create_repo("testuser", "my-model", RepoType::Model, false).await.unwrap();
@@ -544,8 +544,8 @@ mod tests {
 
     #[actix_web::test]
     async fn test_commit_read_only_token() {
-        let (token_store, metadata, cas_client, signer) = setup_test_env();
-        let token = token_store.create_token("testuser", "test-token", "read").unwrap();
+        let (token_store, metadata, cas_client, signer) = setup_test_env().await;
+        let token = token_store.create_token("testuser", "test-token", "read").await.unwrap();
 
         // Create repo
         metadata.create_repo("testuser", "my-model", RepoType::Model, false).await.unwrap();
@@ -574,8 +574,8 @@ mod tests {
 
     #[actix_web::test]
     async fn test_commit_inline_file_too_large() {
-        let (token_store, metadata, cas_client, signer) = setup_test_env();
-        let token = token_store.create_token("testuser", "test-token", "write").unwrap();
+        let (token_store, metadata, cas_client, signer) = setup_test_env().await;
+        let token = token_store.create_token("testuser", "test-token", "write").await.unwrap();
 
         // Create repo
         metadata.create_repo("testuser", "my-model", RepoType::Model, false).await.unwrap();

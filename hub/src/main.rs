@@ -12,14 +12,14 @@ async fn main() -> std::io::Result<()> {
     let args: Vec<String> = std::env::args().collect();
 
     if args.len() > 1 && args[1] == "create-token" {
-        return create_token_command(&args[2..]);
+        return create_token_command(&args[2..]).await;
     }
 
     let config = HubConfig::from_env();
     start_server(config).await
 }
 
-fn create_token_command(args: &[String]) -> std::io::Result<()> {
+async fn create_token_command(args: &[String]) -> std::io::Result<()> {
     // Parse --username, --scope, --name flags
     let mut username: Option<&str> = None;
     let mut scope: Option<&str> = None;
@@ -64,9 +64,11 @@ fn create_token_command(args: &[String]) -> std::io::Result<()> {
     let db_path = db_path.unwrap_or("hub.db");
 
     let token_store = TokenStore::new(db_path)
+        .await
         .map_err(std::io::Error::other)?;
 
     let token = token_store.create_token(username, name, scope)
+        .await
         .map_err(std::io::Error::other)?;
 
     println!("Token created successfully!");

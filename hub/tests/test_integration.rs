@@ -19,9 +19,9 @@ type TestEnv = (
 );
 
 /// Setup test environment with all components
-fn setup_test_env() -> TestEnv {
+async fn setup_test_env() -> TestEnv {
     // Create in-memory token store
-    let token_store = Arc::new(TokenStore::in_memory().unwrap());
+    let token_store = Arc::new(TokenStore::in_memory().await.unwrap());
 
     // Create test signing key
     let mut csprng = OsRng;
@@ -29,7 +29,7 @@ fn setup_test_env() -> TestEnv {
     let xet_signer = Arc::new(XetSigner::new(signing_key, "test-key", 3600));
 
     // Create in-memory metadata store
-    let metadata: Arc<dyn MetadataStore> = Arc::new(SqliteMetadataStore::in_memory().unwrap());
+    let metadata: Arc<dyn MetadataStore> = Arc::new(SqliteMetadataStore::in_memory().await.unwrap());
 
     // Create CAS client
     let cas_client = Arc::new(CasClient::new(&CasSettings::default()));
@@ -44,14 +44,14 @@ fn setup_test_env() -> TestEnv {
     };
 
     // Create test user and token
-    let token = token_store.create_token("testuser", "test-token", "write").unwrap();
+    let token = token_store.create_token("testuser", "test-token", "write").await.unwrap();
 
     (token_store, xet_signer, metadata, cas_client, config, token)
 }
 
 #[actix_web::test]
 async fn test_whoami_endpoint() {
-    let (token_store, _, _, _, _, token) = setup_test_env();
+    let (token_store, _, _, _, _, token) = setup_test_env().await;
 
     let app = test::init_service(
         App::new()
@@ -75,7 +75,7 @@ async fn test_whoami_endpoint() {
 
 #[actix_web::test]
 async fn test_create_repo_endpoint() {
-    let (token_store, _, metadata, _, _, token) = setup_test_env();
+    let (token_store, _, metadata, _, _, token) = setup_test_env().await;
 
     let app = test::init_service(
         App::new()
@@ -104,7 +104,7 @@ async fn test_create_repo_endpoint() {
 
 #[actix_web::test]
 async fn test_get_repo_endpoint() {
-    let (token_store, _, metadata, _, _, token) = setup_test_env();
+    let (token_store, _, metadata, _, _, token) = setup_test_env().await;
 
     // Create repo directly in metadata
     metadata.create_repo("testuser", "existing-model", RepoType::Model, false).await.unwrap();
@@ -131,7 +131,7 @@ async fn test_get_repo_endpoint() {
 
 #[actix_web::test]
 async fn test_commit_with_inline_file() {
-    let (token_store, xet_signer, metadata, cas_client, _, token) = setup_test_env();
+    let (token_store, xet_signer, metadata, cas_client, _, token) = setup_test_env().await;
 
     // Create repo
     metadata.create_repo("testuser", "commit-test-model", RepoType::Model, false).await.unwrap();
@@ -169,7 +169,7 @@ async fn test_commit_with_inline_file() {
 
 #[actix_web::test]
 async fn test_tree_listing() {
-    let (token_store, _, metadata, _, _, token) = setup_test_env();
+    let (token_store, _, metadata, _, _, token) = setup_test_env().await;
 
     // Create repo and add files
     let repo = metadata.create_repo("testuser", "tree-test-model", RepoType::Model, false).await.unwrap();
@@ -234,7 +234,7 @@ async fn test_tree_listing() {
 
 #[actix_web::test]
 async fn test_token_exchange() {
-    let (token_store, xet_signer, metadata, _, config, token) = setup_test_env();
+    let (token_store, xet_signer, metadata, _, config, token) = setup_test_env().await;
 
     // Create repo for token exchange
     metadata.create_repo("testuser", "token-test-model", RepoType::Model, false).await.unwrap();
@@ -263,7 +263,7 @@ async fn test_token_exchange() {
 
 #[actix_web::test]
 async fn test_preupload_endpoint() {
-    let (token_store, _, metadata, _, _, token) = setup_test_env();
+    let (token_store, _, metadata, _, _, token) = setup_test_env().await;
 
     // Create repo
     metadata.create_repo("testuser", "preupload-test-model", RepoType::Model, false).await.unwrap();
@@ -317,7 +317,7 @@ async fn test_health_endpoint() {
 
 #[actix_web::test]
 async fn test_delete_repo_endpoint() {
-    let (token_store, _, metadata, _, _, token) = setup_test_env();
+    let (token_store, _, metadata, _, _, token) = setup_test_env().await;
 
     // Create repo directly
     metadata.create_repo("testuser", "delete-test-model", RepoType::Model, false).await.unwrap();
@@ -344,7 +344,7 @@ async fn test_delete_repo_endpoint() {
 
 #[actix_web::test]
 async fn test_full_workflow() {
-    let (token_store, xet_signer, metadata, cas_client, config, token) = setup_test_env();
+    let (token_store, xet_signer, metadata, cas_client, config, token) = setup_test_env().await;
 
     let app = test::init_service(
         App::new()
