@@ -281,6 +281,39 @@ export CAS_PUBLIC_KEY_PATH=/path/to/public_key.pem
 export CAS_TRUSTED_KIDS=hub-key-1,backup-key-1
 ```
 
+**配置说明**：
+- `CAS_PUBLIC_KEY_PATH`：指向 Hub 的公钥文件（PEM 格式），用于验证 CAS token 签名
+- `CAS_TRUSTED_KIDS`：受信任的密钥 ID 列表（逗号分隔），用于支持密钥轮换
+- 默认 trusted kid 为 `hub-key-1`，应与 Hub 的 `HUB_KID` 配置保持一致
+- 多个 kid 允许同时信任多个密钥，便于无缝轮换
+
+### CAS Server 认证配置
+
+CAS Server 需要配置公钥来验证 Hub 签发的 CAS token：
+
+| 环境变量 | 描述 | 默认值 | 必需 |
+|---------|------|--------|------|
+| `CAS_PUBLIC_KEY_PATH` | Ed25519 公钥路径 | `/tmp/xet-public-key.pem` | 是 |
+| `CAS_TRUSTED_KIDS` | 受信任的密钥 ID 列表 | `hub-key-1` | 是 |
+
+**验证流程**：
+1. CAS 接收到 `xet_xxx` token
+2. 解析 JWT，提取 `kid`（密钥 ID）
+3. 检查 `kid` 是否在 `CAS_TRUSTED_KIDS` 列表中
+4. 使用 `CAS_PUBLIC_KEY_PATH` 指定的公钥验证 Ed25519 签名
+5. 验证 `exp`（过期时间）是否已过期
+6. 检查 `scope` 是否匹配所需权限
+
+**示例配置**：
+```bash
+# 生产环境
+export CAS_PUBLIC_KEY_PATH=/etc/xet/hub-public-key.pem
+export CAS_TRUSTED_KIDS=hub-key-1,hub-key-2
+
+# 开发环境（使用默认值）
+# CAS_TRUSTED_KIDS 默认为 hub-key-1，与 Hub 默认配置一致
+```
+
 ### 密钥轮换
 
 1. 生成新密钥对

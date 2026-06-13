@@ -195,25 +195,36 @@ Authorization: Bearer xet_xxx
 ```json
 {
   "file_id": "abc123...",
-  "file_size": 104857600,
-  "chunks": [
+  "xorbs": [
     {
-      "hash": "chunk1_hash",
       "xorb_hash": "xorb1_hash",
-      "offset": 0,
-      "length": 65536,
-      "chunk_index": 0
-    },
-    {
-      "hash": "chunk2_hash",
-      "xorb_hash": "xorb1_hash",
-      "offset": 65536,
-      "length": 65536,
-      "chunk_index": 1
+      "size": 65536,
+      "chunks": [
+        {
+          "chunk_hash": "chunk1_hash",
+          "offset": 0,
+          "length": 65536
+        },
+        {
+          "chunk_hash": "chunk2_hash",
+          "offset": 65536,
+          "length": 65536
+        }
+      ]
     }
   ]
 }
 ```
+
+**字段说明**：
+- `file_id`: 文件标识符
+- `xorbs`: Xorb 对象列表
+  - `xorb_hash`: Xorb 的 BLAKE3 哈希
+  - `size`: Xorb 大小（字节）
+  - `chunks`: 该 Xorb 中包含的 chunk 列表
+    - `chunk_hash`: Chunk 的 BLAKE3 哈希
+    - `offset`: Chunk 在 Xorb 中的偏移量
+    - `length`: Chunk 长度（字节）
 
 **响应码**：
 - `200 OK`: 返回重构信息
@@ -225,29 +236,44 @@ Authorization: Bearer xet_xxx
 **端点**：`GET /v2/reconstructions/{file_id}`
 
 **与 V1 的区别**：
-- 支持更多元数据字段
-- 优化的响应格式
-- 支持压缩信息
+- 分离 Xorb 元数据和获取信息
+- `fetch_info` 提供存储路径和大小，便于客户端直接下载
+- 减少响应体积（xorbs 数组只包含哈希和大小）
 
 **响应** (V2)：
 ```json
 {
   "file_id": "abc123...",
-  "file_size": 104857600,
-  "file_hash": "file_hash",
-  "chunks": [
+  "xorbs": [
     {
-      "hash": "chunk1_hash",
       "xorb_hash": "xorb1_hash",
-      "offset": 0,
-      "length": 65536,
-      "compressed_length": 32768,
-      "compression": "lz4",
-      "chunk_index": 0
+      "size": 65536
+    },
+    {
+      "xorb_hash": "xorb2_hash",
+      "size": 131072
     }
-  ]
+  ],
+  "fetch_info": {
+    "xorb1_hash": {
+      "storage_path": "xorbs/ab/xorb1_hash",
+      "size": 65536
+    },
+    "xorb2_hash": {
+      "storage_path": "xorbs/cd/xorb2_hash",
+      "size": 131072
+    }
+  }
 }
 ```
+
+**字段说明**：
+- `file_id`: 文件标识符
+- `xorbs`: Xorb 对象列表（仅包含哈希和大小）
+- `fetch_info`: Xorb 获取信息映射表
+  - key: Xorb 哈希
+  - `storage_path`: 存储路径（用于构造下载 URL）
+  - `size`: Xorb 大小（字节）
 
 **示例**：
 ```bash
@@ -275,21 +301,23 @@ Authorization: Bearer xet_xxx
 ```
 
 **响应**：
-- `200 OK`: Chunk 存在
+- `200 OK`: 查询成功（无论 chunk 是否存在）
   ```json
   {
-    "exists": true,
     "hash": "abc123...",
-    "size": 65536
+    "found": true,
+    "xorb_hash": "xorb_hash_value",
+    "chunk_index": 0
   }
   ```
-- `404 Not Found`: Chunk 不存在
-  ```json
-  {
-    "exists": false,
-    "hash": "abc123..."
-  }
-  ```
+  
+  **字段说明**：
+  - `hash`: 查询的 chunk 哈希
+  - `found`: chunk 是否存在
+  - `xorb_hash`: chunk 所在的 Xorb 哈希（仅当 `found=true` 时存在）
+  - `chunk_index`: chunk 在 Xorb 中的索引（仅当 `found=true` 时存在）
+
+- `400 Bad Request`: 参数错误（prefix 不是 "default" 或 hash 格式不正确）
 - `401 Unauthorized`: 认证失败
 
 **示例**：
@@ -404,19 +432,43 @@ Authorization: Bearer xet_xxx (需要 internal scope)
 ```
 
 **响应**：
+
+当 blob 已转换为 Xet 格式（`xet_only`）：
 ```json
 {
-  "oid": "abc123...",
-  "state": "XetOnly",
+  "state": "xet_only",
+  "xet_file_id": "abc123...",
   "size": 104857600,
-  "created_at": "2026-06-12T10:00:00Z"
+  "sha256": "abc123...",
+  "converted_at": null
 }
 ```
 
-**状态类型**：
-- `RawOnly`: 仅存储原始字节（来自 Git LFS）
-- `XetOnly`: 仅存储 Xet 格式（分块/去重）
-- `Both`: 两种格式都存在
+当 blob 仅存储为原始格式（`raw_only`）：
+```json
+{
+  "state": "raw_only",
+  "xet_file_id": null,
+  "size": 104857600,
+  "sha256": "abc123...",
+  "converted_at": null
+}
+```
+
+**字段说明**：
+- `state`: Blob 存储状态
+  - `xet_only`: 仅存储 Xet 格式（已分块/去重）
+  - `raw_only`: 仅存储原始字节（来自 Git LFS）
+- `xet_file_id`: Xet 文件 ID（仅当 `state=xet_only` 时有值）
+- `size`: Blob 大小（字节）
+- `sha256`: Blob 的 SHA-256 哈希
+- `converted_at`: 转换时间戳（当前实现中为 `null`）
+
+**响应码**：
+- `200 OK`: 查询成功
+- `404 Not Found`: Blob 不存在
+- `401 Unauthorized`: 认证失败
+- `403 Forbidden`: 权限不足（需要 `internal` scope）
 
 ### 检查 Blob 存在
 
@@ -437,6 +489,103 @@ Authorization: Bearer xet_xxx (需要 internal scope)
 **示例**：
 ```bash
 curl -I "http://localhost:8081/internal/state/abc123..." \
+  -H "Authorization: Bearer xet_xxx"
+```
+
+### 垃圾回收 API
+
+垃圾回收 API 用于手动触发 GC 运行和查询 GC 状态。
+
+#### 手动触发 GC
+
+**端点**：`POST /internal/gc/run`
+
+**请求头**：
+```
+Authorization: Bearer xet_xxx (需要 internal scope)
+```
+
+**响应**：
+- `202 Accepted`: GC 已触发，在后台运行
+  ```json
+  {
+    "message": "GC triggered, running in background",
+    "dry_run": false
+  }
+  ```
+
+**说明**：
+- GC 在后台异步运行，此端点立即返回
+- 使用 `/internal/gc/status` 查询 GC 运行结果
+- `dry_run` 字段反映配置的 GC 运行模式
+
+**示例**：
+```bash
+curl -X POST "http://localhost:8081/internal/gc/run" \
+  -H "Authorization: Bearer xet_xxx"
+```
+
+#### 查询 GC 状态
+
+**端点**：`GET /internal/gc/status`
+
+**请求头**：
+```
+Authorization: Bearer xet_xxx (需要 internal scope)
+```
+
+**响应**：
+
+当有 GC 运行记录时：
+```json
+{
+  "status": "ok",
+  "stats": {
+    "total_lfs_blobs": 1000,
+    "total_xorbs": 500,
+    "total_shards": 200,
+    "referenced_lfs_blobs": 800,
+    "referenced_xorbs": 450,
+    "orphaned_lfs_blobs": 200,
+    "orphaned_xorbs": 50,
+    "deleted_lfs_blobs": 200,
+    "deleted_xorbs": 50,
+    "grace_period_skipped": 10,
+    "errors": 0,
+    "duration_seconds": 15,
+    "dry_run": false,
+    "last_run": "2026-06-12T10:00:00Z"
+  }
+}
+```
+
+当没有 GC 运行记录时：
+```json
+{
+  "status": "no_gc_run_yet",
+  "message": "No GC run has been completed yet"
+}
+```
+
+**字段说明**：
+- `total_lfs_blobs`: 存储中的总 LFS blob 数
+- `total_xorbs`: 存储中的总 Xorb 数
+- `total_shards`: 存储中的总 Shard 数
+- `referenced_lfs_blobs`: 被引用的 LFS blob 数
+- `referenced_xorbs`: 被引用的 Xorb 数
+- `orphaned_lfs_blobs`: 孤立的 LFS blob 数
+- `orphaned_xorbs`: 孤立的 Xorb 数
+- `deleted_lfs_blobs`: 删除的 LFS blob 数
+- `deleted_xorbs`: 删除的 Xorb 数
+- `grace_period_skipped`: 因宽限期跳过的 blob 数
+- `errors`: 遇到的错误数
+- `duration_seconds`: GC 运行时长（秒）
+- `dry_run`: 是否为试运行模式
+- `last_run`: 上次运行时间戳
+
+**示例**：
+```bash
+curl "http://localhost:8081/internal/gc/status" \
   -H "Authorization: Bearer xet_xxx"
 ```
 

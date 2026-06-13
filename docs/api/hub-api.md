@@ -81,30 +81,28 @@ Authorization: Bearer hf_xxx
 **响应**：
 ```json
 {
-  "type": "user",
-  "id": "60c71234567890abcdef01",
   "name": "admin",
-  "fullname": "Admin User",
-  "email": "admin@example.com",
-  "canPay": false,
-  "isPro": false,
-  "periodEnd": 1718320000,
-  "avatarUrl": "https://example.com/avatar.png",
-  "orgs": [
-    {
-      "id": "60c71234567890abcdef02",
-      "name": "my-org",
-      "fullname": "My Organization",
-      "email": "org@example.com",
-      "canPay": false,
-      "isPro": false,
-      "periodEnd": 1718320000,
-      "avatarUrl": "https://example.com/org-avatar.png",
-      "roleInOrg": "admin"
+  "email": "",
+  "orgs": [],
+  "auth": {
+    "type": "access_token",
+    "accessToken": {
+      "name": "my-token",
+      "role": "read write"
     }
-  ]
+  }
 }
 ```
+
+**字段说明**：
+- `name`: 用户名
+- `email`: 邮箱（当前实现为空字符串）
+- `orgs`: 组织列表（当前实现为空数组）
+- `auth`: 认证信息
+  - `type`: 认证类型，固定为 "access_token"
+  - `accessToken`: 访问令牌信息
+    - `name`: 令牌名称
+    - `role`: 令牌作用域（如 "read", "write", "read write"）
 
 **示例**：
 ```bash
@@ -129,37 +127,44 @@ Content-Type: application/json
 **请求体**：
 ```json
 {
-  "type": "model",
   "name": "my-model",
-  "namespace": "my-org",
-  "private": false,
-  "description": "My awesome model",
-  "tags": ["text-generation", "pytorch"]
+  "organization": "my-org",
+  "type": "model",
+  "private": false
 }
 ```
 
 **字段说明**：
-- `type` (required): 仓库类型 - `"model"`, `"dataset"`, `"space"`
 - `name` (required): 仓库名称
-- `namespace` (required): 命名空间（组织或用户名）
+- `organization` (optional): 命名空间（组织或用户名），省略时使用当前用户名
+- `type` (optional): 仓库类型 - `"model"`, `"dataset"`, `"space"`，省略时默认为 "model"
 - `private` (optional): 是否私有，默认 `false`
-- `description` (optional): 仓库描述
-- `tags` (optional): 标签列表
 
 **响应**：
 ```json
 {
-  "id": "60c71234567890abcdef03",
-  "type": "model",
+  "id": "my-org/my-model",
   "name": "my-model",
-  "namespace": "my-org",
   "private": false,
-  "description": "My awesome model",
-  "tags": ["text-generation", "pytorch"],
   "createdAt": "2026-06-12T10:00:00Z",
-  "updatedAt": "2026-06-12T10:00:00Z"
+  "updatedAt": "2026-06-12T10:00:00Z",
+  "tags": [],
+  "downloads": 0,
+  "likes": 0,
+  "url": "/my-org/my-model"
 }
 ```
+
+**字段说明**：
+- `id`: 仓库 ID（格式：`namespace/name`）
+- `name`: 仓库名称
+- `private`: 是否私有
+- `createdAt`: 创建时间（ISO 8601 格式）
+- `updatedAt`: 更新时间（ISO 8601 格式）
+- `tags`: 标签列表（当前实现为空数组）
+- `downloads`: 下载次数（当前实现为 0）
+- `likes`: 点赞数（当前实现为 0）
+- `url`: 仓库 URL
 
 **示例**：
 ```bash
@@ -232,22 +237,28 @@ Authorization: Bearer hf_xxx
 **响应**：
 ```json
 {
-  "id": "60c71234567890abcdef03",
-  "type": "model",
+  "id": "my-org/my-model",
   "name": "my-model",
-  "namespace": "my-org",
   "private": false,
-  "description": "My awesome model",
-  "tags": ["text-generation"],
   "createdAt": "2026-06-12T10:00:00Z",
   "updatedAt": "2026-06-12T10:00:00Z",
-  "sha": "main",
-  "siblings": [
-    {"rfilename": "config.json"},
-    {"rfilename": "model.safetensors"}
-  ]
+  "tags": [],
+  "downloads": 0,
+  "likes": 0,
+  "url": "/my-org/my-model"
 }
 ```
+
+**字段说明**：
+- `id`: 仓库 ID（格式：`namespace/name`）
+- `name`: 仓库名称
+- `private`: 是否私有
+- `createdAt`: 创建时间（ISO 8601 格式）
+- `updatedAt`: 更新时间（ISO 8601 格式）
+- `tags`: 标签列表（当前实现为空数组）
+- `downloads`: 下载次数（当前实现为 0）
+- `likes`: 点赞数（当前实现为 0）
+- `url`: 仓库 URL
 
 **示例**：
 ```bash
@@ -543,15 +554,21 @@ Authorization: Bearer hf_xxx
 **响应**：
 ```json
 {
-  "token": "xet_eyJhbGciOiJFZDI1NTE5Iiwia2lkIjoiaHViLWtleS0xIiwidHlwIjoiSldUIn0...",
-  "expires_in": 300,
-  "token_type": "Bearer",
-  "repo_id": "my-org/my-model",
-  "repo_type": "model",
-  "revision": "main",
-  "scope": "read"
+  "accessToken": "xet_eyJhbGciOiJFZDI1NTE5Iiwia2lkIjoiaHViLWtleS0xIiwidHlwIjoiSldUIn0...",
+  "exp": 1718320300,
+  "casUrl": "http://localhost:8081"
 }
 ```
+
+**字段说明**：
+- `accessToken`: CAS 访问令牌（`xet_xxx` 格式）
+- `exp`: 令牌过期时间（Unix 时间戳，秒）
+- `casUrl`: CAS 服务器 URL
+
+**说明**：
+- 读令牌具有 `read` 作用域
+- 写令牌具有 `write` 作用域
+- 令牌有效期由 Hub 的 `HUB_TOKEN_TTL_SECONDS` 配置决定（默认 3600 秒）
 
 **示例**：
 ```bash
@@ -611,17 +628,19 @@ Content-Type: application/json
   "files": [
     {
       "path": "model.safetensors",
-      "sha256": "abc123...",
       "size": 104857600
     },
     {
       "path": "config.json",
-      "sha256": "def456...",
       "size": 1234
     }
   ]
 }
 ```
+
+**字段说明**：
+- `path`: 文件路径（必需）
+- `size`: 文件大小，字节（必需）
 
 **响应**：
 ```json
@@ -629,21 +648,24 @@ Content-Type: application/json
   "files": [
     {
       "path": "model.safetensors",
-      "uploadType": "normal",
-      "urlToUploadTo": "http://localhost:8081/lfs/objects/abc123..."
+      "uploadMode": "lfs",
+      "shouldIgnore": false
     },
     {
       "path": "config.json",
-      "uploadType": "none"
+      "uploadMode": "regular",
+      "shouldIgnore": false
     }
   ]
 }
 ```
 
-**uploadType 说明**：
-- `normal`: 需要上传
-- `none`: 文件已存在，无需上传
-- `lfs`: 使用 LFS 协议上传
+**字段说明**：
+- `path`: 文件路径
+- `uploadMode`: 上传模式
+  - `regular`: 小文件，通过 Commit API 内联上传
+  - `lfs`: 大文件，需要通过 LFS 协议上传
+- `shouldIgnore`: 是否应忽略此文件（当前实现始终为 `false`）
 
 **示例**：
 ```bash
@@ -652,7 +674,8 @@ curl -X POST "http://localhost:8080/api/models/my-org/my-model/preupload/main" \
   -H "Content-Type: application/json" \
   -d '{
     "files": [
-      {"path": "model.safetensors", "sha256": "abc123...", "size": 104857600}
+      {"path": "model.safetensors", "size": 104857600},
+      {"path": "config.json", "size": 1234}
     ]
   }'
 ```
@@ -898,6 +921,70 @@ hf download my-org/my-model config.json --local-dir ./downloaded
 
 # 列出文件
 hf repo info my-org/my-model
+```
+
+---
+
+## 内部 API
+
+内部 API 用于 CAS Server 与 Hub Server 之间的通信，需要 `internal` 作用域。
+
+### 获取引用的哈希列表
+
+**端点**：`GET /internal/referenced-hashes`
+
+**请求头**：
+```
+Authorization: Bearer hf_xxx (需要 internal scope)
+```
+
+**响应**：
+```json
+{
+  "hashes": [
+    "abc123...",
+    "def456..."
+  ],
+  "count": 2
+}
+```
+
+**字段说明**：
+- `hashes`: 所有被仓库引用的 blob SHA-256 哈希列表
+- `count`: 哈希数量
+
+**用途**：
+- 供 CAS Server 的垃圾回收（GC）功能使用
+- GC 通过此端点获取所有被引用的 blob，然后删除未引用的孤立 blob
+
+**示例**：
+```bash
+curl "http://localhost:8080/internal/referenced-hashes" \
+  -H "Authorization: Bearer hf_xxx"
+```
+
+---
+
+## 系统 API
+
+### 健康检查
+
+**端点**：`GET /health`
+
+**响应**：
+```json
+{
+  "status": "ok"
+}
+```
+
+**用途**：
+- 用于负载均衡器和监控系统检查服务健康状态
+- 无需认证
+
+**示例**：
+```bash
+curl "http://localhost:8080/health"
 ```
 
 ---
