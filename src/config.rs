@@ -159,7 +159,7 @@ impl Default for ConversionConfig {
             enabled: true,
             compression_scheme: "lz4".to_string(),
             delete_raw_after_conversion: true,
-            min_conversion_size: 1024,           // 1KB — skip tiny files
+            min_conversion_size: 65536,          // 64KB — skip tiny files (1KB conversions waste CPU/IO for near-zero dedup value)
             max_conversion_size: 512 * 1024 * 1024, // 512MB — match Hub max_upload_size
         }
     }
@@ -303,10 +303,10 @@ impl ServerConfig {
             .unwrap_or(true);
         let min_conversion_size = match std::env::var("XET_MIN_CONVERSION_SIZE") {
             Ok(val) => val.parse().unwrap_or_else(|_| {
-                tracing::warn!("XET_MIN_CONVERSION_SIZE '{}' is not a valid number, using default 1024", val);
-                1024
+                tracing::warn!("XET_MIN_CONVERSION_SIZE '{}' is not a valid number, using default 65536", val);
+                65536
             }),
-            Err(_) => 1024,
+            Err(_) => 65536,
         };
         let max_conversion_size = match std::env::var("XET_MAX_CONVERSION_SIZE") {
             Ok(val) => val.parse().unwrap_or_else(|_| {
