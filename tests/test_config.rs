@@ -6,7 +6,7 @@ use xet_server::config::{ServerConfig, StorageConfig, AuthConfig};
 fn test_config_default() {
     let config = ServerConfig::default();
     assert_eq!(config.server.host, "127.0.0.1");
-    assert_eq!(config.server.port, 8080);
+    assert_eq!(config.server.port, 8081);  // Changed from 8080 to avoid conflict with Hub API
     assert_eq!(config.storage.backend, "local");
     assert!(!config.auth.trusted_kids.is_empty());
     assert!(!config.auth.public_key_path.is_empty());

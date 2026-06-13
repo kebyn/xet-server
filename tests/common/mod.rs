@@ -43,6 +43,7 @@ pub fn test_token(scope: &str) -> (KeyPair, String) {
         exp: now + 3600, // Valid for 1 hour
         iat: now,
         kid: kid.clone(),
+        token_type: "user".to_string(),
     };
 
     let token = sign_xet_token(&claims, &kp).unwrap();
@@ -175,6 +176,7 @@ pub fn test_token_for_keypair(kp: &KeyPair, scope: &str) -> String {
         exp: now + 3600,
         iat: now,
         kid,
+        token_type: "user".to_string(),
     };
 
     sign_xet_token(&claims, kp).unwrap()

@@ -34,13 +34,20 @@ impl S3Storage {
         // security-sensitive and us-east-1 is the most common default region.
         let region = region.unwrap_or("us-east-1");
 
+        // Gracefully handle missing credentials instead of panicking
+        let access_key_id = std::env::var("AWS_ACCESS_KEY_ID").map_err(|_| {
+            StorageError::Internal("AWS_ACCESS_KEY_ID environment variable must be set for S3 storage backend".to_string())
+        })?;
+
+        let secret_access_key = std::env::var("AWS_SECRET_ACCESS_KEY").map_err(|_| {
+            StorageError::Internal("AWS_SECRET_ACCESS_KEY environment variable must be set for S3 storage backend".to_string())
+        })?;
+
         let mut config_builder = Config::builder()
             .region(aws_sdk_s3::config::Region::new(region.to_string()))
             .credentials_provider(Credentials::new(
-                std::env::var("AWS_ACCESS_KEY_ID")
-                    .expect("AWS_ACCESS_KEY_ID must be set for S3 storage backend"),
-                std::env::var("AWS_SECRET_ACCESS_KEY")
-                    .expect("AWS_SECRET_ACCESS_KEY must be set for S3 storage backend"),
+                access_key_id,
+                secret_access_key,
                 None,
                 None,
                 "test",
