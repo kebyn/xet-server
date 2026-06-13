@@ -39,7 +39,7 @@ parking_lot = "0.12"
 actix-governor = "0.5"
 nix = { version = "0.29", features = ["fs"] }
 url = "2.5"
-rusqlite = { version = "0.31", features = ["bundled"] }
+tempfile = "3.10"
 
 [dev-dependencies]
 rand = "0.8"

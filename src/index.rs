@@ -4,9 +4,8 @@
 //! - file_hash → shard_id mapping
 //! - chunk_hash → (xorb_hash, chunk_index) mapping for global dedup
 //!
-//! I5: Optional persistence to SQLite for faster startup.
-//! Without persistence, the index is rebuilt from storage on each startup
-//! which requires fetching and parsing all shards.
+//! The index is rebuilt from storage on each startup (stateless server design).
+//! This ensures consistency and avoids local state management complexity.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -20,9 +19,6 @@ pub struct MetadataIndex {
 
     /// Map from chunk hash to (xorb_hash, chunk_index) for global deduplication
     chunk_to_xorb: Arc<RwLock<HashMap<String, (String, u32)>>>,
-
-    /// I5: Optional SQLite connection for persisting the index
-    db: Option<Arc<std::sync::Mutex<rusqlite::Connection>>>,
 }
 
 impl MetadataIndex {
@@ -31,116 +27,7 @@ impl MetadataIndex {
         Self {
             file_to_shards: Arc::new(RwLock::new(HashMap::new())),
             chunk_to_xorb: Arc::new(RwLock::new(HashMap::new())),
-            db: None,
         }
-    }
-
-    /// I5: Create a metadata index with SQLite persistence.
-    /// Loads existing index from disk if available, otherwise starts empty.
-    /// The index will be persisted to disk on each register_shard() call.
-    pub fn with_persistence(db_path: &str) -> Result<Self, String> {
-        let conn = rusqlite::Connection::open(db_path)
-            .map_err(|e| format!("Failed to open index DB: {}", e))?;
-
-        // Create tables if they don't exist
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS index_files (
-                file_hash TEXT NOT NULL,
-                shard_id TEXT NOT NULL,
-                PRIMARY KEY (file_hash, shard_id)
-            );
-            CREATE TABLE IF NOT EXISTS index_chunks (
-                chunk_hash TEXT PRIMARY KEY,
-                xorb_hash TEXT NOT NULL,
-                chunk_index INTEGER NOT NULL
-            );"
-        ).map_err(|e| format!("Failed to create index tables: {}", e))?;
-
-        // Enable WAL mode for better concurrent read performance
-        conn.execute_batch("PRAGMA journal_mode=WAL;")
-            .map_err(|e| format!("Failed to enable WAL mode: {}", e))?;
-
-        let db = Arc::new(std::sync::Mutex::new(conn));
-
-        // Load existing index from disk
-        let mut index = Self {
-            file_to_shards: Arc::new(RwLock::new(HashMap::new())),
-            chunk_to_xorb: Arc::new(RwLock::new(HashMap::new())),
-            db: Some(db.clone()),
-        };
-
-        index.load_from_db()?;
-
-        Ok(index)
-    }
-
-    /// I5: Load index data from SQLite database into memory
-    fn load_from_db(&mut self) -> Result<(), String> {
-        let db = self.db.as_ref().ok_or("No database connection")?;
-        let conn = db.lock().map_err(|e| format!("Lock error: {}", e))?;
-
-        // Load file_to_shards
-        let mut stmt = conn.prepare("SELECT file_hash, shard_id FROM index_files")
-            .map_err(|e| format!("Prepare statement failed: {}", e))?;
-
-        let file_rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        }).map_err(|e| format!("Query failed: {}", e))?;
-
-        let mut file_map = self.file_to_shards.write();
-        for row in file_rows {
-            let (file_hash, shard_id) = row.map_err(|e| format!("Row error: {}", e))?;
-            file_map.entry(file_hash).or_default().push(shard_id);
-        }
-
-        // Load chunk_to_xorb
-        let mut stmt = conn.prepare("SELECT chunk_hash, xorb_hash, chunk_index FROM index_chunks")
-            .map_err(|e| format!("Prepare statement failed: {}", e))?;
-
-        let chunk_rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, u32>(2)?,
-            ))
-        }).map_err(|e| format!("Query failed: {}", e))?;
-
-        let mut chunk_map = self.chunk_to_xorb.write();
-        for row in chunk_rows {
-            let (chunk_hash, xorb_hash, chunk_index) = row.map_err(|e| format!("Row error: {}", e))?;
-            chunk_map.insert(chunk_hash, (xorb_hash, chunk_index));
-        }
-
-        Ok(())
-    }
-
-    /// I5: Persist a shard registration to SQLite
-    fn persist_shard_to_db(
-        &self,
-        shard_id: &str,
-        file_hashes: &[String],
-        chunk_mappings: &[(String, String, u32)],
-    ) -> Result<(), String> {
-        let db = self.db.as_ref().ok_or("No database connection")?;
-        let conn = db.lock().map_err(|e| format!("Lock error: {}", e))?;
-
-        // Insert file mappings
-        for file_hash in file_hashes {
-            conn.execute(
-                "INSERT OR IGNORE INTO index_files (file_hash, shard_id) VALUES (?1, ?2)",
-                rusqlite::params![file_hash, shard_id],
-            ).map_err(|e| format!("Insert file mapping failed: {}", e))?;
-        }
-
-        // Insert chunk mappings
-        for (chunk_hash, xorb_hash, chunk_index) in chunk_mappings {
-            conn.execute(
-                "INSERT OR REPLACE INTO index_chunks (chunk_hash, xorb_hash, chunk_index) VALUES (?1, ?2, ?3)",
-                rusqlite::params![chunk_hash, xorb_hash, chunk_index],
-            ).map_err(|e| format!("Insert chunk mapping failed: {}", e))?;
-        }
-
-        Ok(())
     }
 
     /// Register a shard and update file-to-shard mappings
@@ -171,13 +58,6 @@ impl MetadataIndex {
             let mut chunk_map = self.chunk_to_xorb.write();
             for (chunk_hash, xorb_hash, chunk_index) in &chunk_mappings {
                 chunk_map.insert(chunk_hash.clone(), (xorb_hash.clone(), *chunk_index));
-            }
-        }
-
-        // I5: Persist to SQLite if persistence is enabled
-        if self.db.is_some() {
-            if let Err(e) = self.persist_shard_to_db(&shard_id, &file_hashes, &chunk_mappings) {
-                tracing::warn!("Failed to persist index to disk: {}", e);
             }
         }
     }
@@ -237,35 +117,32 @@ impl MetadataIndex {
                 }
             };
 
-            let shard = match MDBShardFile::parse(&shard_data) {
-                Ok(s) => s,
+            // Parse shard and extract mappings
+            match MDBShardFile::parse(&shard_data) {
+                Ok(shard) => {
+                    // Extract file hashes and convert to strings
+                    let file_hashes: Vec<String> = shard.file_hashes()
+                        .iter()
+                        .map(|h| h.to_hex())
+                        .collect();
+
+                    // Extract chunk mappings and convert to strings
+                    let chunk_mappings: Vec<(String, String, u32)> = shard.chunk_mappings()
+                        .iter()
+                        .map(|(chunk, xorb, idx)| (chunk.to_hex(), xorb.to_hex(), *idx))
+                        .collect();
+
+                    // Extract shard_id from key (shards/{shard_id})
+                    let shard_id = shard_key.strip_prefix("shards/").unwrap_or(shard_key).to_string();
+
+                    // Register in index
+                    self.register_shard(shard_id, file_hashes, chunk_mappings);
+                    count += 1;
+                }
                 Err(e) => {
                     tracing::warn!("Failed to parse shard {}: {}", shard_key, e);
-                    continue;
                 }
-            };
-
-            // Extract shard_id from key: "shards/{shard_id}"
-            let shard_id = shard_key
-                .strip_prefix("shards/")
-                .unwrap_or(shard_key)
-                .to_string();
-
-            // MDBShardFile::parse pre-computes file_hashes and chunk_mappings
-            let file_hashes: Vec<String> = shard.file_hashes()
-                .iter()
-                .map(|h| h.to_hex())
-                .collect();
-
-            let chunk_mappings: Vec<(String, String, u32)> = shard.chunk_mappings()
-                .iter()
-                .map(|(chunk_hash, xorb_hash, chunk_index)| {
-                    (chunk_hash.to_hex(), xorb_hash.to_hex(), *chunk_index)
-                })
-                .collect();
-
-            self.register_shard(shard_id, file_hashes, chunk_mappings);
-            count += 1;
+            }
         }
 
         Ok(count)
@@ -290,109 +167,71 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_metadata_index_basic() {
+    fn test_register_and_query() {
         let index = MetadataIndex::new();
 
-        // Register a shard with file and chunk mappings
-        index.register_shard(
-            "shard-1".to_string(),
-            vec!["file-abc".to_string()],
-            vec![
-                ("chunk-1".to_string(), "xorb-xyz".to_string(), 0),
-                ("chunk-2".to_string(), "xorb-xyz".to_string(), 1),
-            ],
-        );
+        // Register a shard
+        let shard_id = "shard-001".to_string();
+        let file_hashes = vec!["file-abc".to_string(), "file-def".to_string()];
+        let chunk_mappings = vec![
+            ("chunk-1".to_string(), "xorb-1".to_string(), 0),
+            ("chunk-2".to_string(), "xorb-1".to_string(), 1),
+        ];
 
-        // Test file-to-shard mapping
-        let shards = index.get_shards_for_file("file-abc").unwrap();
-        assert_eq!(shards, vec!["shard-1"]);
+        index.register_shard(shard_id.clone(), file_hashes.clone(), chunk_mappings);
 
-        // Test chunk-to-xorb mapping
-        let (xorb_hash, chunk_idx) = index.get_xorb_for_chunk("chunk-1").unwrap();
-        assert_eq!(xorb_hash, "xorb-xyz");
-        assert_eq!(chunk_idx, 0);
+        // Verify file-to-shards mapping
+        let shards = index.get_shards_for_file("file-abc");
+        assert!(shards.is_some());
+        assert_eq!(shards.unwrap(), vec![shard_id]);
 
-        // Test chunk existence
-        assert!(index.chunk_exists("chunk-1"));
-        assert!(!index.chunk_exists("nonexistent"));
+        // Verify chunk-to-xorb mapping
+        let xorb = index.get_xorb_for_chunk("chunk-1");
+        assert!(xorb.is_some());
+        assert_eq!(xorb.unwrap(), ("xorb-1".to_string(), 0));
 
-        // Test stats
+        // Verify stats
         let stats = index.stats();
-        assert_eq!(stats.num_files, 1);
+        assert_eq!(stats.num_files, 2);
         assert_eq!(stats.num_chunks, 2);
     }
 
     #[test]
-    fn test_metadata_index_multiple_shards() {
+    fn test_multiple_shards() {
         let index = MetadataIndex::new();
 
         // Register first shard
         index.register_shard(
-            "shard-1".to_string(),
-            vec!["file-abc".to_string()],
+            "shard-001".to_string(),
+            vec!["file-a".to_string()],
             vec![("chunk-1".to_string(), "xorb-1".to_string(), 0)],
         );
 
-        // Register second shard for same file
+        // Register second shard with same file
         index.register_shard(
-            "shard-2".to_string(),
-            vec!["file-abc".to_string()],
+            "shard-002".to_string(),
+            vec!["file-a".to_string()],
             vec![("chunk-2".to_string(), "xorb-2".to_string(), 0)],
         );
 
-        // File should map to both shards
-        let shards = index.get_shards_for_file("file-abc").unwrap();
+        // File should be in both shards
+        let shards = index.get_shards_for_file("file-a").unwrap();
         assert_eq!(shards.len(), 2);
-        assert!(shards.contains(&"shard-1".to_string()));
-        assert!(shards.contains(&"shard-2".to_string()));
-
-        // Stats should reflect all chunks
-        let stats = index.stats();
-        assert_eq!(stats.num_files, 1);
-        assert_eq!(stats.num_chunks, 2);
+        assert!(shards.contains(&"shard-001".to_string()));
+        assert!(shards.contains(&"shard-002".to_string()));
     }
 
     #[test]
-    fn test_metadata_index_nonexistent_file() {
+    fn test_chunk_exists() {
         let index = MetadataIndex::new();
 
-        assert!(index.get_shards_for_file("nonexistent").is_none());
-    }
-
-    #[test]
-    fn test_metadata_index_persistence() {
-        use tempfile::NamedTempFile;
-
-        // Create a temp file for the database
-        let db_file = NamedTempFile::new().unwrap();
-        let db_path = db_file.path().to_str().unwrap();
-
-        // Create an index with persistence
-        let index1 = MetadataIndex::with_persistence(db_path).unwrap();
-
-        // Register some data
-        index1.register_shard(
-            "shard-persist-1".to_string(),
-            vec!["file-persist-abc".to_string()],
-            vec![
-                ("chunk-p1".to_string(), "xorb-pxyz".to_string(), 0),
-                ("chunk-p2".to_string(), "xorb-pxyz".to_string(), 1),
-            ],
+        index.register_shard(
+            "shard-001".to_string(),
+            vec![],
+            vec![("chunk-1".to_string(), "xorb-1".to_string(), 0)],
         );
 
-        // Create a new index from the same database
-        let index2 = MetadataIndex::with_persistence(db_path).unwrap();
-
-        // Verify the data was loaded
-        let shards = index2.get_shards_for_file("file-persist-abc").unwrap();
-        assert_eq!(shards, vec!["shard-persist-1"]);
-
-        let (xorb_hash, chunk_idx) = index2.get_xorb_for_chunk("chunk-p1").unwrap();
-        assert_eq!(xorb_hash, "xorb-pxyz");
-        assert_eq!(chunk_idx, 0);
-
-        assert!(index2.chunk_exists("chunk-p1"));
-        assert!(index2.chunk_exists("chunk-p2"));
-        assert!(!index2.chunk_exists("nonexistent"));
+        assert!(index.chunk_exists("chunk-1"));
+        assert!(!index.chunk_exists("chunk-2"));
     }
 }

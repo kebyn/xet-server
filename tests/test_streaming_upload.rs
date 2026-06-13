@@ -53,7 +53,6 @@ fn create_test_config_with_temp_dir(temp_dir: &str) -> TestContext {
         auth: auth_config,
         conversion: xet_server::config::ConversionConfig::default(),
         gc: xet_server::config::GcConfig::default(),
-        index: xet_server::config::IndexConfig::default(),
     };
 
     TestContext {
