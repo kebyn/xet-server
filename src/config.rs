@@ -28,6 +28,10 @@ pub struct ServerSettings {
     /// Increase for larger model file uploads; decrease to tighten memory safety.
     /// Configure via `XET_MAX_BODY_SIZE_MB` environment variable.
     pub max_body_size_mb: u64,
+    /// Rate limit for public endpoints in requests per minute per IP.
+    /// Configure via `XET_RATE_LIMIT_RPM` environment variable.
+    /// Default: 60 RPM.
+    pub rate_limit_rpm: u32,
 }
 
 impl ServerSettings {
@@ -216,6 +220,7 @@ impl Default for ServerConfig {
                 port: 8081,  // Changed from 8080 to avoid conflict with Hub API
                 public_base_url: None,
                 max_body_size_mb: 2048,
+                rate_limit_rpm: 60,
             },
             storage: StorageConfig {
                 backend: "local".to_string(),
@@ -254,6 +259,13 @@ impl ServerConfig {
                 2048
             }),
             Err(_) => 2048,
+        };
+        let rate_limit_rpm = match std::env::var("XET_RATE_LIMIT_RPM") {
+            Ok(val) => val.parse().unwrap_or_else(|_| {
+                tracing::warn!("XET_RATE_LIMIT_RPM '{}' is not a valid number, using default 60", val);
+                60
+            }),
+            Err(_) => 60,
         };
 
         let backend = std::env::var("XET_STORAGE_BACKEND").unwrap_or_else(|_| "local".to_string());
@@ -333,7 +345,7 @@ impl ServerConfig {
             .unwrap_or_default();
 
         Self {
-            server: ServerSettings { host, port, public_base_url, max_body_size_mb },
+            server: ServerSettings { host, port, public_base_url, max_body_size_mb, rate_limit_rpm },
             storage: StorageConfig {
                 backend,
                 s3_bucket,
