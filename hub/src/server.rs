@@ -35,6 +35,16 @@ pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
     // Initialize CAS client
     let cas_client = Arc::new(CasClient::new(&config.cas));
 
+    // Optional: verify CAS connectivity at startup (async, non-blocking)
+    let cas_health = cas_client.clone();
+    tokio::spawn(async move {
+        match cas_health.health_check().await {
+            Ok(true) => tracing::info!("CAS health check passed"),
+            Ok(false) => tracing::warn!("CAS health check returned non-success. Verify CAS is running."),
+            Err(e) => tracing::warn!("CAS health check failed: {}. Hub and CAS may not be able to communicate.", e),
+        }
+    });
+
     let bind_addr = format!("{}:{}", config.server.host, config.server.port);
     tracing::info!("Starting Hub API on {}", bind_addr);
     tracing::info!("CAS: {}", config.cas.base_url);
