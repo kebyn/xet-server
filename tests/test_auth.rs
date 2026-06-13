@@ -21,6 +21,7 @@ fn create_test_claims(kid: &str, scope: &str) -> XetClaims {
         exp: now + 3600, // Valid for 1 hour
         iat: now,
         kid: kid.to_string(),
+        token_type: "user".to_string(),
     }
 }
 
@@ -84,6 +85,7 @@ fn test_verify_expired_token() {
         exp: 1, // Expired
         iat: 1,
         kid: kid.to_string(),
+        token_type: "user".to_string(),
     };
 
     let token = sign_xet_token(&claims, &kp).unwrap();
@@ -161,6 +163,7 @@ fn test_check_scope() {
         exp: 9999999999,
         iat: 9999999999 - 3600,
         kid: "test-kid".to_string(),
+        token_type: "user".to_string(),
     };
 
     assert!(check_scope(&claims, "read"));
@@ -179,6 +182,7 @@ fn test_check_scope_internal_restricted() {
         exp: 9999999999,
         iat: 9999999999 - 3600,
         kid: "test-kid".to_string(),
+        token_type: "internal".to_string(),
     };
 
     // "internal" scope ONLY grants access to internal endpoints

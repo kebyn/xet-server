@@ -21,13 +21,48 @@ async fn test_metrics_endpoint() {
     GLOBAL_METRICS.record_storage_operation();
     GLOBAL_METRICS.record_upload_bytes(1024);
 
+    // Create auth setup for metrics endpoint
+    let kp = KeyPair::generate();
+    let key_temp_dir = tempdir().unwrap();
+    let public_key_pem = KeyPair::public_key_to_pem(&kp.verifying_key()).unwrap();
+    let pub_key_path = key_temp_dir.path().join(format!("pubkey-{}.pem", kp.kid()));
+    std::fs::write(&pub_key_path, &public_key_pem).unwrap();
+
+    let auth_config = AuthConfig {
+        public_key_path: pub_key_path.to_str().unwrap().to_string(),
+        trusted_kids: vec![kp.kid()],
+    };
+
+    let auth_verifier = AuthVerifier::from_config(&auth_config).unwrap();
+
+    // Create an internal token for metrics access
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let claims = xet_server::api::auth::XetClaims {
+        sub: "monitoring-service".to_string(),
+        scope: "internal".to_string(),
+        repo_id: "".to_string(),
+        repo_type: "".to_string(),
+        revision: "".to_string(),
+        exp: now + 3600,
+        iat: now,
+        kid: kp.kid(),
+        token_type: "internal".to_string(),
+    };
+    let token = xet_server::api::auth::sign_xet_token(&claims, &kp).unwrap();
+
     let app = test::init_service(
         App::new()
+            .app_data(web::Data::new(auth_verifier))
             .route("/metrics", web::get().to(metrics_endpoint))
     ).await;
 
     let req = test::TestRequest::get()
         .uri("/metrics")
+        .insert_header(("Authorization", format!("Bearer {}", token)))
         .to_request();
 
     let resp = test::call_service(&app, req).await;

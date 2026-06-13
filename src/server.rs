@@ -131,13 +131,49 @@ pub async fn health_check() -> HttpResponse {
 /// Prometheus metrics endpoint
 ///
 /// # Security Note
-/// This endpoint exposes operational metrics (request counts, latency, error rates)
-/// without authentication. In production environments, consider:
-/// - Restricting access via network policies/firewall rules
-/// - Adding authentication if metrics contain sensitive information
-/// - Using a dedicated metrics port that's not publicly accessible
-pub async fn metrics_endpoint() -> HttpResponse {
+/// This endpoint requires authentication (internal scope).
+/// In production environments, use tokens with "internal" scope for monitoring systems.
+pub async fn metrics_endpoint(
+    auth: web::Data<AuthVerifier>,
+    req: actix_web::HttpRequest,
+) -> HttpResponse {
+    let start = std::time::Instant::now();
+
+    // Extract and validate auth token
+    let token = match crate::api::auth::extract_token_from_request(&req) {
+        Some(t) => t,
+        None => {
+            crate::metrics::GLOBAL_METRICS.record_request(401);
+            crate::metrics::GLOBAL_METRICS.record_latency(start);
+            return HttpResponse::Unauthorized().json(serde_json::json!({
+                "error": "Missing or invalid authorization token"
+            }));
+        }
+    };
+
+    let claims = match auth.verify_token(&token) {
+        Ok(c) => c,
+        Err(_) => {
+            crate::metrics::GLOBAL_METRICS.record_request(401);
+            crate::metrics::GLOBAL_METRICS.record_latency(start);
+            return HttpResponse::Unauthorized().json(serde_json::json!({
+                "error": "Invalid token"
+            }));
+        }
+    };
+
+    // Check for "internal" scope (monitoring systems should use internal tokens)
+    if !crate::api::auth::check_scope(&claims, "internal") {
+        crate::metrics::GLOBAL_METRICS.record_request(403);
+        crate::metrics::GLOBAL_METRICS.record_latency(start);
+        return HttpResponse::Forbidden().json(serde_json::json!({
+            "error": "Insufficient scope: requires 'internal'"
+        }));
+    }
+
     let metrics = crate::metrics::GLOBAL_METRICS.export_metrics();
+    crate::metrics::GLOBAL_METRICS.record_request(200);
+    crate::metrics::GLOBAL_METRICS.record_latency(start);
     HttpResponse::Ok()
         .content_type("text/plain; version=0.0.4")
         .body(metrics)

@@ -47,6 +47,7 @@ fn create_test_token(kp: &KeyPair, scope: &str) -> String {
         exp: now + 3600,
         iat: now,
         kid: kp.kid(),
+        token_type: "user".to_string(),
     };
 
     sign_xet_token(&claims, kp).unwrap()
