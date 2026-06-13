@@ -158,26 +158,6 @@ export GC_ENABLED=true
 export GC_DRY_RUN=true
 ```
 
-### 索引持久化设置
-
-| 环境变量 | 描述 | 默认值 | 必需 |
-|---------|------|--------|------|
-| `XET_INDEX_PERSIST` | 启用元数据索引持久化到 SQLite | `false` | 否 |
-| `XET_INDEX_DB_PATH` | 索引数据库文件路径 | `./data/metadata_index.db` | 否 |
-
-**说明**：
-- 启用持久化后，MetadataIndex 会保存到 SQLite 数据库，避免每次重启时扫描所有 shard 重建索引
-- 禁用时（默认），每次启动都会扫描存储后端中的所有 shard 文件来重建内存索引
-- 对于大型部署（数万个 shard），启用持久化可以显著减少启动时间
-- 数据库文件建议使用 SSD 存储以获得最佳性能
-
-**示例**：
-```bash
-# 启用索引持久化
-export XET_INDEX_PERSIST=true
-export XET_INDEX_DB_PATH=/var/lib/xet/metadata_index.db
-```
-
 ### 完整性验证设置
 
 | 环境变量 | 描述 | 默认值 | 必需 |
@@ -685,10 +665,10 @@ aws s3 ls s3://my-xet-bucket --region us-east-1
 2. 验证数据库文件权限
 3. 考虑使用 WAL 模式
 
-**SQLite WAL 模式**：
+**SQLite WAL 模式**（Hub 元数据数据库）：
 ```bash
-# 启用 WAL 模式（提高并发性能）
-sqlite3 /var/lib/xet/state.db "PRAGMA journal_mode=WAL;"
+# 启用 WAL 模式（提高 Hub 元数据数据库并发性能）
+sqlite3 /var/lib/xet/hub-metadata.db "PRAGMA journal_mode=WAL;"
 ```
 
 ---

@@ -34,7 +34,7 @@ Xet Server 采用**双进程架构**，由两个独立的服务组成：
 └────────────┬──────────────────────────────┬─────────────────┘
              │                              │
              │ Git LFS / HF Hub API         │ Xet 原生协议
-             │ (HTTP :8080)                 │ (HTTP :8080)
+             │ (HTTP :8080)                 │ (HTTP :8081)
              ▼                              ▼
 ┌────────────────────────┐      ┌────────────────────────┐
 │     Hub API Server     │      │    CAS Server (xet)    │
@@ -55,8 +55,6 @@ Xet Server 采用**双进程架构**，由两个独立的服务组成：
                               │                        │
                               │  • Local Filesystem    │
                               │  • S3 / MinIO          │
-                              │                        │
-                              │  + SQLite (元数据)      │
                               └────────────────────────┘
 ```
 
@@ -72,14 +70,14 @@ Xet Server 采用**双进程架构**，由两个独立的服务组成：
 - 端口：8081（默认，避免与 Hub API 端口 8080 冲突）
 - 功能：内容寻址存储引擎
 - 职责：xorb/shard 存储、文件重构、去重、LFS 对象管理
-- 数据库：SQLite（状态跟踪）
+- 无数据库（纯内存索引，启动时从存储后端重建）
 
 ## 🚀 快速开始
 
 ### 环境要求
 
 - **Rust** 1.85+ (Edition 2024)
-- **SQLite** 3.35+
+- **SQLite** 3.35+（仅 Hub API 需要）
 - **可选**：S3/MinIO 存储后端
 
 ### 编译安装
@@ -143,7 +141,7 @@ export HUB_PRIVATE_KEY_PATH=/path/to/private_key.pem
 export HUB_KID=hub-key-1
 export HUB_TOKEN_TTL_SECONDS=3600
 
-# CAS 客户端设置（注意：覆盖默认值 3000，与上面 CAS 端口 8081 保持一致）
+# CAS 客户端设置
 export CAS_BASE_URL=http://localhost:8081
 
 # 元数据数据库
@@ -241,8 +239,10 @@ hf download my-org/my-repo model.bin --local-dir ./downloaded
 | `/lfs/objects/{oid}` | GET | 下载 LFS 对象 |
 | `/v1/shards` | POST | 上传 Shard 元数据 |
 | `/v1/reconstructions/{file_id}` | GET | 获取文件重构信息 |
+| `/v2/reconstructions/{file_id}` | GET | 获取文件重构信息（V2） |
 | `/v1/chunks/{prefix}/{hash}` | GET | 全局去重查询 |
 | `/objects/batch` | POST | Git LFS 批量 API |
+| `/lfs/objects/batch` | POST | Git LFS 批量 API（LFS 路径） |
 | `/health` | GET | 健康检查 |
 | `/metrics` | GET | Prometheus 指标 |
 
