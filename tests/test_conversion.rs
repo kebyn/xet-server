@@ -331,7 +331,7 @@ async fn test_rebuild_from_storage() {
 
     // Create a fresh, empty index and rebuild it from storage.
     let fresh_index = MetadataIndex::new();
-    let count = fresh_index.rebuild_from_storage(&**storage).await.unwrap();
+    let count = fresh_index.rebuild_from_storage(storage.clone()).await.unwrap();
     assert!(count >= 1, "should have rebuilt at least 1 shard");
 
     // The rebuilt index should know about the file.

@@ -154,36 +154,83 @@ impl GarbageCollector {
     }
 
     /// Fetch all referenced LFS hashes from Hub
+    /// M3 fix: Implements exponential backoff retry to handle transient network errors.
+    /// Retries up to 3 times with delays: 1s, 2s, 4s.
     async fn fetch_referenced_hashes(&self) -> Result<HashSet<String>, String> {
         let url = format!("{}/internal/referenced-hashes", self.config.hub_base_url);
 
-        let resp = self
-            .hub_client
-            .get(&url)
-            .header("Authorization", format!("Bearer {}", self.config.hub_internal_token))
-            .send()
-            .await
-            .map_err(|e| format!("Failed to query Hub: {}", e))?;
+        const MAX_RETRIES: u32 = 3;
+        let mut last_error = String::new();
 
-        if !resp.status().is_success() {
-            return Err(format!("Hub returned status {}", resp.status()));
+        for attempt in 0..=MAX_RETRIES {
+            // Exponential backoff: 1s, 2s, 4s (skip delay on first attempt)
+            if attempt > 0 {
+                let delay = Duration::from_secs(1 << (attempt - 1));
+                tracing::info!(
+                    "GC Hub request retry attempt {}/{} after {}s delay",
+                    attempt, MAX_RETRIES, delay.as_secs()
+                );
+                tokio::time::sleep(delay).await;
+            }
+
+            let resp = match self
+                .hub_client
+                .get(&url)
+                .header("Authorization", format!("Bearer {}", self.config.hub_internal_token))
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    last_error = format!("Failed to query Hub: {}", e);
+                    tracing::warn!("GC Hub request failed (attempt {}/{}): {}", attempt + 1, MAX_RETRIES + 1, last_error);
+                    continue;
+                }
+            };
+
+            if !resp.status().is_success() {
+                last_error = format!("Hub returned status {}", resp.status());
+                tracing::warn!("GC Hub request failed (attempt {}/{}): {}", attempt + 1, MAX_RETRIES + 1, last_error);
+                // Don't retry on 4xx client errors (except 408, 429)
+                let status = resp.status();
+                if status.is_client_error() && status.as_u16() != 408 && status.as_u16() != 429 {
+                    return Err(last_error);
+                }
+                continue;
+            }
+
+            let body: serde_json::Value = match resp.json().await {
+                Ok(b) => b,
+                Err(e) => {
+                    last_error = format!("Failed to parse Hub response: {}", e);
+                    tracing::warn!("GC Hub request failed (attempt {}/{}): {}", attempt + 1, MAX_RETRIES + 1, last_error);
+                    continue;
+                }
+            };
+
+            let hashes_array = body["hashes"]
+                .as_array()
+                .ok_or_else(|| "Hub response missing 'hashes' array".to_string())?;
+
+            let hashes: HashSet<String> = hashes_array
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect();
+
+            // Success - log retry if this wasn't the first attempt
+            if attempt > 0 {
+                tracing::info!("GC Hub request succeeded after {} retries", attempt);
+            }
+
+            return Ok(hashes);
         }
 
-        let body: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| format!("Failed to parse Hub response: {}", e))?;
-
-        let hashes_array = body["hashes"]
-            .as_array()
-            .ok_or_else(|| "Hub response missing 'hashes' array".to_string())?;
-
-        let hashes: HashSet<String> = hashes_array
-            .iter()
-            .filter_map(|v| v.as_str().map(|s| s.to_string()))
-            .collect();
-
-        Ok(hashes)
+        // All retries exhausted
+        Err(format!(
+            "GC Hub request failed after {} attempts: {}",
+            MAX_RETRIES + 1,
+            last_error
+        ))
     }
 
     /// Scan all shards and collect referenced xorb hashes

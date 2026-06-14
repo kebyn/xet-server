@@ -20,6 +20,7 @@ const CONVERSION_BLOCK_SIZE: usize = 1024 * 1024;
 
 /// RAII guard that deletes a file path when dropped.
 /// I2: Ensures temporary files are cleaned up even on error paths.
+/// I3 fix: Uses spawn_blocking for file deletion to avoid blocking the tokio runtime.
 struct PathGuard {
     path: std::path::PathBuf,
 }
@@ -32,9 +33,18 @@ impl PathGuard {
 
 impl Drop for PathGuard {
     fn drop(&mut self) {
-        if let Err(e) = std::fs::remove_file(&self.path) {
-            tracing::warn!("Failed to cleanup temp file {}: {}", self.path.display(), e);
-        }
+        // I3 fix: Use spawn_blocking to avoid blocking the tokio worker thread.
+        // std::fs::remove_file is a blocking syscall that can block the async runtime.
+        // spawn_blocking moves this to a dedicated thread pool for blocking operations.
+        let path = self.path.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Err(e) = std::fs::remove_file(&path) {
+                tracing::warn!("Failed to cleanup temp file {}: {}", path.display(), e);
+            }
+        });
+        // Note: We don't await the spawn_blocking result because Drop is synchronous.
+        // The cleanup will happen eventually in the blocking thread pool.
+        // This is acceptable for temp file cleanup - it's not critical if it's delayed.
     }
 }
 

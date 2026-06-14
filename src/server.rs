@@ -41,7 +41,8 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
     let index = Arc::new(crate::index::MetadataIndex::new());
 
     // Rebuild MetadataIndex from stored shards (stateless server)
-    match index.rebuild_from_storage(&**storage).await {
+    // I1 fix: Pass Arc clone for parallel shard fetching
+    match index.rebuild_from_storage(storage.clone()).await {
         Ok(count) => tracing::info!("Rebuilt metadata index: {} shards loaded", count),
         Err(e) => tracing::warn!("Failed to rebuild index: {}", e),
     }
@@ -88,8 +89,19 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
     // Configure rate limiting for public endpoints only.
     // Internal endpoints (/internal/*) bypass rate limiting to avoid
     // disrupting Hub-to-CAS communication.
-    // M2 fix: Use default PeerIpKeyExtractor for per-IP rate limiting (not global).
-    // GovernorConfigBuilder uses PeerIpKeyExtractor by default in actix-governor 0.5.
+    //
+    // M2 fix: Rate limit semantics documentation.
+    // Governor's rate limiter uses a token bucket algorithm:
+    // - per_second(60): Token refill window is 60 seconds
+    // - burst_size(rpm): Maximum tokens (requests) allowed per window
+    //
+    // Example with default rpm=60:
+    // - A client can make up to 60 requests in any 60-second window
+    // - Tokens refill at 1 per second (60 tokens / 60 seconds)
+    // - Burst allows 60 rapid requests, then must wait for refill
+    //
+    // This is effectively "requests per minute" with burst tolerance.
+    // Uses default PeerIpKeyExtractor for per-IP rate limiting (not global).
     let rpm = config.server.rate_limit_rpm;
     let governor_conf = GovernorConfigBuilder::default()
         .per_second(60)  // 60-second refill window
@@ -97,7 +109,11 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
         .finish()
         .expect("Failed to configure rate limiter");
 
-    tracing::info!("Rate limiting: {} requests/minute per IP for public endpoints (internal endpoints excluded)", rpm);
+    tracing::info!(
+        "Rate limiting: {} requests per 60-second window per IP for public endpoints \
+         (internal endpoints excluded). Burst-allowed: {}, refill: 1 token/second",
+        rpm, rpm
+    );
 
     HttpServer::new(move || {
         App::new()
