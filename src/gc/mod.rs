@@ -166,9 +166,10 @@ impl GarbageCollector {
             // Exponential backoff: 1s, 2s, 4s (skip delay on first attempt)
             if attempt > 0 {
                 let delay = Duration::from_secs(1 << (attempt - 1));
+                // M3 fix: Log message clearly indicates this is a retry wait, not a failure
                 tracing::info!(
-                    "GC Hub request retry attempt {}/{} after {}s delay",
-                    attempt, MAX_RETRIES, delay.as_secs()
+                    "GC Hub request failed, waiting {}s before retry attempt {}/{}",
+                    delay.as_secs(), attempt, MAX_RETRIES
                 );
                 tokio::time::sleep(delay).await;
             }
@@ -260,7 +261,10 @@ impl GarbageCollector {
                     let mut xorb_hashes = HashSet::new();
                     if let Ok(shard) = crate::format::shard::MDBShardFile::parse(&data) {
                         for xorb_entry in &shard.xorb_entries {
-                            xorb_hashes.insert(hex::encode(xorb_entry.xorb_hash.as_bytes()));
+                            // M4 fix: Use to_hex() for consistency with xorb storage key format.
+                            // to_hex() is hex::encode(as_bytes()), but using the named method
+                            // makes the intent clearer and prevents future divergence.
+                            xorb_hashes.insert(xorb_entry.xorb_hash.to_hex());
                         }
                     } else {
                         warn!("Failed to parse shard {}, skipping xorb extraction", key);
@@ -543,5 +547,34 @@ mod tests {
         assert_eq!(orphaned.len(), 1);
         assert!(orphaned[0].contains("old_orphan"));
         assert_eq!(stats.grace_period_skipped, 1);
+    }
+
+    // M4 fix: Verify that xorb hash hex encoding matches storage key format.
+    // xorb storage keys use format!("xorbs/{}", xorb_hash.to_hex()),
+    // so GC must use the same encoding when comparing referenced xorbs.
+    #[test]
+    fn test_xorb_hash_hex_encoding_consistency() {
+        use crate::types::MerkleHash;
+
+        // Create a known hash value
+        let hash_bytes: [u8; 32] = [
+            0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+            0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10,
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+            0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+        ];
+        let hash = MerkleHash::from(hash_bytes);
+
+        // to_hex() and hex::encode(as_bytes()) must produce identical output
+        assert_eq!(
+            hash.to_hex(),
+            hex::encode(hash.as_bytes()),
+            "MerkleHash::to_hex() must equal hex::encode(as_bytes()) for xorb key consistency"
+        );
+
+        // Verify the storage key format matches what GC computes
+        let storage_key = format!("xorbs/{}", hash.to_hex());
+        let extracted_hash = storage_key.strip_prefix("xorbs/").unwrap();
+        assert_eq!(extracted_hash, hash.to_hex());
     }
 }

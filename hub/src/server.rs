@@ -122,10 +122,20 @@ pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
         );
     }
 
-    // Configure rate limiting for public API endpoints.
+    // I5 fix: Configure rate limiting for public API endpoints.
     // Internal endpoints (/internal/*) and health check bypass rate limiting.
-    // M2 fix: Use default PeerIpKeyExtractor for per-IP rate limiting (not global).
-    // GovernorConfigBuilder uses PeerIpKeyExtractor by default in actix-governor 0.5.
+    // Uses default PeerIpKeyExtractor for per-IP rate limiting (not global).
+    //
+    // Governor's rate limiter uses a token bucket algorithm:
+    // - per_second(60): Token refill window is 60 seconds
+    // - burst_size(rpm): Maximum tokens (requests) allowed per window
+    //
+    // Example with default rpm=120:
+    // - A client can make up to 120 requests in any 60-second window
+    // - Tokens refill at 2 per second (120 tokens / 60 seconds)
+    // - Burst allows 120 rapid requests, then must wait for refill
+    //
+    // This is effectively "requests per minute" with burst tolerance.
     let rpm = config.server.rate_limit_rpm;
     let governor_conf = GovernorConfigBuilder::default()
         .per_second(60)  // 60-second refill window
@@ -133,7 +143,11 @@ pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
         .finish()
         .expect("Failed to configure rate limiter");
 
-    tracing::info!("Rate limiting: {} requests/minute per IP for public endpoints (internal/health excluded)", rpm);
+    tracing::info!(
+        "Rate limiting: {} requests per 60-second window per IP for public endpoints \
+         (internal/health excluded). Burst: {}, refill: {} tokens/second",
+        rpm, rpm, rpm
+    );
 
     HttpServer::new(move || {
         App::new()
