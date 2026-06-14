@@ -80,6 +80,16 @@ pub async fn batch_operation(
 
     info!("Batch operation request: {} ({} objects)", body.operation, body.objects.len());
 
+    // I5 fix: Check if proxy token generation is available
+    let can_sign_proxy = auth.can_sign_proxy_tokens();
+    if !can_sign_proxy {
+        tracing::warn!(
+            "CAS batch API: proxy token generation not available (CAS_PRIVATE_KEY_PATH not set). \
+            User's long-lived token will be passed through to clients. \
+            Set CAS_PRIVATE_KEY_PATH for production deployments."
+        );
+    }
+
     // Bound logical cardinality — PayloadConfig bounds body bytes but not object count.
     if body.objects.len() > MAX_BATCH_SIZE {
         GLOBAL_METRICS.record_request(400);
@@ -153,6 +163,14 @@ pub async fn batch_operation(
     let base_url = config.server.base_url();
 
     for obj in &body.objects {
+        // I5 fix: Generate proxy token if signing key is available, otherwise fall back to user token
+        let auth_token_for_action = if can_sign_proxy {
+            auth.sign_proxy_token(&claims.sub, &obj.oid, &body.operation)
+                .unwrap_or_else(|| token.clone()) // Fallback to user token if signing fails
+        } else {
+            token.clone()
+        };
+
         let response_obj = match body.operation.as_str() {
             "upload" => {
                 // For upload, provide upload action
@@ -163,7 +181,7 @@ pub async fn batch_operation(
                 );
 
                 let mut headers = std::collections::HashMap::new();
-                headers.insert("Authorization".to_string(), format!("Bearer {}", token));
+                headers.insert("Authorization".to_string(), format!("Bearer {}", auth_token_for_action));
                 headers.insert("Content-Type".to_string(), "application/octet-stream".to_string());
 
                 BatchResponseObject {
@@ -190,7 +208,7 @@ pub async fn batch_operation(
                 );
 
                 let mut headers = std::collections::HashMap::new();
-                headers.insert("Authorization".to_string(), format!("Bearer {}", token));
+                headers.insert("Authorization".to_string(), format!("Bearer {}", auth_token_for_action));
 
                 BatchResponseObject {
                     oid: obj.oid.clone(),

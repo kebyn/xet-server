@@ -80,13 +80,13 @@ def load_private_key(private_key_path):
     with open(private_key_path, 'rb') as f:
         return serialization.load_pem_private_key(f.read(), password=None)
 
-def generate_token(private_key, kid, hours=24, repo_id="test/repo", repo_type="model", revision="main"):
+def generate_token(private_key, kid, hours=24, repo_id="test/repo", repo_type="model", revision="main", scope="read"):
     """Generate an Ed25519 JWT token with xet claims."""
     # Create claims (matching hub XetSigner format)
     now = int(time.time())
     claims = {
         "sub": "test-user",
-        "scope": "read write",
+        "scope": scope,
         "repo_id": repo_id,
         "repo_type": repo_type,
         "revision": revision,
@@ -137,6 +137,8 @@ def main():
                         help='Repository type for token claims (default: model)')
     parser.add_argument('--revision', default='main',
                         help='Revision for token claims (default: main)')
+    parser.add_argument('--scope', default='read',
+                        help='Token scope (default: read). Use "read write" for read-write access.')
 
     args = parser.parse_args()
 
@@ -175,7 +177,8 @@ def main():
         hours=args.hours,
         repo_id=args.repo_id,
         repo_type=args.repo_type,
-        revision=args.revision
+        revision=args.revision,
+        scope=args.scope
     )
     print(token)
 

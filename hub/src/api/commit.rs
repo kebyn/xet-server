@@ -81,6 +81,61 @@ fn decode_base64_content(content: &str) -> Result<Vec<u8>, String> {
     STANDARD.decode(content_to_decode).map_err(|e| format!("Base64 decode error: {}", e))
 }
 
+/// I1 fix: Validate file path to prevent path traversal and other injection attacks.
+///
+/// Rejects:
+/// - Empty paths
+/// - Absolute paths (starting with / or \)
+/// - Paths containing ".." components (path traversal)
+/// - Paths with null bytes
+/// - Paths starting with "/" or "\"
+///
+/// Returns Ok(()) if the path is valid, Err(message) if invalid.
+fn validate_file_path(path: &str) -> Result<(), String> {
+    // Reject empty paths
+    if path.is_empty() {
+        return Err("File path cannot be empty".to_string());
+    }
+
+    // Reject null bytes
+    if path.contains('\0') {
+        return Err("File path cannot contain null bytes".to_string());
+    }
+
+    // Reject absolute paths
+    if path.starts_with('/') || path.starts_with('\\') {
+        return Err(format!("File path cannot be absolute: {}", path));
+    }
+
+    // Reject path traversal: check each component for ".."
+    // Split on both '/' and '\\' to handle Windows-style separators.
+    for component in path.split(['/', '\\']) {
+        if component == ".." {
+            return Err(format!("File path contains path traversal: {}", path));
+        }
+        // Reject empty components (double slashes) except trailing slash
+        // Actually, just reject paths with "//" or "\\\\" anywhere
+    }
+
+    // Check for double slashes (empty components)
+    if path.contains("//") || path.contains("\\\\") {
+        return Err(format!("File path contains empty components: {}", path));
+    }
+
+    // Reject Windows reserved names (defense-in-depth)
+    let first_component = path.split(['/', '\\']).next().unwrap_or("");
+    let reserved = [
+        "CON", "PRN", "AUX", "NUL",
+        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    if reserved.iter().any(|r| r.eq_ignore_ascii_case(first_component)) {
+        return Err(format!("File path uses reserved name: {}", first_component));
+    }
+
+    Ok(())
+}
+
 /// Internal helper for commit handling
 ///
 /// **Known tradeoff:** Inline files are uploaded to CAS *before* the atomic metadata commit.
@@ -230,6 +285,14 @@ async fn handle_commit(
 
     // Process inline files - decode, check size, compute SHA256, and store in CAS
     for file_op in files {
+        // I1 fix: Validate file path before processing
+        if let Err(msg) = validate_file_path(&file_op.path) {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Invalid file path: {}", msg),
+                "error_type": "ValidationError"
+            }));
+        }
+
         let decoded_content = match decode_base64_content(&file_op.content) {
             Ok(c) => c,
             Err(e) => {
@@ -274,6 +337,14 @@ async fn handle_commit(
 
     // Process LFS files - verify they exist in CAS (C2)
     for lfs_op in lfs_files {
+        // I1 fix: Validate file path before processing
+        if let Err(msg) = validate_file_path(&lfs_op.path) {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Invalid file path: {}", msg),
+                "error_type": "ValidationError"
+            }));
+        }
+
         // Validate OID format before CAS verification (defense-in-depth)
         if lfs_op.oid.len() != 64 || !lfs_op.oid.chars().all(|c| c.is_ascii_hexdigit()) {
             return HttpResponse::BadRequest().json(serde_json::json!({
@@ -324,6 +395,13 @@ async fn handle_commit(
 
     // Apply deletions
     for deleted in deleted_entries {
+        // I1 fix: Validate deleted entry paths too
+        if let Err(msg) = validate_file_path(&deleted.path) {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Invalid deleted entry path: {}", msg),
+                "error_type": "ValidationError"
+            }));
+        }
         final_entries.remove(&deleted.path);
     }
 
@@ -738,6 +816,50 @@ mod tests {
         let content = "eyJ0ZXN0IjogdHJ1ZX0=";
         let decoded = decode_base64_content(content).unwrap();
         assert_eq!(decoded, b"{\"test\": true}".to_vec());
+    }
+
+    // I1 fix: Tests for path validation
+    #[test]
+    fn test_validate_file_path_valid() {
+        assert!(validate_file_path("config.json").is_ok());
+        assert!(validate_file_path("src/main.rs").is_ok());
+        assert!(validate_file_path("a/b/c/d.txt").is_ok());
+        assert!(validate_file_path("file..name").is_ok()); // Double dots in name (not component) OK
+    }
+
+    #[test]
+    fn test_validate_file_path_empty() {
+        assert!(validate_file_path("").is_err());
+    }
+
+    #[test]
+    fn test_validate_file_path_absolute() {
+        assert!(validate_file_path("/etc/passwd").is_err());
+        assert!(validate_file_path("\\windows\\system32").is_err());
+    }
+
+    #[test]
+    fn test_validate_file_path_traversal() {
+        assert!(validate_file_path("../etc/passwd").is_err());
+        assert!(validate_file_path("src/../../../etc/passwd").is_err());
+        assert!(validate_file_path("..").is_err());
+    }
+
+    #[test]
+    fn test_validate_file_path_null_bytes() {
+        assert!(validate_file_path("file\0.txt").is_err());
+    }
+
+    #[test]
+    fn test_validate_file_path_double_slash() {
+        assert!(validate_file_path("a//b").is_err());
+    }
+
+    #[test]
+    fn test_validate_file_path_reserved_names() {
+        assert!(validate_file_path("CON").is_err());
+        assert!(validate_file_path("NUL").is_err());
+        assert!(validate_file_path("COM1/test").is_err());
     }
 
     #[test]

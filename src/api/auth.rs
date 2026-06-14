@@ -68,6 +68,12 @@ pub struct XetClaims {
     /// I1: Added for defense-in-depth to distinguish internal service tokens
     #[serde(default = "default_token_type")]
     pub token_type: String,
+    /// I5 fix: LFS object ID (for proxy tokens, binds token to specific object)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oid: Option<String>,
+    /// I5 fix: LFS operation: "upload" or "download" (for proxy tokens)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation: Option<String>,
 }
 
 /// Default token type for backward compatibility with older tokens
@@ -165,8 +171,10 @@ pub fn verify_xet_token(
     expected_kid: &str,
 ) -> Result<XetClaims, AuthError> {
     // C2 fix: Strip either "xet_" or "internal_" prefix
+    // I5 fix: Also accept "proxy_" prefix for short-lived LFS tokens
     let token_body = token.strip_prefix("xet_")
         .or_else(|| token.strip_prefix("internal_"))
+        .or_else(|| token.strip_prefix("proxy_"))
         .ok_or(AuthError::InvalidToken)?;
 
     // Split into three parts
@@ -257,13 +265,19 @@ pub fn is_internal_token(claims: &XetClaims) -> bool {
 }
 
 /// Pre-loaded verification keys for authentication.
-///
 /// Created at server startup from AuthConfig to avoid per-request file I/O.
 /// Holds the public key and trusted key IDs (kids) for token verification.
+/// I5 fix: Optionally holds a signing key for generating proxy tokens in batch API responses.
 #[derive(Clone)]
 pub struct AuthVerifier {
     public_key: VerifyingKey,
     trusted_kids: Vec<String>,
+    /// I5 fix: Optional signing key for generating proxy tokens.
+    /// When present, batch API generates short-lived proxy tokens instead of
+    /// passing through the user's long-lived token.
+    signing_key: Option<SigningKey>,
+    /// Kid to use when signing proxy tokens
+    signing_kid: Option<String>,
 }
 
 impl AuthVerifier {
@@ -276,9 +290,30 @@ impl AuthVerifier {
             .map_err(|_| AuthError::InvalidKey)?;
         let public_key = KeyPair::public_key_from_pem(&pem_content)?;
 
+        // I5 fix: Optionally load private key for proxy token generation
+        let signing_key = if let Some(ref pk_path) = auth_config.private_key_path {
+            let pk_pem = std::fs::read_to_string(pk_path)
+                .map_err(|e| {
+                    tracing::error!("Failed to read CAS private key from {}: {}", pk_path, e);
+                    AuthError::InvalidKey
+                })?;
+            let keypair = KeyPair::private_key_from_pem(&pk_pem)?;
+            tracing::info!("CAS private key loaded from {} — proxy token generation enabled", pk_path);
+            Some(keypair.signing_key)
+        } else {
+            tracing::warn!(
+                "CAS_PRIVATE_KEY_PATH not set. Batch API will pass through user tokens. \
+                Set CAS_PRIVATE_KEY_PATH for production deployments to prevent long-lived token leakage."
+            );
+            None
+        };
+
         Ok(AuthVerifier {
             public_key,
             trusted_kids: auth_config.trusted_kids.clone(),
+            signing_key,
+            signing_kid: auth_config.signing_kid.clone()
+                .or_else(|| auth_config.trusted_kids.first().cloned()),
         })
     }
 
@@ -298,6 +333,59 @@ impl AuthVerifier {
         }
 
         Err(AuthError::UnknownKid)
+    }
+
+    /// I5 fix: Sign a short-lived proxy token for LFS operations.
+    ///
+    /// Returns None if signing key is not configured (CAS_PRIVATE_KEY_PATH not set).
+    /// Proxy tokens are bound to a specific OID and operation, limiting blast radius.
+    pub fn sign_proxy_token(&self, sub: &str, oid: &str, operation: &str) -> Option<String> {
+        let signing_key = self.signing_key.as_ref()?;
+        let kid = self.signing_kid.as_deref().unwrap_or("cas-key");
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let exp = now + 300; // 5-minute TTL (same as Hub proxy tokens)
+
+        let claims = XetClaims {
+            sub: sub.to_string(),
+            scope: format!("lfs-{}", operation),
+            repo_id: String::new(),
+            repo_type: String::new(),
+            revision: String::new(),
+            exp,
+            iat: now,
+            kid: kid.to_string(),
+            token_type: "proxy".to_string(),
+            oid: Some(oid.to_string()),
+            operation: Some(operation.to_string()),
+        };
+
+        // Use the proxy_ prefix for proxy tokens (matching Hub convention)
+        let header = JwtHeader {
+            alg: "EdDSA".to_string(),
+            typ: "JWT".to_string(),
+            kid: kid.to_string(),
+        };
+
+        let header_json = serde_json::to_string(&header).ok()?;
+        let payload_json = serde_json::to_string(&claims).ok()?;
+
+        let header_b64 = URL_SAFE_NO_PAD.encode(header_json.as_bytes());
+        let payload_b64 = URL_SAFE_NO_PAD.encode(payload_json.as_bytes());
+
+        let message = format!("{}.{}", header_b64, payload_b64);
+        let signature = signing_key.sign(message.as_bytes());
+        let sig_b64 = URL_SAFE_NO_PAD.encode(signature.to_bytes());
+
+        Some(format!("proxy_{}.{}.{}", header_b64, payload_b64, sig_b64))
+    }
+
+    /// Check if proxy token generation is enabled
+    pub fn can_sign_proxy_tokens(&self) -> bool {
+        self.signing_key.is_some()
     }
 }
 

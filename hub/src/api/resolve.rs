@@ -9,7 +9,7 @@ async fn handle_resolve(
     req: HttpRequest,
     path: web::Path<(String, String, String, String)>,
     repo_type: RepoType,
-    _auth: AuthUser<AuthRead>,
+    auth: AuthUser<AuthRead>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
     config: web::Data<HubConfig>,
 ) -> HttpResponse {
@@ -72,8 +72,9 @@ async fn handle_resolve(
     let xet_signer = req.app_data::<web::Data<std::sync::Arc<crate::auth::xet_signer::XetSigner>>>();
     let proxy_token_param = if let Some(signer) = xet_signer {
         // I2 fix: Handle signing errors gracefully - if we can't sign, omit the token
+        // I6 fix: Use actual username instead of "anonymous" for audit trail
         match signer.sign_proxy(
-            "anonymous",
+            auth.username(),
             &file_entry.cas_hash,
             "download",
             &format!("{}/{}", namespace, repo_name),

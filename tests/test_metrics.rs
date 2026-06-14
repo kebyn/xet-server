@@ -31,6 +31,8 @@ async fn test_metrics_endpoint() {
     let auth_config = AuthConfig {
         public_key_path: pub_key_path.to_str().unwrap().to_string(),
         trusted_kids: vec![kp.kid()],
+        private_key_path: None,
+        signing_kid: None,
     };
 
     let auth_verifier = AuthVerifier::from_config(&auth_config).unwrap();
@@ -51,6 +53,8 @@ async fn test_metrics_endpoint() {
         iat: now,
         kid: kp.kid(),
         token_type: "internal".to_string(),
+        oid: None,
+        operation: None,
     };
     let token = xet_server::api::auth::sign_xet_token(&claims, &kp).unwrap();
 
@@ -100,6 +104,8 @@ async fn test_upload_records_metrics() {
     let auth_config = AuthConfig {
         public_key_path: pub_key_path.to_str().unwrap().to_string(),
         trusted_kids: vec![kp.kid()],
+        private_key_path: None,
+        signing_kid: None,
     };
 
     let auth_verifier = AuthVerifier::from_config(&auth_config).unwrap();

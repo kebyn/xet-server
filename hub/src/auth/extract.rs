@@ -103,10 +103,15 @@ impl actix_web::ResponseError for AuthError {
                     "error_type": "AuthorizationError"
                 }))
             }
-            AuthError::Internal(e) => HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": e,
-                "error_type": "InternalError"
-            })),
+            // M1 fix: Return generic error message to client; log details server-side only.
+            // Prevents leaking internal implementation details (DB paths, SQL errors, etc.)
+            AuthError::Internal(e) => {
+                tracing::error!("Internal authentication error: {}", e);
+                HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": "Internal authentication error",
+                    "error_type": "InternalError"
+                }))
+            }
         }
     }
 }
