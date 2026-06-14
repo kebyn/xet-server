@@ -79,9 +79,5 @@ fn extract_internal_token(req: &HttpRequest) -> Option<String> {
     let auth_header = req.headers().get("Authorization")?;
     let auth_str = auth_header.to_str().ok()?;
 
-    if let Some(token) = auth_str.strip_prefix("Bearer ") {
-        Some(token.to_string())
-    } else {
-        None
-    }
+    auth_str.strip_prefix("Bearer ").map(|token| token.to_string())
 }

@@ -64,6 +64,25 @@ impl TokenStore {
         Ok(Self { pool, hash_salt })
     }
 
+    /// M2 fix: Create a TokenStore using a shared connection pool.
+    /// This reduces total SQLite connections when both TokenStore and MetadataStore
+    /// access the same database file, preventing SQLITE_BUSY under load.
+    pub async fn with_pool(pool: SqlitePool) -> Result<Self, sqlx::Error> {
+        Self::init_tables(&pool).await?;
+
+        let hash_salt = match std::env::var("HUB_TOKEN_HASH_SALT") {
+            Ok(salt) => {
+                tracing::info!("Using token hash salt from HUB_TOKEN_HASH_SALT environment variable");
+                salt
+            }
+            Err(_) => {
+                Self::get_or_generate_hash_salt(&pool).await?
+            }
+        };
+
+        Ok(Self { pool, hash_salt })
+    }
+
     /// Create an in-memory TokenStore.
     ///
     /// **Warning:** This is intended for testing only. In-memory stores do not persist
@@ -128,6 +147,9 @@ impl TokenStore {
 
     /// Get or generate persistent hash salt from database.
     /// C1 fix: Ensures token hashes remain consistent across restarts.
+    /// I2 fix: Use INSERT OR IGNORE + re-SELECT for atomic upsert behavior.
+    /// This prevents race conditions in multi-instance deployments where two
+    /// instances might both try to INSERT simultaneously.
     async fn get_or_generate_hash_salt(pool: &SqlitePool) -> Result<String, sqlx::Error> {
         const SALT_KEY: &str = "token_hash_salt";
 
@@ -148,8 +170,10 @@ impl TokenStore {
         let new_salt = uuid::Uuid::new_v4().to_string();
         let now = now_secs() as i64;
 
+        // I2 fix: Use INSERT OR IGNORE to handle concurrent inserts atomically.
+        // If another instance inserted first, this is a no-op.
         sqlx::query(
-            "INSERT INTO _config (key, value, created_at) VALUES (?1, ?2, ?3)"
+            "INSERT OR IGNORE INTO _config (key, value, created_at) VALUES (?1, ?2, ?3)"
         )
         .bind(SALT_KEY)
         .bind(&new_salt)
@@ -157,13 +181,26 @@ impl TokenStore {
         .execute(pool)
         .await?;
 
+        // I2 fix: Re-SELECT to get the actual persisted value (handles race condition).
+        // If another instance inserted first, we use their salt for consistency.
+        let actual_salt: Option<(String,)> = sqlx::query_as(
+            "SELECT value FROM _config WHERE key = ?1"
+        )
+        .bind(SALT_KEY)
+        .fetch_optional(pool)
+        .await?;
+
+        let salt = actual_salt
+            .map(|(s,)| s)
+            .unwrap_or(new_salt);
+
         tracing::warn!(
             "Generated and persisted new token hash salt. \
             This salt will be used for all future restarts. \
             For multi-instance deployments, set HUB_TOKEN_HASH_SALT environment variable."
         );
 
-        Ok(new_salt)
+        Ok(salt)
     }
 
     /// Create a new user and token (admin setup). Returns the plaintext hf_ token.
@@ -252,10 +289,10 @@ impl TokenStore {
                 }
 
                 // Check if expired
-                if let Some(exp) = row.expires_at {
-                    if exp < now {
-                        return Ok(None);
-                    }
+                if let Some(exp) = row.expires_at
+                    && exp < now
+                {
+                    return Ok(None);
                 }
 
                 Ok(Some(TokenInfo {

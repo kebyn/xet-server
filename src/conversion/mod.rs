@@ -37,11 +37,11 @@ impl Drop for PathGuard {
         // std::fs::remove_file is a blocking syscall that can block the async runtime.
         // spawn_blocking moves this to a dedicated thread pool for blocking operations.
         let path = self.path.clone();
-        let _ = tokio::task::spawn_blocking(move || {
+        drop(tokio::task::spawn_blocking(move || {
             if let Err(e) = std::fs::remove_file(&path) {
                 tracing::warn!("Failed to cleanup temp file {}: {}", path.display(), e);
             }
-        });
+        }));
         // Note: We don't await the spawn_blocking result because Drop is synchronous.
         // The cleanup will happen eventually in the blocking thread pool.
         // This is acceptable for temp file cleanup - it's not critical if it's delayed.

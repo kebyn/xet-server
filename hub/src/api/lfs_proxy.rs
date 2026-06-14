@@ -110,19 +110,17 @@ fn extract_proxy_token(req: &HttpRequest) -> Option<String> {
     if let Some(query) = req.uri().query() {
         for pair in query.split('&') {
             if let Some((key, value)) = pair.split_once('=')
-                && key == "token" {
-                    if let Ok(decoded) = percent_encoding::percent_decode_str(value).decode_utf8() {
-                        let token = decoded.into_owned();
-                        if token.starts_with("proxy_") {
-                            // I5 fix: Structured audit log for query parameter token usage
-                            tracing::info!(
-                                path = %req.uri().path(),
-                                "Proxy token received via query parameter (short-lived, OID-bound)"
-                            );
-                            return Some(token);
-                        }
-                    }
-                }
+                && key == "token"
+                && let Ok(decoded) = percent_encoding::percent_decode_str(value).decode_utf8()
+                && decoded.starts_with("proxy_")
+            {
+                // I5 fix: Structured audit log for query parameter token usage
+                tracing::info!(
+                    path = %req.uri().path(),
+                    "Proxy token received via query parameter (short-lived, OID-bound)"
+                );
+                return Some(decoded.into_owned());
+            }
         }
     }
 
@@ -287,9 +285,35 @@ fn validate_proxy_token(
 
 /// Handle Git LFS batch request
 ///
-/// **Known tradeoff:** The entire CAS batch response is buffered in memory before URL rewriting.
-/// For large batches (up to MAX_BATCH_SIZE=1000 objects), this can consume significant memory.
-/// This is acceptable given the batch size limit, but should be monitored in production.
+/// # I2: Memory Usage Analysis
+///
+/// The entire CAS batch response is buffered in memory before URL rewriting. This is
+/// required because URL rewriting mutates the JSON structure in-place (replacing CAS
+/// URLs with Hub URLs and injecting short-lived proxy tokens).
+///
+/// ## Memory Bound
+///
+/// Memory usage is bounded by `MAX_BATCH_SIZE` (currently 1000 objects):
+/// - Each object entry ≈ 200-500 bytes (OID, URLs, auth headers, actions)
+/// - Worst case: 1000 × 500 bytes ≈ 500 KB per concurrent request
+/// - With 100 concurrent batch requests: ≈ 50 MB peak
+///
+/// ## Why not streaming JSON?
+///
+/// Streaming JSON processing (e.g., `serde_json::from_reader` with iterator) would
+/// require either:
+/// - A custom streaming rewriter that preserves JSON structure (complex, error-prone)
+/// - Two passes: first validate, then rewrite (defeats the purpose of streaming)
+///
+/// Given the hard cap at 1000 objects, the full-buffer approach is simpler and the
+/// memory cost is well-bounded. If `MAX_BATCH_SIZE` is ever increased beyond 10000,
+/// consider migrating to a streaming JSON library (e.g., `json-streams`).
+///
+/// ## Mitigations
+///
+/// 1. Hard cap at MAX_BATCH_SIZE (defense-in-depth, checked before CAS forward)
+/// 2. Batch size logged for monitoring (see below)
+/// 3. actix-web `PayloadConfig` limits request body size (50 MB default)
 pub async fn lfs_batch(
     req: HttpRequest,
     body: web::Json<serde_json::Value>,
@@ -326,14 +350,22 @@ pub async fn lfs_batch(
     };
 
     // Validate batch size before forwarding to CAS (defense-in-depth)
-    if let Some(objects) = body.get("objects").and_then(|o| o.as_array()) {
-        if objects.len() > MAX_BATCH_SIZE {
-            return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": format!("Too many objects: {} exceeds limit of {}", objects.len(), MAX_BATCH_SIZE),
-                "error_type": "ValidationError"
-            }));
-        }
+    let object_count = body.get("objects")
+        .and_then(|o| o.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+    if object_count > MAX_BATCH_SIZE {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": format!("Too many objects: {} exceeds limit of {}", object_count, MAX_BATCH_SIZE),
+            "error_type": "ValidationError"
+        }));
     }
+    // Log batch size for monitoring (I2: helps operators track memory usage patterns)
+    tracing::debug!(
+        object_count,
+        user = %token_info.username,
+        "Processing LFS batch request"
+    );
 
     // Generate internal token for CAS
     // I2 fix: Handle signing errors - return HTTP 500 if we can't create internal token
@@ -624,7 +656,7 @@ pub async fn lfs_download(
             // This protects against CAS bugs that could cause unbounded data transfer
             let max_size = config.cas.max_download_size;
             let limited_stream = MaxBytesStream::new(
-                stream.map(|result| result.map_err(|e| std::io::Error::other(e))),
+                stream.map(|result| result.map_err(std::io::Error::other)),
                 max_size
             );
 
@@ -635,7 +667,7 @@ pub async fn lfs_download(
                 builder.insert_header(("Content-Length", content_length.to_string()));
             }
 
-            builder.streaming(limited_stream.map_err(|e| actix_web::Error::from(e)))
+            builder.streaming(limited_stream.map_err(actix_web::Error::from))
         }
         Err(e) => match e {
             crate::error::HubError::NotFound(_) => {

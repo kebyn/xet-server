@@ -43,7 +43,7 @@ fn merged_hash_of_sequence(hashes: &[(MerkleHash, u64)]) -> (MerkleHash, u64) {
     // avoiding intermediate String allocation from format!().
     use std::fmt::Write;
     for (hash, size) in hashes {
-        write!(buf, "{} : {}\n", hash.to_hex(), size).unwrap();
+        writeln!(buf, "{} : {}", hash.to_hex(), size).unwrap();
         total_size += size;
     }
 

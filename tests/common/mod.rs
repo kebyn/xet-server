@@ -44,6 +44,8 @@ pub fn test_token(scope: &str) -> (KeyPair, String) {
         iat: now,
         kid: kid.clone(),
         token_type: "user".to_string(),
+        oid: None,
+        operation: None,
     };
 
     let token = sign_xet_token(&claims, &kp).unwrap();
@@ -75,6 +77,8 @@ pub fn test_config_with_key(kp: &KeyPair) -> TestContext {
     let auth_config = AuthConfig {
         public_key_path: temp_path.to_str().unwrap().to_string(),
         trusted_kids: vec![kp.kid()],
+        private_key_path: None,
+        signing_kid: None,
     };
 
     let auth_verifier = AuthVerifier::from_config(&auth_config).unwrap();
@@ -94,6 +98,7 @@ pub fn test_config_with_key(kp: &KeyPair) -> TestContext {
             s3_endpoint: None,
             local_path: Some("./data".to_string()),
             upload_temp_dir: None,
+            reconstruction_temp_dir: None,
             verify_download_integrity: false,
         },
         auth: auth_config,
@@ -124,6 +129,8 @@ pub fn test_config_with_new_key() -> TestContext {
     let auth_config = AuthConfig {
         public_key_path: temp_path.to_str().unwrap().to_string(),
         trusted_kids: vec![kp.kid()],
+        private_key_path: None,
+        signing_kid: None,
     };
 
     let auth_verifier = AuthVerifier::from_config(&auth_config).unwrap();
@@ -143,6 +150,7 @@ pub fn test_config_with_new_key() -> TestContext {
             s3_endpoint: None,
             local_path: Some("./data".to_string()),
             upload_temp_dir: None,
+            reconstruction_temp_dir: None,
             verify_download_integrity: false,
         },
         auth: auth_config,
@@ -185,6 +193,8 @@ pub fn test_token_for_keypair(kp: &KeyPair, scope: &str) -> String {
         iat: now,
         kid,
         token_type,
+        oid: None,
+        operation: None,
     };
 
     sign_xet_token(&claims, kp).unwrap()
