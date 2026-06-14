@@ -7,6 +7,8 @@
 //! 4. Applies grace period protection
 //! 5. Deletes orphaned blobs (or reports in dry_run mode)
 
+pub mod errors;
+
 use crate::config::GcConfig;
 use crate::storage::StorageBackend;
 use std::collections::HashSet;
