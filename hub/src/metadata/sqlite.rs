@@ -160,6 +160,14 @@ impl SqliteMetadataStore {
         Ok(Self { pool })
     }
 
+    /// M2 fix: Create a metadata store using a shared connection pool.
+    /// This reduces total SQLite connections when both TokenStore and MetadataStore
+    /// access the same database file, preventing SQLITE_BUSY under load.
+    pub async fn with_pool(pool: SqlitePool) -> Result<Self, MetadataError> {
+        Self::init_pool(&pool).await?;
+        Ok(Self { pool })
+    }
+
     /// Create an in-memory metadata store for testing
     pub async fn in_memory() -> Result<Self, MetadataError> {
         // Note: SQLite in-memory databases are per-connection. With a pool of

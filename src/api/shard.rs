@@ -253,6 +253,8 @@ mod tests {
         let auth_config = AuthConfig {
             public_key_path: temp_path_str,
             trusted_kids: vec![kp.kid()],
+            private_key_path: None,
+            signing_kid: None,
         };
 
         let auth_verifier = AuthVerifier::from_config(&auth_config).unwrap();
@@ -280,6 +282,8 @@ mod tests {
             iat: now,
             kid,
             token_type: "user".to_string(),
+            oid: None,
+            operation: None,
         };
         sign_xet_token(&claims, kp).unwrap()
     }

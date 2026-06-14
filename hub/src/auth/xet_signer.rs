@@ -43,11 +43,20 @@ pub struct XetSigner {
     kid: String,
     ttl_seconds: u64,
     proxy_ttl_seconds: u64,
+    /// C1 fix: Configurable TTL for internal tokens (Hub-to-CAS communication).
+    /// Default: 86400 seconds (24 hours). GC runs hourly, so 60s TTL was too short.
+    internal_ttl_seconds: u64,
 }
 
 impl XetSigner {
     /// Create a new XetSigner from a PEM-encoded private key
     pub fn from_pem(pem_bytes: &[u8], kid: &str, ttl_seconds: u64, proxy_ttl_seconds: u64) -> Result<Self, String> {
+        Self::from_pem_with_internal_ttl(pem_bytes, kid, ttl_seconds, proxy_ttl_seconds, 86400)
+    }
+
+    /// Create a new XetSigner from a PEM-encoded private key with configurable internal token TTL.
+    /// C1 fix: Allows GC internal tokens to have longer TTL (default 24 hours).
+    pub fn from_pem_with_internal_ttl(pem_bytes: &[u8], kid: &str, ttl_seconds: u64, proxy_ttl_seconds: u64, internal_ttl_seconds: u64) -> Result<Self, String> {
         use ed25519_dalek::pkcs8::DecodePrivateKey;
         let pem_str = std::str::from_utf8(pem_bytes).map_err(|e| e.to_string())?;
         let signing_key = SigningKey::from_pkcs8_pem(pem_str)
@@ -57,6 +66,7 @@ impl XetSigner {
             kid: kid.to_string(),
             ttl_seconds,
             proxy_ttl_seconds,
+            internal_ttl_seconds,
         })
     }
 
@@ -67,6 +77,19 @@ impl XetSigner {
             kid: kid.to_string(),
             ttl_seconds,
             proxy_ttl_seconds,
+            internal_ttl_seconds: 86400, // Default: 24 hours
+        }
+    }
+
+    /// Create a new XetSigner from a raw signing key with configurable internal token TTL.
+    /// C1 fix: Allows GC internal tokens to have longer TTL.
+    pub fn new_with_internal_ttl(signing_key: SigningKey, kid: &str, ttl_seconds: u64, proxy_ttl_seconds: u64, internal_ttl_seconds: u64) -> Self {
+        Self {
+            signing_key,
+            kid: kid.to_string(),
+            ttl_seconds,
+            proxy_ttl_seconds,
+            internal_ttl_seconds,
         }
     }
 
@@ -168,7 +191,7 @@ impl XetSigner {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let exp = now + 60; // Short TTL for internal tokens
+        let exp = now + self.internal_ttl_seconds; // C1 fix: Configurable TTL (was hardcoded 60s)
 
         let claims = XetClaims {
             sub: "hub-service".to_string(),
