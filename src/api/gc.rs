@@ -1,6 +1,6 @@
 //! GC API endpoints for manual trigger and status queries
 
-use crate::api::auth::{check_scope, extract_token_from_request, AuthVerifier};
+use crate::api::auth::{extract_token_from_request, is_internal_token, AuthVerifier};
 use crate::gc::{GarbageCollector, GcStats};
 use actix_web::{web, HttpRequest, HttpResponse};
 use std::sync::Arc;
@@ -36,10 +36,11 @@ pub async fn trigger_gc(
         }
     };
 
-    // I6: Use check_scope for consistent scope validation
-    if !check_scope(&claims, "internal") {
+    // I2 fix: Use defense-in-depth check consistent with other internal endpoints.
+    // Verify sub="hub-service" AND scope="internal" AND token_type="internal".
+    if !is_internal_token(&claims) {
         return HttpResponse::Forbidden().json(serde_json::json!({
-            "error": "Internal endpoint requires internal scope",
+            "error": "Internal endpoint requires internal token type (sub=hub-service, scope=internal, token_type=internal)",
             "error_type": "AuthorizationError"
         }));
     }
@@ -95,10 +96,11 @@ pub async fn gc_status(
         }
     };
 
-    // I6: Use check_scope for consistent scope validation
-    if !check_scope(&claims, "internal") {
+    // I2 fix: Use defense-in-depth check consistent with other internal endpoints.
+    // Verify sub="hub-service" AND scope="internal" AND token_type="internal".
+    if !is_internal_token(&claims) {
         return HttpResponse::Forbidden().json(serde_json::json!({
-            "error": "Internal endpoint requires internal scope",
+            "error": "Internal endpoint requires internal token type (sub=hub-service, scope=internal, token_type=internal)",
             "error_type": "AuthorizationError"
         }));
     }

@@ -186,9 +186,10 @@ impl HubConfig {
         }
     }
 
-    /// Load configuration from environment variables
+    /// Load configuration from environment variables.
+    /// Note: Does NOT call validate() - caller (from_file_or_env) is responsible for validation.
     pub fn from_env() -> Self {
-        let config = HubConfig {
+        HubConfig {
             server: ServerSettings {
                 host: env::var("HUB_HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
                 port: env::var("HUB_PORT")
@@ -255,9 +256,7 @@ impl HubConfig {
                     .and_then(|t| t.parse().ok())
                     .unwrap_or(512 * 1024 * 1024),
             },
-        };
-        config.validate();
-        config
+        }
     }
 
     /// M3: Load configuration from a TOML file

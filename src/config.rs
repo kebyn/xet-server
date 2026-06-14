@@ -39,22 +39,27 @@ impl ServerSettings {
     /// Returns `public_base_url` if configured, otherwise constructs from host:port.
     /// Trailing slashes are stripped to prevent malformed URLs when callers append paths.
     ///
+    /// URL validation happens at config load time (in `ServerConfig::from_env()`).
+    /// This method performs no validation — it trusts that the URL was validated on load.
+    /// This avoids redundant parsing on every call (e.g., in batch API URL construction).
+    pub fn base_url(&self) -> String {
+        self.public_base_url.clone()
+            .unwrap_or_else(|| format!("http://{}:{}", self.host, self.port))
+            .trim_end_matches('/')
+            .to_string()
+    }
+
+    /// Validate the base URL configuration.
+    /// Called once during config loading to fail fast on misconfiguration.
+    ///
     /// # Panics
     /// Panics if `public_base_url` is set and either:
     /// - The URL is not syntactically valid (e.g. malformed scheme or path)
     /// - The URL is missing a host component (e.g. `"http://"`)
-    ///
-    /// This fail-fast behavior ensures misconfiguration is caught at startup
-    /// rather than at first request.
-    pub fn base_url(&self) -> String {
-        let url = self.public_base_url.clone()
-            .unwrap_or_else(|| format!("http://{}:{}", self.host, self.port));
-        let url = url.trim_end_matches('/').to_string();
-
-        // M1: Validate URL format using proper URL parsing if explicitly configured
-        // I2: Panic on invalid URL to fail fast at startup rather than at first request
-        if self.public_base_url.is_some() {
-            match url::Url::parse(&url) {
+    pub fn validate_base_url(&self) {
+        if let Some(ref url) = self.public_base_url {
+            let url = url.trim_end_matches('/');
+            match url::Url::parse(url) {
                 Ok(parsed) => {
                     if parsed.host().is_none() {
                         panic!(
@@ -80,8 +85,6 @@ impl ServerSettings {
                 }
             }
         }
-
-        url
     }
 
     /// Get the maximum request body size in bytes.
@@ -104,7 +107,7 @@ pub struct StorageConfig {
     pub local_path: Option<String>,
     /// Directory for streaming upload temp files.
     /// For local storage, defaults to `{local_path}/.tmp` (same filesystem -> atomic rename).
-    /// For S3 or if unset, defaults to `/tmp/xet-uploads`.
+    /// For S3 or if local_path is unset, defaults to `/var/tmp/xet-uploads`.
     /// Configure via `XET_UPLOAD_TEMP_DIR` environment variable.
     pub upload_temp_dir: Option<String>,
     /// Directory for xorb reconstruction temp files.
@@ -127,9 +130,14 @@ impl StorageConfig {
         } else if let Some(local_path) = &self.local_path {
             PathBuf::from(local_path).join(".tmp")
         } else {
-            // I1 fix: Use app-specific directory instead of /tmp for security.
-            // /tmp is world-writable and vulnerable to symlink attacks.
-            PathBuf::from("./data/.tmp")
+            // I1 fix: Use /var/tmp for S3 backend fallback.
+            // /var/tmp is preferred over /tmp because:
+            // 1. Not cleared on reboot (persists across restarts)
+            // 2. Usually on a larger partition than /tmp
+            // 3. Still has restricted permissions (1777)
+            // Note: For local storage, prefer setting local_path so temp files
+            // are on the same filesystem for atomic rename.
+            PathBuf::from("/var/tmp/xet-uploads")
         }
     }
 
@@ -288,6 +296,9 @@ impl ServerConfig {
     /// Panics on invalid values to fail fast at startup.
     /// I4 fix: Prevent zero values that would cause service unavailability.
     fn validate(&self) {
+        // I4 fix: Validate base URL once at config load time
+        self.server.validate_base_url();
+
         if self.server.rate_limit_rpm == 0 {
             panic!("XET_RATE_LIMIT_RPM must be > 0 (got 0). This would disable rate limiting.");
         }

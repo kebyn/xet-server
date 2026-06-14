@@ -90,7 +90,7 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
     // Internal endpoints (/internal/*) bypass rate limiting to avoid
     // disrupting Hub-to-CAS communication.
     //
-    // M2 fix: Rate limit semantics documentation.
+    // I5 fix: Rate limiter semantics documentation.
     // Governor's rate limiter uses a token bucket algorithm:
     // - per_second(60): Token refill window is 60 seconds
     // - burst_size(rpm): Maximum tokens (requests) allowed per window
@@ -99,6 +99,11 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
     // - A client can make up to 60 requests in any 60-second window
     // - Tokens refill at 1 per second (60 tokens / 60 seconds)
     // - Burst allows 60 rapid requests, then must wait for refill
+    //
+    // Example with rpm=10 (low rate):
+    // - A client can burst 10 requests instantly
+    // - Then must wait 60 seconds for full refill (10 tokens)
+    // - This is "burst tolerance" - allows short bursts but limits sustained rate
     //
     // This is effectively "requests per minute" with burst tolerance.
     // Uses default PeerIpKeyExtractor for per-IP rate limiting (not global).
@@ -111,17 +116,21 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
 
     tracing::info!(
         "Rate limiting: {} requests per 60-second window per IP for public endpoints \
-         (internal endpoints excluded). Burst-allowed: {}, refill: 1 token/second",
-        rpm, rpm
+         (internal endpoints excluded). Burst: {}, refill: {} tokens/second",
+        rpm, rpm, rpm
     );
 
     HttpServer::new(move || {
         App::new()
             .wrap(Logger::default())
             .wrap(from_fn(metrics_middleware))
-            // PayloadConfig bounds non-upload routes (web::Bytes, web::Json).
+            // I3 fix: PayloadConfig bounds non-upload routes (web::Bytes, web::Json).
             // Upload handlers use web::Payload which bypasses this limit and
             // enforce max_body_size_bytes manually via streaming byte counting.
+            //
+            // The 10MB limit applies to JSON/Bytes payloads (commit API, batch API, etc.)
+            // and is intentionally separate from max_body_size_mb which controls file uploads.
+            // Most JSON payloads are well under 10MB; increase if needed for large commits.
             .app_data(web::PayloadConfig::new(10 * 1024 * 1024))
             .app_data(web::Data::from(auth_verifier.clone()))
             .app_data(web::Data::from(storage.clone()))

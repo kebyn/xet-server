@@ -66,8 +66,9 @@ pub async fn get_referenced_hashes(
         }
         Err(e) => {
             tracing::error!("Failed to query referenced hashes: {}", e);
+            // C1 fix: Don't leak database error details to client
             HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Database error: {}", e),
+                "error": "Internal server error",
                 "error_type": "InternalError"
             }))
         }
