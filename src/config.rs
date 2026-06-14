@@ -217,19 +217,156 @@ impl ConversionConfig {
     }
 }
 
+/// Bloom filter configuration for incremental GC reference tracking.
+///
+/// The Bloom filter provides O(1) probabilistic membership tests for chunk hashes,
+/// dramatically reducing the memory and I/O cost of scanning. A false positive rate
+/// of 0.001 with 10M expected items uses ~17 MB (14 bits/item) — far cheaper than
+/// keeping all hashes in RAM.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BloomConfig {
+    /// Expected number of items to insert into the Bloom filter.
+    /// Used to size the underlying bit array for the target false positive rate.
+    pub expected_items: u64,
+    /// Acceptable false positive rate (0.0–1.0). Lower = more memory.
+    /// 0.001 means ~1 in 1000 non-referenced chunks will be falsely kept.
+    pub false_positive_rate: f64,
+    /// When the filter's occupancy reaches this fraction of capacity, rebuild it.
+    /// Rebuilding clears stale entries and re-sizes for current workload.
+    pub rebuild_threshold: f64,
+}
+
+impl Default for BloomConfig {
+    fn default() -> Self {
+        Self {
+            expected_items: 10_000_000,
+            false_positive_rate: 0.001,
+            rebuild_threshold: 0.8,
+        }
+    }
+}
+
+/// Scanner configuration for the incremental storage scanner.
+///
+/// The scanner walks storage in pages (batches), checkpointing progress after each
+/// page so a crash or restart resumes from the last checkpoint instead of restarting
+/// the full scan.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScannerConfig {
+    /// Number of objects to process per page before checkpointing.
+    pub page_size: usize,
+    /// Force a checkpoint every N objects even if mid-page (safety net).
+    pub checkpoint_interval: u64,
+    /// Maximum wall-clock seconds for a single scanner invocation.
+    /// Prevents the scanner from monopolizing the event loop on huge stores.
+    pub max_duration_seconds: u64,
+}
+
+impl Default for ScannerConfig {
+    fn default() -> Self {
+        Self {
+            page_size: 1000,
+            checkpoint_interval: 10000,
+            max_duration_seconds: 1800, // 30 minutes
+        }
+    }
+}
+
+/// Grace period configuration for protecting recently uploaded blobs.
+///
+/// Two complementary mechanisms prevent premature deletion:
+/// - `absolute_seconds`: blobs younger than this are never deleted (wall-clock safety).
+/// - `soft_cycles`: blobs must survive N complete GC scan cycles before becoming
+///   eligible for deletion (handles the case where a blob is referenced by a commit
+///   that hasn't been written to Hub's file_tree yet).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraceConfig {
+    /// Absolute minimum age in seconds before a blob can be deleted.
+    pub absolute_seconds: u64,
+    /// Number of complete GC cycles a blob must be observed as unreferenced
+    /// before it becomes eligible for deletion.
+    pub soft_cycles: u32,
+}
+
+impl Default for GraceConfig {
+    fn default() -> Self {
+        Self {
+            absolute_seconds: 3600, // 1 hour
+            soft_cycles: 2,
+        }
+    }
+}
+
+/// Lease configuration for multi-node GC coordination.
+///
+/// When multiple CAS nodes run GC concurrently, each node takes a short-lived lease
+/// on a partition of the keyspace. Leases expire automatically, so a crashed node's
+/// partition becomes available for another node to claim.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LeaseConfig {
+    /// Time-to-live for a partition lease in seconds.
+    pub ttl_seconds: u64,
+    /// How often (seconds) a node renews its active leases.
+    /// Should be substantially less than ttl_seconds to survive transient pauses.
+    pub renew_interval_seconds: u64,
+}
+
+impl Default for LeaseConfig {
+    fn default() -> Self {
+        Self {
+            ttl_seconds: 3600,        // 1 hour
+            renew_interval_seconds: 600, // 10 minutes
+        }
+    }
+}
+
+/// Reference tracker configuration.
+///
+/// The reference tracker records which chunk hashes have been observed as referenced
+/// by Hub's file_tree. Two modes:
+/// - `"sidecar"`: query Hub's /internal/referenced-hashes endpoint (original GC design).
+/// - `"local_cache_db"`: maintain a local SQLite cache of referenced hashes, updated
+///   incrementally via Hub webhooks or polling. Reduces Hub load for large deployments.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReferenceTrackerConfig {
+    /// Tracker mode: "sidecar" or "local_cache_db".
+    pub mode: String,
+    /// Path to the local SQLite database when mode = "local_cache_db".
+    pub local_cache_db_path: String,
+}
+
+impl Default for ReferenceTrackerConfig {
+    fn default() -> Self {
+        Self {
+            mode: "sidecar".to_string(),
+            local_cache_db_path: "/var/lib/cas/gc/refs.db".to_string(),
+        }
+    }
+}
+
 /// Garbage collection configuration for cleaning up orphaned blobs
 ///
 /// GC runs as a background task that periodically scans storage for blobs
 /// that are no longer referenced by any file_tree entry in the Hub metadata.
+///
+/// # Incremental GC (v2)
+///
+/// The v2 incremental GC system adds Bloom filter-based reference tracking,
+/// checkpoint-based scanning, grace periods with soft cycles, multi-node
+/// lease coordination, and an optional local SQLite reference cache.
+/// Legacy fields (`hub_base_url`, `hub_internal_token`, `http_timeout_seconds`,
+/// `grace_period_seconds`) are retained for backward compatibility with the
+/// original sidecar GC implementation in `src/gc/mod.rs`. They will be removed
+/// in Task 20 once the incremental GC fully replaces the legacy path.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GcConfig {
+    // ── Legacy fields (used by existing src/gc/mod.rs) ──────────────────
     /// Enable background GC task
     pub enabled: bool,
     /// GC run interval in seconds
     pub interval_seconds: u64,
-    /// Grace period in seconds for newly uploaded blobs.
-    /// Blobs younger than this are never deleted, preventing race conditions
-    /// where a blob is uploaded but the commit hasn't been written to file_tree yet.
+    /// Grace period in seconds for newly uploaded blobs (legacy flat field).
+    /// New code should prefer `grace.absolute_seconds`.
     pub grace_period_seconds: u64,
     /// Dry-run mode: report stats but don't actually delete
     pub dry_run: bool,
@@ -241,19 +378,117 @@ pub struct GcConfig {
     /// Configure via `GC_HTTP_TIMEOUT_SECONDS` environment variable.
     /// Default: 300 (5 minutes).
     pub http_timeout_seconds: u64,
+
+    // ── Incremental GC v2 fields ────────────────────────────────────────
+    /// Working directory for GC state (checkpoints, bloom filter, leases).
+    pub data_dir: String,
+    /// Bloom filter configuration for O(1) reference lookups.
+    pub bloom: BloomConfig,
+    /// Scanner configuration (page size, checkpointing, max duration).
+    pub scanner: ScannerConfig,
+    /// Grace period configuration (absolute + soft cycles).
+    pub grace: GraceConfig,
+    /// Multi-node lease configuration.
+    pub lease: LeaseConfig,
+    /// Reference tracker configuration (sidecar vs local cache DB).
+    pub reference_tracker: ReferenceTrackerConfig,
+    /// Number of blobs to delete per batch in a single GC cycle.
+    /// Limits per-cycle I/O impact; remaining orphans are deleted in subsequent cycles.
+    pub delete_batch_size: usize,
+    /// Maximum retry attempts for a failed blob deletion before giving up.
+    pub delete_max_retries: u32,
 }
 
 impl Default for GcConfig {
     fn default() -> Self {
         Self {
+            // Legacy defaults
             enabled: false,             // Disabled by default, must opt-in
             interval_seconds: 3600,     // Every hour
-            grace_period_seconds: 600,  // 10 minutes grace period
+            grace_period_seconds: 600,  // 10 minutes grace period (legacy)
             dry_run: true,              // Dry-run by default for safety
             hub_base_url: "http://localhost:8080".to_string(),
             hub_internal_token: String::new(),
             http_timeout_seconds: 300,
+            // Incremental GC v2 defaults
+            data_dir: "/var/lib/cas/gc".to_string(),
+            bloom: BloomConfig::default(),
+            scanner: ScannerConfig::default(),
+            grace: GraceConfig::default(),
+            lease: LeaseConfig::default(),
+            reference_tracker: ReferenceTrackerConfig::default(),
+            delete_batch_size: 100,
+            delete_max_retries: 3,
         }
+    }
+}
+
+impl GcConfig {
+    /// Load GC configuration from environment variables, falling back to defaults.
+    ///
+    /// This method reads all `GC_*` environment variables and overrides the
+    /// corresponding fields. Unknown or unparseable values log a warning and
+    /// keep the default.
+    pub fn from_env() -> Self {
+        let mut config = Self::default();
+
+        // Helper: parse bool accepting "true"/"1" as true, "false"/"0" as false.
+        let parse_bool = |s: &str| -> Option<bool> {
+            match s.to_lowercase().as_str() {
+                "true" | "1" => Some(true),
+                "false" | "0" => Some(false),
+                _ => None,
+            }
+        };
+
+        if let Ok(val) = std::env::var("GC_ENABLED") {
+            if let Some(b) = parse_bool(&val) { config.enabled = b; }
+        }
+        if let Ok(val) = std::env::var("GC_INTERVAL_SECONDS") {
+            config.interval_seconds = val.parse().unwrap_or(config.interval_seconds);
+        }
+        if let Ok(val) = std::env::var("GC_DATA_DIR") {
+            config.data_dir = val;
+        }
+        if let Ok(val) = std::env::var("GC_DRY_RUN") {
+            if let Some(b) = parse_bool(&val) { config.dry_run = b; }
+        }
+        if let Ok(val) = std::env::var("GC_BLOOM_EXPECTED_ITEMS") {
+            config.bloom.expected_items = val.parse().unwrap_or(config.bloom.expected_items);
+        }
+        if let Ok(val) = std::env::var("GC_BLOOM_FALSE_POSITIVE_RATE") {
+            config.bloom.false_positive_rate = val.parse().unwrap_or(config.bloom.false_positive_rate);
+        }
+        if let Ok(val) = std::env::var("GC_SCANNER_PAGE_SIZE") {
+            config.scanner.page_size = val.parse().unwrap_or(config.scanner.page_size);
+        }
+        if let Ok(val) = std::env::var("GC_GRACE_ABSOLUTE_SECONDS") {
+            config.grace.absolute_seconds = val.parse().unwrap_or(config.grace.absolute_seconds);
+        }
+        if let Ok(val) = std::env::var("GC_GRACE_SOFT_CYCLES") {
+            config.grace.soft_cycles = val.parse().unwrap_or(config.grace.soft_cycles);
+        }
+        if let Ok(val) = std::env::var("GC_LEASE_TTL_SECONDS") {
+            config.lease.ttl_seconds = val.parse().unwrap_or(config.lease.ttl_seconds);
+        }
+        if let Ok(val) = std::env::var("GC_DELETE_BATCH_SIZE") {
+            config.delete_batch_size = val.parse().unwrap_or(config.delete_batch_size);
+        }
+        // Legacy env var support (for src/gc/mod.rs compat)
+        if let Ok(val) = std::env::var("GC_GRACE_PERIOD_SECONDS") {
+            config.grace_period_seconds = val.parse().unwrap_or(config.grace_period_seconds);
+        }
+        if let Ok(val) = std::env::var("GC_HUB_BASE_URL") {
+            config.hub_base_url = val;
+        }
+        if let Ok(val) = std::env::var("GC_HUB_INTERNAL_TOKEN") {
+            config.hub_internal_token = val;
+        }
+        if let Ok(val) = std::env::var("GC_HTTP_TIMEOUT_SECONDS") {
+            config.http_timeout_seconds = val.parse().unwrap_or(config.http_timeout_seconds);
+        }
+
+        config
     }
 }
 
@@ -311,6 +546,25 @@ impl ServerConfig {
             }
             if self.gc.grace_period_seconds == 0 {
                 tracing::warn!("GC_GRACE_PERIOD_SECONDS is 0. This disables the grace period and may cause race conditions with concurrent uploads.");
+            }
+            if self.gc.grace.absolute_seconds == 0 && self.gc.grace.soft_cycles == 0 {
+                tracing::warn!(
+                    "Both GC grace.absolute_seconds and grace.soft_cycles are 0. \
+                     This disables all grace-period protection and may delete \
+                     blobs that are referenced but not yet visible in file_tree."
+                );
+            }
+            if self.gc.bloom.false_positive_rate <= 0.0 || self.gc.bloom.false_positive_rate >= 1.0 {
+                panic!(
+                    "GC_BLOOM_FALSE_POSITIVE_RATE must be in (0.0, 1.0) (got {}).",
+                    self.gc.bloom.false_positive_rate
+                );
+            }
+            if self.gc.bloom.expected_items == 0 {
+                panic!("GC_BLOOM_EXPECTED_ITEMS must be > 0 (got 0).");
+            }
+            if self.gc.delete_batch_size == 0 {
+                panic!("GC_DELETE_BATCH_SIZE must be > 0 (got 0).");
             }
         }
         // M6 fix: Warn on invalid compression_scheme instead of silently falling back to LZ4.
@@ -405,40 +659,9 @@ impl ServerConfig {
             Err(_) => 512 * 1024 * 1024,  // 512MB — match Hub max_upload_size
         };
 
-        // GC configuration
-        let gc_enabled = std::env::var("GC_ENABLED")
-            .ok()
-            .map(|v| v.to_lowercase() == "true" || v == "1")
-            .unwrap_or(false);
-        let gc_interval = match std::env::var("GC_INTERVAL_SECONDS") {
-            Ok(val) => val.parse().unwrap_or_else(|_| {
-                tracing::warn!("GC_INTERVAL_SECONDS '{}' is not a valid number, using default 3600", val);
-                3600
-            }),
-            Err(_) => 3600,
-        };
-        let gc_grace_period = match std::env::var("GC_GRACE_PERIOD_SECONDS") {
-            Ok(val) => val.parse().unwrap_or_else(|_| {
-                tracing::warn!("GC_GRACE_PERIOD_SECONDS '{}' is not a valid number, using default 600", val);
-                600
-            }),
-            Err(_) => 600,
-        };
-        let gc_dry_run = std::env::var("GC_DRY_RUN")
-            .ok()
-            .map(|v| v.to_lowercase() != "false" && v != "0")
-            .unwrap_or(true);
-        let gc_hub_base_url = std::env::var("GC_HUB_BASE_URL")
-            .unwrap_or_else(|_| "http://localhost:8080".to_string());
-        let gc_hub_internal_token = std::env::var("GC_HUB_INTERNAL_TOKEN")
-            .unwrap_or_default();
-        let gc_http_timeout = match std::env::var("GC_HTTP_TIMEOUT_SECONDS") {
-            Ok(val) => val.parse().unwrap_or_else(|_| {
-                tracing::warn!("GC_HTTP_TIMEOUT_SECONDS '{}' is not a valid number, using default 300", val);
-                300
-            }),
-            Err(_) => 300,
-        };
+        // GC configuration — delegate to GcConfig::from_env() which reads all GC_*
+        // environment variables (including legacy vars used by src/gc/mod.rs).
+        let gc_config = GcConfig::from_env();
 
         let config = Self {
             server: ServerSettings { host, port, public_base_url, max_body_size_mb, rate_limit_rpm },
@@ -465,15 +688,7 @@ impl ServerConfig {
                 min_conversion_size,
                 max_conversion_size,
             },
-            gc: GcConfig {
-                enabled: gc_enabled,
-                interval_seconds: gc_interval,
-                grace_period_seconds: gc_grace_period,
-                dry_run: gc_dry_run,
-                hub_base_url: gc_hub_base_url,
-                hub_internal_token: gc_hub_internal_token,
-                http_timeout_seconds: gc_http_timeout,
-            },
+            gc: gc_config,
         };
         config.validate();
         config
