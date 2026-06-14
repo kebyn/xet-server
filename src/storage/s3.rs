@@ -34,7 +34,7 @@ use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 use bytes::Bytes;
 use std::path::Path;
 use tokio::fs::File;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Files smaller than this use simple put_object (no multipart overhead).
 /// S3 requires minimum 5MB per part (except the last), so this is the threshold.
@@ -325,14 +325,53 @@ impl StorageBackend for S3Storage {
         Ok(data)
     }
 
-    /// I1/I3: Download an S3 object directly to a file on disk.
-    /// Note: aws-sdk-s3 1.15 ByteStream doesn't expose write_to_path, so we use
-    /// the trait default (get + write). This loads the object into RAM temporarily.
-    /// For truly bounded-memory S3 downloads, a future version can implement range-GET
-    /// chunked download or upgrade to an SDK version with streaming support.
-    // Note: Intentionally NOT overriding download_to_path here — the default
-    // implementation (get + write) is used. S3Storage inherits the trait default
-    // which logs a warning when exercised.
+    /// I2 fix: Download an S3 object directly to a file on disk using streaming.
+    ///
+    /// This implementation uses ByteStream's streaming capabilities to write
+    /// the object directly to disk without loading the entire object into memory.
+    /// Memory usage is bounded to the internal buffer size of the ByteStream.
+    ///
+    /// For large files (>500MB), this prevents memory pressure that would occur
+    /// with the default implementation (get() + write()).
+    async fn download_to_path(&self, key: &str, dest: &Path) -> StorageResult<()> {
+        let result = self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await
+            .map_err(|e| {
+                if e.to_string().contains("NoSuchKey") {
+                    StorageError::NotFound(key.to_string())
+                } else {
+                    StorageError::Internal(format!("S3 get failed: {}", e))
+                }
+            })?;
+
+        // Open the destination file
+        let mut file = File::create(dest).await.map_err(|e| {
+            StorageError::Internal(format!("Failed to create file {}: {}", dest.display(), e))
+        })?;
+
+        // Stream the body directly to file without collecting into memory
+        let mut body = result.body;
+        while let Some(chunk) = body.next().await {
+            let chunk = chunk.map_err(|e| {
+                StorageError::Internal(format!("Failed to read S3 stream: {}", e))
+            })?;
+            file.write_all(&chunk).await.map_err(|e| {
+                StorageError::Internal(format!("Failed to write to {}: {}", dest.display(), e))
+            })?;
+        }
+
+        // Flush to ensure all data is written
+        file.flush().await.map_err(|e| {
+            StorageError::Internal(format!("Failed to flush {}: {}", dest.display(), e))
+        })?;
+
+        Ok(())
+    }
 
     async fn exists(&self, key: &str) -> StorageResult<bool> {
         match self

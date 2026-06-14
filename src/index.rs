@@ -94,58 +94,93 @@ impl MetadataIndex {
     /// Rebuild the index by scanning shards in storage.
     /// Called once at server startup.
     ///
+    /// I1/M1 fix: Uses bounded parallelism to fetch and parse shards concurrently,
+    /// significantly reducing startup time for large storage (thousands of shards).
+    /// Processes shards in batches of 10 to balance parallelism with resource usage.
+    ///
     /// Lists all objects under the `"shards/"` prefix, parses each shard,
     /// and registers its file and chunk mappings in the index.
     ///
     /// Returns the number of shards successfully indexed.
     pub async fn rebuild_from_storage(
         &self,
-        storage: &dyn crate::storage::StorageBackend,
+        storage: Arc<Box<dyn crate::storage::StorageBackend>>,
     ) -> Result<usize, String> {
         use crate::format::shard::MDBShardFile;
 
         let shard_keys = storage.list_objects("shards/").await
             .map_err(|e| format!("Failed to list shards: {}", e))?;
 
-        let mut count = 0;
-        for shard_key in &shard_keys {
-            let shard_data = match storage.get(shard_key).await {
-                Ok(data) => data,
-                Err(e) => {
-                    tracing::warn!("Failed to fetch shard {}: {}", shard_key, e);
-                    continue;
-                }
-            };
+        // I1 fix: Process shards concurrently with bounded parallelism
+        // Using batches of 10 to balance parallelism with resource usage
+        const BATCH_SIZE: usize = 10;
+        let mut total_count = 0;
 
-            // Parse shard and extract mappings
-            match MDBShardFile::parse(&shard_data) {
-                Ok(shard) => {
-                    // Extract file hashes and convert to strings
-                    let file_hashes: Vec<String> = shard.file_hashes()
-                        .iter()
-                        .map(|h| h.to_hex())
-                        .collect();
+        for chunk in shard_keys.chunks(BATCH_SIZE) {
+            let mut handles = vec![];
 
-                    // Extract chunk mappings and convert to strings
-                    let chunk_mappings: Vec<(String, String, u32)> = shard.chunk_mappings()
-                        .iter()
-                        .map(|(chunk, xorb, idx)| (chunk.to_hex(), xorb.to_hex(), *idx))
-                        .collect();
+            for shard_key in chunk {
+                let storage_clone = storage.clone();
+                let key = shard_key.clone();
 
-                    // Extract shard_id from key (shards/{shard_id})
-                    let shard_id = shard_key.strip_prefix("shards/").unwrap_or(shard_key).to_string();
+                let handle = tokio::spawn(async move {
+                    let shard_data = match storage_clone.get(&key).await {
+                        Ok(data) => data,
+                        Err(e) => {
+                            tracing::warn!("Failed to fetch shard {}: {}", key, e);
+                            return None;
+                        }
+                    };
 
-                    // Register in index
-                    self.register_shard(shard_id, file_hashes, chunk_mappings);
-                    count += 1;
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to parse shard {}: {}", shard_key, e);
+                    // Parse shard and extract mappings
+                    match MDBShardFile::parse(&shard_data) {
+                        Ok(shard) => {
+                            // Extract file hashes and convert to strings
+                            let file_hashes: Vec<String> = shard.file_hashes()
+                                .iter()
+                                .map(|h| h.to_hex())
+                                .collect();
+
+                            // Extract chunk mappings and convert to strings
+                            let chunk_mappings: Vec<(String, String, u32)> = shard.chunk_mappings()
+                                .iter()
+                                .map(|(chunk, xorb, idx)| (chunk.to_hex(), xorb.to_hex(), *idx))
+                                .collect();
+
+                            // Extract shard_id from key (shards/{shard_id})
+                            let shard_id = key.strip_prefix("shards/").unwrap_or(&key).to_string();
+
+                            Some((shard_id, file_hashes, chunk_mappings))
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to parse shard {}: {}", key, e);
+                            None
+                        }
+                    }
+                });
+
+                handles.push(handle);
+            }
+
+            // Wait for all tasks in this batch to complete and register results
+            for handle in handles {
+                match handle.await {
+                    Ok(Some((shard_id, file_hashes, chunk_mappings))) => {
+                        // Register in index (main task only, no concurrent writes)
+                        self.register_shard(shard_id, file_hashes, chunk_mappings);
+                        total_count += 1;
+                    }
+                    Ok(None) => {
+                        // Shard fetch or parse failed, already logged
+                    }
+                    Err(e) => {
+                        tracing::warn!("Shard processing task failed: {}", e);
+                    }
                 }
             }
         }
 
-        Ok(count)
+        Ok(total_count)
     }
 }
 
