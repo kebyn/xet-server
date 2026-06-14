@@ -39,8 +39,11 @@ fn merged_hash_of_sequence(hashes: &[(MerkleHash, u64)]) -> (MerkleHash, u64) {
     let mut buf = String::with_capacity(hashes.len() * 88);
     let mut total_size = 0u64;
 
+    // M2 fix: Use std::fmt::Write to format directly into buf,
+    // avoiding intermediate String allocation from format!().
+    use std::fmt::Write;
     for (hash, size) in hashes {
-        buf.push_str(&format!("{} : {}\n", hash.to_hex(), size));
+        write!(buf, "{} : {}\n", hash.to_hex(), size).unwrap();
         total_size += size;
     }
 

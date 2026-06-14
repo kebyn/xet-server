@@ -25,6 +25,23 @@ pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
     );
 
     // Initialize xet signer
+    // M9 fix: Check private key file permissions (private keys are more sensitive than public keys).
+    // If the private key is world-readable, other users could forge authentication tokens.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(&config.auth.private_key_path) {
+            let mode = meta.permissions().mode();
+            if mode & 0o044 != 0 {
+                tracing::warn!(
+                    "SECURITY: Private key file '{}' is readable by group/other (mode {:o}). \
+                     An attacker with read access could forge authentication tokens. \
+                     Use chmod 600 to restrict access.",
+                    config.auth.private_key_path, mode
+                );
+            }
+        }
+    }
     let private_key_pem = std::fs::read(&config.auth.private_key_path)
         .map_err(|e| std::io::Error::other(format!("Failed to read private key from '{}': {}", config.auth.private_key_path, e)))?;
     let signer = Arc::new(

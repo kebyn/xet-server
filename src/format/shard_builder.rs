@@ -246,13 +246,15 @@ impl ShardBuilder {
             .serialize(&mut footer_cursor)
             .map_err(XetError::IoError)?;
 
-        debug_assert_eq!(
-            buf.len(),
-            total_size,
-            "shard binary size mismatch: wrote {} bytes, expected {}",
-            buf.len(),
-            total_size,
-        );
+        // M8 fix: Use proper error instead of debug_assert_eq! which is a no-op in release builds.
+        // Shard binary size correctness is critical for data integrity — detect mismatches
+        // in all build configurations, not just debug.
+        if buf.len() != total_size {
+            return Err(XetError::ParseError(format!(
+                "shard binary size mismatch: wrote {} bytes, expected {}",
+                buf.len(), total_size
+            )));
+        }
 
         // ---- round-trip verification ----
         let _parsed = MDBShardFile::parse(&buf).map_err(|e| {

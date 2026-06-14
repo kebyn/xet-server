@@ -325,6 +325,15 @@ impl StorageBackend for S3Storage {
         Ok(data)
     }
 
+    /// I1/I3: Download an S3 object directly to a file on disk.
+    /// Note: aws-sdk-s3 1.15 ByteStream doesn't expose write_to_path, so we use
+    /// the trait default (get + write). This loads the object into RAM temporarily.
+    /// For truly bounded-memory S3 downloads, a future version can implement range-GET
+    /// chunked download or upgrade to an SDK version with streaming support.
+    // Note: Intentionally NOT overriding download_to_path here — the default
+    // implementation (get + write) is used. S3Storage inherits the trait default
+    // which logs a warning when exercised.
+
     async fn exists(&self, key: &str) -> StorageResult<bool> {
         match self
             .client

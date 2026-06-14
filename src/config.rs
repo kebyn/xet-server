@@ -274,6 +274,17 @@ impl ServerConfig {
                 tracing::warn!("GC_GRACE_PERIOD_SECONDS is 0. This disables the grace period and may cause race conditions with concurrent uploads.");
             }
         }
+        // M6 fix: Warn on invalid compression_scheme instead of silently falling back to LZ4.
+        match self.conversion.compression_scheme.to_lowercase().as_str() {
+            "none" | "lz4" | "bg4lz4" => {},
+            invalid => {
+                tracing::warn!(
+                    "XET_CONVERSION_SCHEME '{}' is not a valid compression scheme. \
+                     Falling back to LZ4. Valid values: none, lz4, bg4lz4",
+                    invalid
+                );
+            }
+        }
     }
 
     /// Load configuration from environment variables with defaults

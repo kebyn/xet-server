@@ -102,6 +102,27 @@ pub trait StorageBackend: Send + Sync {
         let data = self.get(key).await?;
         Ok(data.len() as u64)
     }
+
+    /// Download an object directly to a file on disk, streaming the data
+    /// to avoid loading the entire object into memory.
+    ///
+    /// Default implementation: uses get() and writes to file (loads entire object into RAM).
+    /// Storage backends should override this with a streaming implementation.
+    /// I1/I3: This enables bounded-memory downloads for the conversion pipeline and xorb downloads.
+    async fn download_to_path(&self, key: &str, dest: &Path) -> StorageResult<()> {
+        tracing::warn!(
+            "download_to_path using default (non-streaming) implementation for key={}; \
+             this reads the entire object into RAM. Override download_to_path in your \
+             StorageBackend implementation for streaming support.",
+            key
+        );
+        let data = self.get(key).await?;
+        tokio::fs::write(dest, &data).await
+            .map_err(|e| StorageError::Internal(
+                format!("Failed to write to {}: {}", dest.display(), e)
+            ))?;
+        Ok(())
+    }
 }
 
 pub async fn create_storage(config: &crate::config::StorageConfig) -> StorageResult<Box<dyn StorageBackend>> {

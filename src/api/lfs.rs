@@ -86,9 +86,10 @@ pub async fn upload_lfs_object(
         }));
     }
 
-    // Check available disk space before accepting upload
+    // M7 fix: Use a more reasonable pre-check threshold (see xorb.rs for rationale).
     let temp_dir = config.storage.resolve_upload_temp_dir();
-    if let Err(e) = check_disk_space(&temp_dir, config.server.max_body_size_bytes() as u64) {
+    let check_bytes = std::cmp::min(config.server.max_body_size_bytes() as u64, 100 * 1024 * 1024);
+    if let Err(e) = check_disk_space(&temp_dir, check_bytes) {
         error!("Insufficient disk space: {}", e);
         GLOBAL_METRICS.record_request(507);
         GLOBAL_METRICS.record_error();
@@ -319,6 +320,20 @@ pub async fn download_lfs_object(
                 let converting_clone = converting.clone();
                 let oid_clone = oid.clone();
                 tokio::spawn(async move {
+                    // I4 fix: Use scope guard to ensure OID lock is always released,
+                    // even if convert() panics. Previously, a panic would skip the
+                    // release() call, permanently locking the OID until server restart.
+                    struct OidGuard {
+                        converting: Arc<ConvertingOids>,
+                        oid: String,
+                    }
+                    impl Drop for OidGuard {
+                        fn drop(&mut self) {
+                            self.converting.release(&self.oid);
+                        }
+                    }
+                    let _guard = OidGuard { converting: converting_clone.get_ref().clone(), oid: oid_clone.clone() };
+
                     match pipeline.convert(&oid_clone).await {
                         Ok(result) => {
                             tracing::info!("Lazy converted {}: {} chunks, {} deduped, {} → {} bytes",
@@ -329,7 +344,7 @@ pub async fn download_lfs_object(
                             tracing::warn!("Lazy conversion failed for {}: {} (raw blob preserved)", oid_clone, e);
                         }
                     }
-                    converting_clone.release(&oid_clone);
+                    // _guard.drop() releases the OID lock, even on panic
                 });
             }
 
@@ -528,8 +543,10 @@ where
                             "Integrity check FAILED for {}: computed {} != expected {} ({} bytes streamed)",
                             self.expected_oid, computed_hash, self.expected_oid, self.bytes_hashed
                         );
-                        // Note: Data has already been sent to client. We log the error for monitoring.
-                        // In production, this should trigger alerts and potentially mark the object as corrupt.
+                        // I2 fix: Record integrity failure as error metric for monitoring/alerting.
+                        // Data has already been sent to client (architectural limitation of streaming).
+                        // Mitigations: client should verify OID, Git LFS protocol does this natively.
+                        GLOBAL_METRICS.record_error();
                     } else {
                         info!(
                             "Integrity check passed for {} ({} bytes streamed)",

@@ -398,10 +398,25 @@ impl MDBShardFile {
                         file_hashes.push(file_header.file_hash);
 
                         // Parse file entries for this file
+                        // I6 fix: Track how many entries were actually parsed vs expected.
+                        // Log warning if fewer entries parsed (shard may be truncated/corrupt).
+                        let mut parsed_entries = 0u32;
                         for _ in 0..file_header.num_entries {
                             match FileDataSequenceEntry::deserialize(&mut file_cursor) {
-                                Ok(entry) => file_data_entries.push(entry),
-                                Err(_) => break,
+                                Ok(entry) => {
+                                    file_data_entries.push(entry);
+                                    parsed_entries += 1;
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Shard parse: truncated file entries for file {}: \
+                                         expected {} entries, got {} (error: {}). \
+                                         Shard data may be incomplete.",
+                                        file_header.file_hash.to_hex(),
+                                        file_header.num_entries, parsed_entries, e
+                                    );
+                                    break;
+                                }
                             }
                         }
 
@@ -441,6 +456,8 @@ impl MDBShardFile {
                         let num_chunks = xorb_header.num_entries;
                         xorb_entries.push(xorb_header);
 
+                        // I6 fix: Track parsed entries and warn on truncation.
+                        let mut parsed_chunks = 0u32;
                         // Parse chunk entries for this xorb
                         for chunk_index in 0..num_chunks {
                             match XorbChunkSequenceEntry::deserialize(&mut xorb_cursor) {
@@ -452,8 +469,18 @@ impl MDBShardFile {
                                         chunk_index,
                                     ));
                                     xorb_chunk_entries.push(chunk_entry);
+                                    parsed_chunks += 1;
                                 }
-                                Err(_) => break,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Shard parse: truncated chunk entries for xorb {}: \
+                                         expected {} entries, got {} (error: {}). \
+                                         Shard data may be incomplete.",
+                                        xorb_hash.to_hex(),
+                                        num_chunks, parsed_chunks, e
+                                    );
+                                    break;
+                                }
                             }
                         }
                     }

@@ -141,9 +141,11 @@ impl XorbObjectInfoV1 {
         reader.read_exact(&mut num_buf)?;
         let num_chunks = u32::from_le_bytes(num_buf);
 
-        // Validate num_chunks to prevent unbounded allocation (DoS protection)
-        // A 16MB xorb with 8KB min chunks gives max ~2048 chunks
-        const MAX_CHUNKS_PER_XORB: u32 = 1_000_000;
+        // I7 fix: Reduce MAX_CHUNKS_PER_XORB from 1M to 100K to limit per-parse allocation.
+        // A 16MB xorb with 8KB min chunks gives max ~2048 chunks (realistic).
+        // At 100K limit: max allocation is ~4MB per parse (vs 40MB at 1M).
+        // GC concurrent parse of 10 shards: ~40MB total (vs 400MB at 1M).
+        const MAX_CHUNKS_PER_XORB: u32 = 100_000;
         if num_chunks > MAX_CHUNKS_PER_XORB {
             return Err(XetError::ParseError(format!(
                 "Too many chunks: {} exceeds maximum {}",
@@ -212,7 +214,11 @@ pub fn verify_xorb(data: &[u8]) -> XetResult<()> {
     let hashes_ident = XorbObjectInfoV1::IDENT_HASHES;
     let mut footer_start = None;
 
-    for i in 0..data.len().saturating_sub(7) {
+    // C3 fix: Search from the END backwards, consistent with verify_xorb_from_file.
+    // Searching backwards prevents false positives if chunk data happens to contain
+    // the IDENT_HASHES magic bytes ("XBLBHSH") — those would appear before the real footer.
+    let max_start = data.len().saturating_sub(7);
+    for i in (0..=max_start).rev() {
         if data[i..i+7] == hashes_ident {
             footer_start = Some(i);
             break;
