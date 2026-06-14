@@ -22,6 +22,7 @@ fn test_config_s3_settings() {
             s3_endpoint: Some("http://localhost:9000".to_string()),
             local_path: None,
             upload_temp_dir: None,
+            reconstruction_temp_dir: None,
             verify_download_integrity: false,
         },
         ..Default::default()
@@ -38,6 +39,8 @@ fn test_config_auth_settings() {
         auth: AuthConfig {
             public_key_path: "/path/to/key.pem".to_string(),
             trusted_kids: vec!["kid1".to_string(), "kid2".to_string()],
+            private_key_path: None,
+            signing_kid: None,
         },
         ..Default::default()
     };

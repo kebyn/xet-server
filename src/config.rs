@@ -107,6 +107,11 @@ pub struct StorageConfig {
     /// For S3 or if unset, defaults to `/tmp/xet-uploads`.
     /// Configure via `XET_UPLOAD_TEMP_DIR` environment variable.
     pub upload_temp_dir: Option<String>,
+    /// Directory for xorb reconstruction temp files.
+    /// Used by the download reconstruction pipeline to store xorb chunks while
+    /// reassembling them into the final LFS object. Defaults to OS temp dir + "xet-reconstruction".
+    /// Configure via `XET_RECONSTRUCTION_TEMP_DIR` environment variable.
+    pub reconstruction_temp_dir: Option<String>,
     /// I3: Enable integrity verification on LFS downloads.
     /// When enabled, the server streams the file through SHA-256 hasher before sending
     /// to verify the content matches the OID. This catches storage corruption (bit rot)
@@ -127,6 +132,16 @@ impl StorageConfig {
             PathBuf::from("./data/.tmp")
         }
     }
+
+    /// Resolve the directory for xorb reconstruction temp files.
+    /// Uses configured value, falling back to OS temp dir + "xet-reconstruction".
+    pub fn resolve_reconstruction_temp_dir(&self) -> PathBuf {
+        if let Some(dir) = &self.reconstruction_temp_dir {
+            PathBuf::from(dir)
+        } else {
+            std::env::temp_dir().join("xet-reconstruction")
+        }
+    }
 }
 
 /// Authentication configuration (Ed25519-based)
@@ -136,6 +151,16 @@ pub struct AuthConfig {
     pub public_key_path: String,
     /// List of trusted key IDs (kid values) that are accepted
     pub trusted_kids: Vec<String>,
+    /// I5 fix: Optional path to private key PEM for signing proxy tokens.
+    /// When set, CAS batch API generates short-lived proxy tokens instead of
+    /// passing through the user's long-lived token. This prevents long-lived
+    /// token leakage in batch API responses.
+    /// If not set, CAS logs a warning and batch API passes through user tokens
+    /// (acceptable for development/testing, not recommended for production).
+    pub private_key_path: Option<String>,
+    /// Kid to use when signing proxy tokens. Must match public key.
+    /// Defaults to first entry in trusted_kids.
+    pub signing_kid: Option<String>,
 }
 
 /// Conversion pipeline configuration
@@ -241,6 +266,7 @@ impl Default for ServerConfig {
                 s3_endpoint: None,
                 local_path: Some("./data".to_string()),
                 upload_temp_dir: None,
+                reconstruction_temp_dir: None,
                 verify_download_integrity: false, // Disabled by default for performance
             },
             auth: AuthConfig {
@@ -248,6 +274,8 @@ impl Default for ServerConfig {
                 // /tmp is world-writable and vulnerable to symlink attacks
                 public_key_path: "/etc/xet/public-key.pem".to_string(),  // Production default
                 trusted_kids: vec!["hub-key-1".to_string()],  // Changed from "test-kid" to match Hub default
+                private_key_path: None, // I5 fix: Optional, set CAS_PRIVATE_KEY_PATH to enable proxy token generation
+                signing_kid: None,
             },
             conversion: ConversionConfig::default(),
             gc: GcConfig::default(),
@@ -319,6 +347,7 @@ impl ServerConfig {
         let s3_endpoint = std::env::var("XET_S3_ENDPOINT").ok();
         let local_path = std::env::var("XET_LOCAL_PATH").ok();
         let upload_temp_dir = std::env::var("XET_UPLOAD_TEMP_DIR").ok();
+        let reconstruction_temp_dir = std::env::var("XET_RECONSTRUCTION_TEMP_DIR").ok();
         let verify_download_integrity = std::env::var("XET_VERIFY_DOWNLOAD_INTEGRITY")
             .ok()
             .map(|v| v.to_lowercase() == "true" || v == "1")
@@ -335,6 +364,9 @@ impl ServerConfig {
                 tracing::warn!("CAS_TRUSTED_KIDS not set, using default 'hub-key-1'. Ensure this matches Hub's HUB_KID configuration.");
                 vec!["hub-key-1".to_string()]  // Changed from "test-kid" to match Hub default
             });
+        // I5 fix: Optional private key for signing proxy tokens in batch API responses
+        let private_key_path = std::env::var("CAS_PRIVATE_KEY_PATH").ok();
+        let signing_kid = std::env::var("CAS_SIGNING_KID").ok();
 
         // Conversion pipeline configuration
         let conversion_enabled = std::env::var("XET_CONVERSION_ENABLED")
@@ -406,11 +438,14 @@ impl ServerConfig {
                 s3_endpoint,
                 local_path,
                 upload_temp_dir,
+                reconstruction_temp_dir,
                 verify_download_integrity,
             },
             auth: AuthConfig {
                 public_key_path,
                 trusted_kids,
+                private_key_path,
+                signing_kid,
             },
             conversion: ConversionConfig {
                 enabled: conversion_enabled,

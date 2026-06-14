@@ -30,6 +30,8 @@ fn create_test_config_with_temp_dir(temp_dir: &str) -> TestContext {
     let auth_config = xet_server::config::AuthConfig {
         public_key_path: pub_key_path.to_str().unwrap().to_string(),
         trusted_kids: vec![kp.kid()],
+        private_key_path: None,
+        signing_kid: None,
     };
 
     let auth_verifier = AuthVerifier::from_config(&auth_config).unwrap();
@@ -49,6 +51,7 @@ fn create_test_config_with_temp_dir(temp_dir: &str) -> TestContext {
             s3_endpoint: None,
             local_path: Some("./data".to_string()),
             upload_temp_dir: Some(temp_dir.to_string()),
+            reconstruction_temp_dir: None,
             verify_download_integrity: false,
         },
         auth: auth_config,

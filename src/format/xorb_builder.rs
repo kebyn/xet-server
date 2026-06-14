@@ -97,7 +97,7 @@ impl XorbBuilder {
         self.chunks.push(ChunkData {
             chunk_hash,
             serialized_chunk: chunk_bytes,
-            compressed_len: compressed_len,
+            compressed_len,
             uncompressed_size,
             boundary_offset,
             unpacked_offset,

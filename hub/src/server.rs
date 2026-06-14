@@ -10,16 +10,40 @@ use crate::metadata::sqlite::SqliteMetadataStore;
 use crate::metadata::MetadataStore;
 
 pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
-    // Initialize token store (uses same DB as metadata for simplicity)
+    // M2 fix: Create a shared SQLite connection pool for both TokenStore and MetadataStore.
+    // Previously, each created its own pool (default 5 connections each = 10 total to same DB).
+    // SQLite only supports one writer at a time; reducing total connections prevents SQLITE_BUSY.
+    // Shared pool uses the configured pool_size (default 5) for BOTH stores combined.
+    use sqlx::sqlite::SqlitePoolOptions;
+    let shared_pool = SqlitePoolOptions::new()
+        .max_connections(config.metadata.db_pool_size)
+        .min_connections(1)
+        .acquire_timeout(std::time::Duration::from_secs(5))
+        .after_connect(|conn, _| Box::pin(async move {
+            sqlx::query("PRAGMA journal_mode = WAL;").execute(&mut *conn).await?;
+            sqlx::query("PRAGMA foreign_keys = ON;").execute(&mut *conn).await?;
+            sqlx::query("PRAGMA busy_timeout = 5000;").execute(&mut *conn).await?;
+            Ok(())
+        }))
+        .connect(&config.metadata.sqlite_path)
+        .await
+        .map_err(|e| std::io::Error::other(format!("Failed to connect to database: {}", e)))?;
+
+    tracing::info!(
+        "Using shared SQLite connection pool ({} connections) for TokenStore + MetadataStore",
+        config.metadata.db_pool_size
+    );
+
+    // Initialize token store with shared pool
     let token_store = Arc::new(
-        TokenStore::new(&config.metadata.sqlite_path, config.metadata.db_pool_size)
+        TokenStore::with_pool(shared_pool.clone())
             .await
             .map_err(|e| std::io::Error::other(format!("Failed to create token store: {}", e)))?
     );
 
-    // Initialize metadata store
+    // Initialize metadata store with shared pool
     let metadata: Arc<dyn MetadataStore> = Arc::new(
-        SqliteMetadataStore::new(&config.metadata.sqlite_path, config.metadata.db_pool_size)
+        SqliteMetadataStore::with_pool(shared_pool)
             .await
             .map_err(|e| std::io::Error::other(format!("Failed to create metadata store: {}", e)))?
     );
@@ -45,7 +69,13 @@ pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
     let private_key_pem = std::fs::read(&config.auth.private_key_path)
         .map_err(|e| std::io::Error::other(format!("Failed to read private key from '{}': {}", config.auth.private_key_path, e)))?;
     let signer = Arc::new(
-        XetSigner::from_pem(&private_key_pem, &config.auth.kid, config.auth.token_ttl_seconds, config.auth.proxy_token_ttl_seconds)
+        XetSigner::from_pem_with_internal_ttl(
+            &private_key_pem,
+            &config.auth.kid,
+            config.auth.token_ttl_seconds,
+            config.auth.proxy_token_ttl_seconds,
+            config.auth.internal_token_ttl_seconds,  // C1 fix: configurable internal token TTL
+        )
             .map_err(|e| std::io::Error::other(format!("Failed to create xet signer: {}", e)))?
     );
 
@@ -54,16 +84,18 @@ pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
 
     // Optional: verify CAS connectivity at startup (async, non-blocking)
     // M5 fix: Add timeout to prevent health check from hanging indefinitely
+    // M-2 fix: Make timeout configurable via HUB_CAS_HEALTH_CHECK_TIMEOUT_SECS
     let cas_health = cas_client.clone();
+    let health_check_timeout = config.cas.health_check_timeout_seconds;
     tokio::spawn(async move {
         match tokio::time::timeout(
-            std::time::Duration::from_secs(10),
+            std::time::Duration::from_secs(health_check_timeout),
             cas_health.health_check()
         ).await {
             Ok(Ok(true)) => tracing::info!("CAS health check passed"),
             Ok(Ok(false)) => tracing::warn!("CAS health check returned non-success. Verify CAS is running."),
             Ok(Err(e)) => tracing::warn!("CAS health check failed: {}. Hub and CAS may not be able to communicate.", e),
-            Err(_) => tracing::error!("CAS health check timed out after 10 seconds"),
+            Err(_) => tracing::error!("CAS health check timed out after {} seconds", health_check_timeout),
         }
     });
 

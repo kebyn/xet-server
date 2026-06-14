@@ -299,6 +299,7 @@ mod tests {
             base_url: "http://localhost:3000".to_string(),
             internal_timeout_seconds: 30,
             max_download_size: 512 * 1024 * 1024,
+            health_check_timeout_seconds: 10,
         };
         let client = CasClient::new(&settings);
         assert_eq!(client.base_url, "http://localhost:3000");
@@ -310,6 +311,7 @@ mod tests {
             base_url: "http://localhost:3000/".to_string(),
             internal_timeout_seconds: 30,
             max_download_size: 512 * 1024 * 1024,
+            health_check_timeout_seconds: 10,
         };
         let client = CasClient::new(&settings);
         assert_eq!(client.base_url, "http://localhost:3000");

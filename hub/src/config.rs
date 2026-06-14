@@ -49,6 +49,11 @@ pub struct AuthSettings {
     /// Configure via `HUB_PROXY_TOKEN_TTL_SECONDS` environment variable.
     /// Default: 300 (5 minutes).
     pub proxy_token_ttl_seconds: u64,
+    /// C1 fix: TTL for internal tokens (Hub-to-CAS communication, used by GC).
+    /// Configure via `HUB_INTERNAL_TOKEN_TTL_SECONDS` environment variable.
+    /// Default: 86400 (24 hours). Previous hardcoded value was 60 seconds,
+    /// which caused GC to fail because GC runs hourly and tokens expired before next run.
+    pub internal_token_ttl_seconds: u64,
 }
 
 impl Default for AuthSettings {
@@ -58,6 +63,7 @@ impl Default for AuthSettings {
             kid: "hub-key-1".to_string(),
             token_ttl_seconds: 3600,
             proxy_token_ttl_seconds: 300,
+            internal_token_ttl_seconds: 86400, // C1 fix: 24 hours (was hardcoded 60s)
         }
     }
 }
@@ -89,6 +95,12 @@ pub struct CasSettings {
     /// Should match or exceed HUB_MAX_UPLOAD_SIZE.
     /// Configure via `HUB_MAX_DOWNLOAD_SIZE` env var. Default: 512MB.
     pub max_download_size: u64,
+    /// Startup health check timeout in seconds.
+    /// Hub spawns an async task to verify CAS connectivity at startup.
+    /// If CAS doesn't respond within this window, an error is logged.
+    /// Configure via `HUB_CAS_HEALTH_CHECK_TIMEOUT_SECS` env var.
+    /// Default: 10.
+    pub health_check_timeout_seconds: u64,
 }
 
 impl Default for CasSettings {
@@ -97,6 +109,7 @@ impl Default for CasSettings {
             base_url: "http://localhost:8081".to_string(),  // Changed from 3000 to match CAS default port
             internal_timeout_seconds: 30,
             max_download_size: 512 * 1024 * 1024,
+            health_check_timeout_seconds: 10,
         }
     }
 }
@@ -154,8 +167,22 @@ impl HubConfig {
         if self.auth.proxy_token_ttl_seconds == 0 {
             panic!("HUB_PROXY_TOKEN_TTL_SECONDS must be > 0 (got 0). Proxy tokens would expire immediately.");
         }
+        // C1 fix: Validate internal token TTL (must be long enough for GC interval)
+        if self.auth.internal_token_ttl_seconds == 0 {
+            panic!("HUB_INTERNAL_TOKEN_TTL_SECONDS must be > 0 (got 0). Internal tokens would expire immediately.");
+        }
+        if self.auth.internal_token_ttl_seconds < 3600 {
+            tracing::warn!(
+                "HUB_INTERNAL_TOKEN_TTL_SECONDS is {} (less than 1 hour). \
+                GC runs hourly by default. Consider increasing to at least 86400 (24 hours).",
+                self.auth.internal_token_ttl_seconds
+            );
+        }
         if self.storage.max_upload_size == 0 {
             panic!("HUB_MAX_UPLOAD_SIZE must be > 0 (got 0). This would prevent all uploads.");
+        }
+        if self.cas.health_check_timeout_seconds == 0 {
+            panic!("HUB_CAS_HEALTH_CHECK_TIMEOUT_SECS must be > 0 (got 0). Health check would never complete.");
         }
     }
 
@@ -187,6 +214,10 @@ impl HubConfig {
                     .ok()
                     .and_then(|t| t.parse().ok())
                     .unwrap_or(300),
+                internal_token_ttl_seconds: env::var("HUB_INTERNAL_TOKEN_TTL_SECONDS")
+                    .ok()
+                    .and_then(|t| t.parse().ok())
+                    .unwrap_or(86400),
             },
             metadata: MetadataSettings {
                 sqlite_path: env::var("HUB_SQLITE_PATH")
@@ -207,6 +238,10 @@ impl HubConfig {
                     .ok()
                     .and_then(|t| t.parse().ok())
                     .unwrap_or(512 * 1024 * 1024),
+                health_check_timeout_seconds: env::var("HUB_CAS_HEALTH_CHECK_TIMEOUT_SECS")
+                    .ok()
+                    .and_then(|t| t.parse().ok())
+                    .unwrap_or(10),
             },
             storage: StorageSettings {
                 inline_threshold_bytes: env::var("HUB_INLINE_THRESHOLD")
@@ -254,13 +289,13 @@ impl HubConfig {
             .unwrap_or_else(Self::from_env);
 
         // Override with environment variables (env takes precedence)
-        if let Some(host) = env::var("HUB_HOST").ok() {
+        if let Ok(host) = env::var("HUB_HOST") {
             config.server.host = host;
         }
         if let Some(port) = env::var("HUB_PORT").ok().and_then(|p| p.parse().ok()) {
             config.server.port = port;
         }
-        if let Some(url) = env::var("HUB_PUBLIC_BASE_URL").ok() {
+        if let Ok(url) = env::var("HUB_PUBLIC_BASE_URL") {
             // M-3: Validate URL format when set via environment variable
             // I2: Panic on invalid URL to fail fast at startup
             // M1 FIX: Parse URL only once using match instead of parsing twice
@@ -285,10 +320,10 @@ impl HubConfig {
         if let Some(rpm) = env::var("HUB_RATE_LIMIT_RPM").ok().and_then(|v| v.parse().ok()) {
             config.server.rate_limit_rpm = rpm;
         }
-        if let Some(path) = env::var("HUB_PRIVATE_KEY_PATH").ok() {
+        if let Ok(path) = env::var("HUB_PRIVATE_KEY_PATH") {
             config.auth.private_key_path = path;
         }
-        if let Some(kid) = env::var("HUB_KID").ok() {
+        if let Ok(kid) = env::var("HUB_KID") {
             config.auth.kid = kid;
         }
         if let Some(ttl) = env::var("HUB_TOKEN_TTL_SECONDS").ok().and_then(|t| t.parse().ok()) {
@@ -297,13 +332,16 @@ impl HubConfig {
         if let Some(ttl) = env::var("HUB_PROXY_TOKEN_TTL_SECONDS").ok().and_then(|t| t.parse().ok()) {
             config.auth.proxy_token_ttl_seconds = ttl;
         }
-        if let Some(path) = env::var("HUB_SQLITE_PATH").ok() {
+        if let Some(ttl) = env::var("HUB_INTERNAL_TOKEN_TTL_SECONDS").ok().and_then(|t| t.parse().ok()) {
+            config.auth.internal_token_ttl_seconds = ttl;
+        }
+        if let Ok(path) = env::var("HUB_SQLITE_PATH") {
             config.metadata.sqlite_path = path;
         }
         if let Some(size) = env::var("HUB_DB_POOL_SIZE").ok().and_then(|v| v.parse().ok()) {
             config.metadata.db_pool_size = size;
         }
-        if let Some(url) = env::var("CAS_BASE_URL").ok() {
+        if let Ok(url) = env::var("CAS_BASE_URL") {
             config.cas.base_url = url;
         }
         if let Some(timeout) = env::var("HUB_CAS_TIMEOUT_SECS").ok().and_then(|t| t.parse().ok()) {
@@ -312,10 +350,13 @@ impl HubConfig {
         if let Some(size) = env::var("HUB_MAX_DOWNLOAD_SIZE").ok().and_then(|t| t.parse().ok()) {
             config.cas.max_download_size = size;
         }
+        if let Some(timeout) = env::var("HUB_CAS_HEALTH_CHECK_TIMEOUT_SECS").ok().and_then(|t| t.parse().ok()) {
+            config.cas.health_check_timeout_seconds = timeout;
+        }
         if let Some(threshold) = env::var("HUB_INLINE_THRESHOLD").ok().and_then(|t| t.parse().ok()) {
             config.storage.inline_threshold_bytes = threshold;
         }
-        if let Some(dir) = env::var("HUB_UPLOAD_TEMP_DIR").ok() {
+        if let Ok(dir) = env::var("HUB_UPLOAD_TEMP_DIR") {
             config.storage.upload_temp_dir = dir;
         }
         if let Some(size) = env::var("HUB_MAX_UPLOAD_SIZE").ok().and_then(|t| t.parse().ok()) {
