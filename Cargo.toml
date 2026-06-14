@@ -52,6 +52,10 @@ serial_test = "3.0"
 name = "errors_test"
 path = "tests/gc/errors_test.rs"
 
+[[test]]
+name = "gc_config_test"
+path = "tests/config/gc_config_test.rs"
+
 [[bench]]
 name = "bench_hash"
 harness = false
