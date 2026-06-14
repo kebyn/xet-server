@@ -86,9 +86,13 @@ pub async fn upload_xorb(
         }));
     }
 
-    // Check available disk space before accepting upload
+    // M7 fix: Use a more reasonable pre-check threshold instead of max_body_size_bytes.
+    // Previously checked for 2GB free space before every upload, rejecting small uploads
+    // on disks with limited (but sufficient) space. Use min(max_body_size, 100MB) as a
+    // practical minimum: enough for most uploads, without being overly conservative.
     let temp_dir = config.storage.resolve_upload_temp_dir();
-    if let Err(e) = check_disk_space(&temp_dir, config.server.max_body_size_bytes() as u64) {
+    let check_bytes = std::cmp::min(config.server.max_body_size_bytes() as u64, 100 * 1024 * 1024);
+    if let Err(e) = check_disk_space(&temp_dir, check_bytes) {
         error!("Insufficient disk space: {}", e);
         GLOBAL_METRICS.record_request(507);
         GLOBAL_METRICS.record_error();
@@ -298,9 +302,77 @@ pub async fn download_xorb(
         }));
     }
 
-    // Fetch xorb from storage
-    // C1 fix: Use xorbs/{hash} format to match conversion pipeline and LFS download.
+    // C2 fix: Use streaming download instead of loading entire xorb into memory.
+    // This prevents DoS via large xorb downloads (xorbs can be up to 512MB).
+    // Try file-based streaming first (local storage), fall back to in-memory for S3.
     let xorb_key = format!("xorbs/{}", hash_str);
+
+    // Try streaming path (local storage: zero-copy file access)
+    match storage.get_path(&xorb_key).await {
+        Ok(Some(path)) => {
+            let file = match tokio::fs::File::open(&path).await {
+                Ok(f) => f,
+                Err(e) => {
+                    error!("Failed to open xorb file for streaming {}: {}", path.display(), e);
+                    GLOBAL_METRICS.record_request(500);
+                    GLOBAL_METRICS.record_error();
+                    GLOBAL_METRICS.record_latency(start);
+                    return HttpResponse::InternalServerError().json(serde_json::json!({
+                        "error": format!("Failed to open xorb file: {}", e)
+                    }));
+                }
+            };
+            let metadata = match file.metadata().await {
+                Ok(m) => m,
+                Err(e) => {
+                    error!("Failed to get xorb file metadata: {}", e);
+                    GLOBAL_METRICS.record_request(500);
+                    GLOBAL_METRICS.record_error();
+                    GLOBAL_METRICS.record_latency(start);
+                    return HttpResponse::InternalServerError().json(serde_json::json!({
+                        "error": format!("Failed to get xorb metadata: {}", e)
+                    }));
+                }
+            };
+            let file_size = metadata.len();
+
+            use tokio_util::io::ReaderStream;
+            let stream = ReaderStream::new(file);
+            let body = actix_web::body::SizedStream::new(file_size, stream);
+
+            info!("Streaming xorb {} ({} bytes)", hash_str, file_size);
+            GLOBAL_METRICS.record_request(200);
+            GLOBAL_METRICS.record_storage_operation();
+            GLOBAL_METRICS.record_download_bytes(file_size);
+            GLOBAL_METRICS.record_latency(start);
+
+            return HttpResponse::Ok()
+                .content_type("application/octet-stream")
+                .body(body);
+        }
+        Ok(None) => {
+            // Non-file backend (S3): fall back to in-memory get
+            // Note: S3 backend should implement get_stream for true streaming
+        }
+        Err(StorageError::NotFound(_)) => {
+            GLOBAL_METRICS.record_request(404);
+            GLOBAL_METRICS.record_latency(start);
+            return HttpResponse::NotFound().json(serde_json::json!({
+                "error": format!("Xorb not found: {}", hash_str)
+            }));
+        }
+        Err(e) => {
+            error!("Failed to get path for xorb {}: {}", hash_str, e);
+            GLOBAL_METRICS.record_request(500);
+            GLOBAL_METRICS.record_error();
+            GLOBAL_METRICS.record_latency(start);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Storage error: {}", e)
+            }));
+        }
+    }
+
+    // Fallback: in-memory download (for S3 and other non-file backends)
     let xorb_data = match storage.get(&xorb_key).await {
         Ok(data) => {
             GLOBAL_METRICS.record_storage_operation();

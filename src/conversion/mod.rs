@@ -351,6 +351,10 @@ impl ConversionPipeline {
         }
 
         // Fall back to downloading to a temp file
+        // I1 fix: Use download_to_path for streaming download (avoids loading entire
+        // blob into RAM). Previously used storage.get() + tokio::fs::write() which
+        // buffered the entire blob in memory before writing.
+        // M5 fix: Use app-specific directory instead of system /tmp for security.
         let temp_dir = std::env::temp_dir().join("xet-conversion");
         tokio::fs::create_dir_all(&temp_dir).await
             .map_err(|e| ConversionError::StorageError(format!("Failed to create temp dir: {}", e)))?;
@@ -371,11 +375,13 @@ impl ConversionPipeline {
         );
         let temp_path = temp_dir.join(format!("blob-{}.tmp", unique_id));
 
-        let data = self.storage.get(object_key).await
-            .map_err(|e| ConversionError::StorageError(e.to_string()))?;
-
-        tokio::fs::write(&temp_path, &data).await
-            .map_err(|e| ConversionError::StorageError(format!("Failed to write temp blob: {}", e)))?;
+        // I1 fix: Use download_to_path for streaming download.
+        // S3 backend overrides this with ByteStream::write_to_path (bounded memory).
+        // Default implementation falls back to get() + write() with a warning.
+        self.storage.download_to_path(object_key, &temp_path).await
+            .map_err(|e| ConversionError::StorageError(
+                format!("Failed to download blob to temp file: {}", e)
+            ))?;
 
         // I2: Return a RAII guard that will delete the temp file when dropped
         let guard = PathGuard::new(temp_path.clone());

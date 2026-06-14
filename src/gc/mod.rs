@@ -332,13 +332,21 @@ impl GarbageCollector {
             return Ok(());
         }
 
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        // I5 fix: Do NOT capture `now` once outside the loop.
+        // Re-fetch current time for each blob to prevent grace period bypass
+        // when GC runs for a long time (many blobs to delete).
+        // Previously, if GC took longer than grace_period_seconds, newly uploaded
+        // blobs could be incorrectly deleted because their `age` was computed against
+        // a stale `now` from before the deletion loop started.
 
         // Delete LFS blobs
         for key in lfs_keys {
+            // I5 fix: Re-fetch current time for each blob
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+
             // Re-check mtime before deletion to prevent race condition
             // where a blob is uploaded between scan and delete phases
             match self.storage.get_mtime(key).await {
@@ -371,6 +379,12 @@ impl GarbageCollector {
 
         // Delete xorbs
         for key in xorb_keys {
+            // I5 fix: Re-fetch current time for each xorb
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+
             // Re-check mtime before deletion to prevent race condition
             match self.storage.get_mtime(key).await {
                 Ok(mtime) => {

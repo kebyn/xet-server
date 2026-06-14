@@ -9,7 +9,11 @@ use crate::types::MerkleHash;
 /// Internal tracking for each chunk added to the builder.
 struct ChunkData {
     chunk_hash: MerkleHash,
-    compressed_data: Vec<u8>,
+    /// M4 fix: Store the serialized chunk bytes (header + compressed data) to avoid
+    /// re-serializing in build(). Previously, add_chunk() serialized to compute the hash,
+    /// then build() re-created the header and serialized again — doubling CPU and allocations.
+    serialized_chunk: Vec<u8>,
+    compressed_len: u32,
     uncompressed_size: u32,
     /// Byte offset in the xorb binary where the NEXT chunk starts
     /// (i.e., end of this chunk including its header).
@@ -92,7 +96,8 @@ impl XorbBuilder {
 
         self.chunks.push(ChunkData {
             chunk_hash,
-            compressed_data,
+            serialized_chunk: chunk_bytes,
+            compressed_len: compressed_len,
             uncompressed_size,
             boundary_offset,
             unpacked_offset,
@@ -117,22 +122,16 @@ impl XorbBuilder {
         let boundary_offsets: Vec<u32> = self.chunks.iter().map(|c| c.boundary_offset).collect();
         let unpacked_offsets: Vec<u32> = self.chunks.iter().map(|c| c.unpacked_offset).collect();
 
-        // Write each chunk: header + compressed data
+        // M4 fix: Write pre-serialized chunk bytes directly (no re-serialization).
+        // Each chunk was fully serialized (header + compressed data) in add_chunk().
         for chunk in &self.chunks {
-            let header = XorbChunkHeader {
-                version: 1,
-                compressed_length: chunk.compressed_data.len() as u32,
-                compression_scheme: self.compression_scheme,
-                uncompressed_length: chunk.uncompressed_size,
-            };
-            header.serialize(&mut buf)?;
-            buf.write_all(&chunk.compressed_data)?;
+            buf.extend_from_slice(&chunk.serialized_chunk);
         }
 
         // Compute the xorb hash from (chunk_hash, serialized_chunk_size) pairs.
         // verify_xorb uses the on-disk byte length of each chunk region as the size.
         let chunk_info: Vec<(MerkleHash, u64)> = self.chunks.iter().map(|c| {
-            let serialized_size = XorbChunkHeader::SIZE as u64 + c.compressed_data.len() as u64;
+            let serialized_size = c.serialized_chunk.len() as u64;
             (c.chunk_hash, serialized_size)
         }).collect();
 
@@ -142,7 +141,7 @@ impl XorbBuilder {
             .map(|c| c.uncompressed_size as u64)
             .sum();
         let total_compressed_size: u64 = self.chunks.iter()
-            .map(|c| c.compressed_data.len() as u64)
+            .map(|c| c.compressed_len as u64)
             .sum();
 
         // Build and append the footer
@@ -169,7 +168,7 @@ impl XorbBuilder {
     /// Compute the xorb hash from accumulated chunks without finalizing.
     pub fn xorb_hash(&self) -> MerkleHash {
         let chunk_info: Vec<(MerkleHash, u64)> = self.chunks.iter().map(|c| {
-            let serialized_size = XorbChunkHeader::SIZE as u64 + c.compressed_data.len() as u64;
+            let serialized_size = c.serialized_chunk.len() as u64;
             (c.chunk_hash, serialized_size)
         }).collect();
         xorb_hash(&chunk_info)

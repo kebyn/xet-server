@@ -3,7 +3,6 @@
 //! 提供服务器性能指标的收集和暴露功能
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 use std::time::Instant;
 
 /// 全局指标收集器
@@ -212,9 +211,11 @@ impl Default for Metrics {
     }
 }
 
-// 全局指标实例（使用 lazy_static）
+// M1 fix: Remove redundant Arc wrapper. lazy_static already provides global shared
+// access via &'static reference. All call sites use method calls (record_request etc.)
+// which work with auto-deref on &Metrics.
 lazy_static::lazy_static! {
-    pub static ref GLOBAL_METRICS: Arc<Metrics> = Arc::new(Metrics::new());
+    pub static ref GLOBAL_METRICS: Metrics = Metrics::new();
 }
 
 #[cfg(test)]

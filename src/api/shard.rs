@@ -129,21 +129,37 @@ pub async fn upload_shard(
         }));
     }
 
-    // Parse shard from temp file on disk (header+footer only for upload verification)
-    let temp_path = temp_file.path().to_path_buf();
-    let shard = match MDBShardFile::parse_header_footer_from_file(&temp_path) {
-        Ok(s) => s,
+    // C1 fix: Read and fully parse the shard BEFORE storing (put_from_path moves the file).
+    // The full parse validates format AND provides file_hashes/chunk_mappings for index registration.
+    // (Previously used parse_header_footer_from_file which returned empty data sections,
+    // causing register_shard to be a no-op — uploaded shards were unusable for reconstruction.)
+    let temp_path_for_read = temp_file.path().to_path_buf();
+    let shard_data = match std::fs::read(&temp_path_for_read) {
+        Ok(data) => data,
         Err(e) => {
-            error!("Failed to parse shard: {}", e);
-            GLOBAL_METRICS.record_request(400);
+            error!("Failed to read shard for indexing: {}", e);
+            GLOBAL_METRICS.record_request(500);
+            GLOBAL_METRICS.record_error();
             GLOBAL_METRICS.record_latency(start);
-            return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": format!("Invalid shard format: {}", e)
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to read shard data: {}", e)
             }));
         }
     };
 
-    // Use streaming-computed hash as shard ID (raw_data is empty in parse_header_footer_from_file)
+    let shard = match MDBShardFile::parse(&shard_data) {
+        Ok(s) => s,
+        Err(e) => {
+            error!("Failed to parse shard for indexing: {}", e);
+            GLOBAL_METRICS.record_request(400);
+            GLOBAL_METRICS.record_latency(start);
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Invalid shard format (full parse failed): {}", e)
+            }));
+        }
+    };
+
+    // Use streaming-computed hash as shard ID
     let shard_id = hasher.finalize().to_hex();
     let shard_key = format!("shards/{}", shard_id);
 
@@ -184,19 +200,19 @@ pub async fn upload_shard(
         }));
     }
 
-    // Update metadata index
-    let file_hashes: Vec<String> = shard.file_hashes().iter().map(|h| h.to_string()).collect();
+    // Update metadata index with actual file/chunk data from full parse
+    let file_hashes: Vec<String> = shard.file_hashes().iter().map(|h| h.to_hex()).collect();
     let chunk_mappings: Vec<(String, String, u32)> = shard
         .chunk_mappings()
         .iter()
-        .map(|(c, x, i)| (c.to_string(), x.to_string(), *i))
+        .map(|(c, x, i)| (c.to_hex(), x.to_hex(), *i))
         .collect();
 
-    index.register_shard(shard_id.clone(), file_hashes, chunk_mappings);
+    index.register_shard(shard_id.clone(), file_hashes.clone(), chunk_mappings);
 
     info!("Uploaded shard {} with {} files and {} chunks",
         shard_id,
-        shard.file_hashes().len(),
+        file_hashes.len(),
         shard.chunk_mappings().len()
     );
 
