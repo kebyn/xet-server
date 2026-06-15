@@ -263,27 +263,17 @@ To transition from dry-run to actual deletion:
 
 ---
 
-## Legacy Settings
+## Removed Legacy Settings
 
-These environment variables are used by the legacy GC implementation in
-`src/gc/mod.rs`. They will be removed in a future release once the
-incremental GC fully replaces the legacy path.
+The following environment variables were used by the legacy GC implementation
+that depended on Hub's `/internal/referenced-hashes` endpoint. That endpoint
+has been removed, and the incremental GC is fully self-contained. These
+variables are no longer recognized:
 
-| Variable | Type | Default | Description |
-|----------|------|---------|-------------|
-| `GC_HUB_BASE_URL` | string | `http://localhost:8080` | Hub API base URL for `/internal/referenced-hashes` endpoint. |
-| `GC_HUB_INTERNAL_TOKEN` | string | (empty) | Authentication token for Hub's internal endpoints. |
-| `GC_HTTP_TIMEOUT_SECONDS` | u64 | `300` | HTTP timeout for GC requests to Hub. |
-| `GC_GRACE_PERIOD_SECONDS` | u64 | `600` | Legacy flat grace period (superseded by `GC_GRACE_ABSOLUTE_SECONDS`). |
-
-### Deprecation Notice
-
-The incremental GC eliminates the need for Hub API calls by using sidecar
-files for reference tracking. Once the incremental GC is fully deployed:
-
-- `GC_HUB_BASE_URL`, `GC_HUB_INTERNAL_TOKEN`, and `GC_HTTP_TIMEOUT_SECONDS`
-  will be removed.
-- `GC_GRACE_PERIOD_SECONDS` will be removed (use `GC_GRACE_ABSOLUTE_SECONDS`).
+- `GC_HUB_BASE_URL` — was the Hub API base URL for `/internal/referenced-hashes`
+- `GC_HUB_INTERNAL_TOKEN` — was the authentication token for Hub internal endpoints
+- `GC_HTTP_TIMEOUT_SECONDS` — was the HTTP timeout for GC requests to Hub
+- `GC_GRACE_PERIOD_SECONDS` — legacy flat grace period (use `GC_GRACE_ABSOLUTE_SECONDS`)
 
 ---
 
