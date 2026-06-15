@@ -1022,7 +1022,7 @@ fn create_reconstruction_stream(
                 let temp_dir = temp_dir_clone.clone();
                 tokio::spawn(async move {
                     let xorb_key = format!("xorbs/{}", xorb_hash);
-                    let temp_path = temp_dir.join(format!("xorb-{}-{}.tmp", xorb_hash, std::process::id()));
+                    let temp_path = temp_dir.join(format!("xorb-{}-{}.tmp", xorb_hash, uuid::Uuid::new_v4()));
 
                     // I3 fix: Use download_to_path for streaming download (bounded memory)
                     storage.download_to_path(&xorb_key, &temp_path).await
@@ -1053,7 +1053,7 @@ fn create_reconstruction_stream(
                     result?
                 } else {
                     let xorb_key = format!("xorbs/{}", xorb_hash);
-                    let temp_path = temp_dir.join(format!("xorb-{}-{}.tmp", xorb_hash, std::process::id()));
+                    let temp_path = temp_dir.join(format!("xorb-{}-{}.tmp", xorb_hash, uuid::Uuid::new_v4()));
                     storage.download_to_path(&xorb_key, &temp_path).await
                         .map_err(|e| format!("Failed to download xorb {}: {}", xorb_hash, e))?;
                     debug!(
