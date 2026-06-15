@@ -372,8 +372,11 @@ async fn test_streaming_shard_upload() {
     let storage: Box<dyn StorageBackend> = Box::new(
         LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap(),
     );
+    let storage_arc: std::sync::Arc<Box<dyn StorageBackend>> = std::sync::Arc::new(storage);
 
     let index = MetadataIndex::new();
+    let ref_tracker: std::sync::Arc<dyn xet_server::gc::reference_tracker::ReferenceTracker> =
+        std::sync::Arc::new(xet_server::gc::reference_tracker::s3::SidecarReferenceTracker::new(storage_arc.clone()));
 
     // Create a valid shard by serializing header + padding + footer
     use xet_server::format::shard::{MDBShardFileFooter, MDBShardFileHeader};
@@ -412,10 +415,11 @@ async fn test_streaming_shard_upload() {
 
     let app = test::init_service(
         App::new()
-            .app_data(web::Data::new(storage))
+            .app_data(web::Data::from(storage_arc))
             .app_data(web::Data::new(index))
             .app_data(web::Data::new(ctx.auth_verifier))
             .app_data(web::Data::new(ctx.config))
+            .app_data(web::Data::new(ref_tracker))
             .route(
                 "/v1/shards",
                 web::post().to(xet_server::api::shard::upload_shard),

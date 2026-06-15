@@ -10,7 +10,9 @@ fn test_gc_config_defaults() {
     assert_eq!(config.bloom.false_positive_rate, 0.001);
     assert_eq!(config.scanner.page_size, 1000);
     assert_eq!(config.grace.absolute_seconds, 3600);
-    assert_eq!(config.grace.soft_cycles, 2);
+    // I4 fix: soft_cycles default changed from 2 to 0 because it's not implemented.
+    // A non-zero default would create a false sense of safety.
+    assert_eq!(config.grace.soft_cycles, 0);
 }
 
 #[test]

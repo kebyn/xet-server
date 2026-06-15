@@ -45,17 +45,21 @@ async fn test_full_upload_workflow() {
     let storage: Box<dyn StorageBackend> = Box::new(
         LocalStorage::new(dir.path().to_str().unwrap()).unwrap()
     );
+    let storage_arc: std::sync::Arc<Box<dyn StorageBackend>> = std::sync::Arc::new(storage);
 
     let index = MetadataIndex::new();
     let ctx: TestContext = test_config_with_new_key();
     let token = test_token_for_keypair(&ctx.keypair, "read write");
+    let ref_tracker: std::sync::Arc<dyn xet_server::gc::reference_tracker::ReferenceTracker> =
+        std::sync::Arc::new(xet_server::gc::reference_tracker::s3::SidecarReferenceTracker::new(storage_arc.clone()));
 
     let app = test::init_service(
         App::new()
-            .app_data(web::Data::new(storage))
+            .app_data(web::Data::from(storage_arc))
             .app_data(web::Data::new(index))
             .app_data(web::Data::new(ctx.auth_verifier))
             .app_data(web::Data::new(ctx.config))
+            .app_data(web::Data::new(ref_tracker))
             .route("/v1/xorbs/{prefix}/{hash}", web::post().to(xet_server::api::xorb::upload_xorb))
             .route("/v1/shards", web::post().to(xet_server::api::shard::upload_shard))
             .route("/v2/reconstructions/{file_id}", web::get().to(xet_server::api::reconstruction::get_reconstruction))

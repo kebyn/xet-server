@@ -7,6 +7,7 @@ use crate::chunking::{ChunkConfig, StreamingChunker};
 use crate::config::ConversionConfig;
 use crate::format::shard_builder::{FileSegment, ShardBuilder, XorbChunkBuildEntry};
 use crate::format::xorb_builder::XorbBuilder;
+use crate::gc::reference_tracker::ReferenceTracker;
 use crate::hash::compute_data_hash;
 use crate::index::MetadataIndex;
 use crate::storage::StorageBackend;
@@ -90,6 +91,11 @@ pub struct ConversionPipeline {
     storage: Arc<Box<dyn StorageBackend>>,
     index: Arc<MetadataIndex>,
     config: ConversionConfig,
+    /// I5 fix: Optional reference tracker for proactive sidecar generation.
+    /// When present, the pipeline generates a `.refs.json` sidecar immediately
+    /// after storing the shard, so the first GC scan can use the fast Layer 1
+    /// path instead of parsing every shard (Layer 2).
+    ref_tracker: Option<Arc<dyn ReferenceTracker>>,
 }
 
 impl ConversionPipeline {
@@ -98,7 +104,13 @@ impl ConversionPipeline {
         index: Arc<MetadataIndex>,
         config: ConversionConfig,
     ) -> Self {
-        Self { storage, index, config }
+        Self { storage, index, config, ref_tracker: None }
+    }
+
+    /// Set the reference tracker for proactive sidecar generation.
+    pub fn with_ref_tracker(mut self, ref_tracker: Arc<dyn ReferenceTracker>) -> Self {
+        self.ref_tracker = Some(ref_tracker);
+        self
     }
 
     /// Convert a raw blob to xorb/shard format.
@@ -322,7 +334,23 @@ impl ConversionPipeline {
             chunk_mappings,
         );
 
-        // 9. Delete raw blob (if configured)
+        // 9. I5 fix: Proactively generate sidecar for GC reference tracking.
+        // This ensures the first GC scan uses the fast Layer 1 path (read sidecar)
+        // instead of Layer 2 (download + parse shard). Without this, every newly
+        // converted shard requires a full parse on first GC scan.
+        if let Some(ref tracker) = self.ref_tracker {
+            let lfs_refs = vec![oid.to_string()];
+            let xorb_refs = vec![xorb_hash.clone()];
+            if let Err(e) = tracker.record_references(&shard_hash, &lfs_refs, &xorb_refs).await {
+                // Non-fatal: GC will fall back to Layer 2 (parse shard) on next scan
+                warn!("Failed to generate sidecar for shard {}: {} (non-fatal)", shard_hash, e);
+            } else {
+                info!("Generated sidecar for shard {} ({} lfs, {} xorb refs)",
+                    shard_hash, lfs_refs.len(), xorb_refs.len());
+            }
+        }
+
+        // 10. Delete raw blob (if configured)
         if self.config.delete_raw_after_conversion {
             match self.storage.delete(&object_key).await {
                 Ok(_) => info!("Deleted raw blob: {}", oid),

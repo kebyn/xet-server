@@ -5,11 +5,13 @@
 use actix_web::{web, HttpResponse};
 use futures_util::StreamExt;
 use serde::Serialize;
+use std::sync::Arc;
 use tracing::{error, info};
 
 use crate::api::auth::{authorize_endpoint, extract_token_from_request, AuthVerifier};
 use crate::config::ServerConfig;
 use crate::format::shard::MDBShardFile;
+use crate::gc::reference_tracker::ReferenceTracker;
 use crate::index::MetadataIndex;
 use crate::metrics::GLOBAL_METRICS;
 use crate::storage::StorageBackend;
@@ -31,6 +33,7 @@ pub async fn upload_shard(
     index: web::Data<MetadataIndex>,
     auth: web::Data<AuthVerifier>,
     config: web::Data<ServerConfig>,
+    ref_tracker: web::Data<Arc<dyn ReferenceTracker>>,
     req: actix_web::HttpRequest,
 ) -> HttpResponse {
     let start = std::time::Instant::now();
@@ -210,6 +213,25 @@ pub async fn upload_shard(
 
     index.register_shard(shard_id.clone(), file_hashes.clone(), chunk_mappings);
 
+    // I5 fix: Proactively generate sidecar for GC reference tracking.
+    // This ensures the first GC scan uses the fast Layer 1 path (read sidecar)
+    // instead of Layer 2 (download + parse shard).
+    let xorb_refs: Vec<String> = shard
+        .chunk_mappings()
+        .iter()
+        .map(|(_, x, _)| x.to_hex())
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    if let Err(e) = ref_tracker.record_references(&shard_id, &file_hashes, &xorb_refs).await {
+        // Non-fatal: GC will fall back to Layer 2 (parse shard) on next scan
+        tracing::warn!(
+            shard_id = %shard_id,
+            error = %e,
+            "Failed to generate sidecar for uploaded shard (non-fatal)"
+        );
+    }
+
     info!("Uploaded shard {} with {} files and {} chunks",
         shard_id,
         file_hashes.len(),
@@ -294,17 +316,21 @@ mod tests {
         let storage: Box<dyn StorageBackend> = Box::new(
             LocalStorage::new(dir.path().to_str().unwrap()).unwrap()
         );
+        let storage_arc: Arc<Box<dyn StorageBackend>> = Arc::new(storage);
 
         let (_, auth, config) = create_test_config();
 
         let index = MetadataIndex::new();
+        let ref_tracker: Arc<dyn ReferenceTracker> =
+            Arc::new(crate::gc::reference_tracker::s3::SidecarReferenceTracker::new(storage_arc.clone()));
 
         let app = test::init_service(
             App::new()
-                .app_data(web::Data::new(storage))
+                .app_data(web::Data::from(storage_arc))
                 .app_data(web::Data::new(index))
                 .app_data(web::Data::new(auth))
                 .app_data(web::Data::new(config))
+                .app_data(web::Data::new(ref_tracker))
                 .route("/v1/shards", web::post().to(upload_shard))
         ).await;
 
@@ -323,18 +349,22 @@ mod tests {
         let storage: Box<dyn StorageBackend> = Box::new(
             LocalStorage::new(dir.path().to_str().unwrap()).unwrap()
         );
+        let storage_arc: Arc<Box<dyn StorageBackend>> = Arc::new(storage);
 
         let (kp, auth, config) = create_test_config();
         let token = create_test_token(&kp, "read write");
 
         let index = MetadataIndex::new();
+        let ref_tracker: Arc<dyn ReferenceTracker> =
+            Arc::new(crate::gc::reference_tracker::s3::SidecarReferenceTracker::new(storage_arc.clone()));
 
         let app = test::init_service(
             App::new()
-                .app_data(web::Data::new(storage))
+                .app_data(web::Data::from(storage_arc))
                 .app_data(web::Data::new(index))
                 .app_data(web::Data::new(auth))
                 .app_data(web::Data::new(config))
+                .app_data(web::Data::new(ref_tracker))
                 .route("/v1/shards", web::post().to(upload_shard))
         ).await;
 

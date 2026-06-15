@@ -131,38 +131,95 @@ export XET_MIN_CONVERSION_SIZE=131072       # 128KB
 export XET_MAX_CONVERSION_SIZE=1073741824  # 1GB
 ```
 
-### 垃圾回收设置
+### 增量垃圾回收设置（v2）
+
+> **注意**：Xet Server 使用增量 GC v2 系统，采用 Bloom Filter 和 sidecar 引用追踪模式。旧版 Legacy GC 配置（`GC_GRACE_PERIOD_SECONDS`、`GC_HUB_BASE_URL` 等）已废弃。
+
+#### 基本设置
 
 | 环境变量 | 描述 | 默认值 | 必需 |
 |---------|------|--------|------|
 | `GC_ENABLED` | 启用后台垃圾回收任务 | `false` | 否 |
 | `GC_INTERVAL_SECONDS` | GC 运行间隔（秒） | `3600` (1 小时) | 否 |
-| `GC_GRACE_PERIOD_SECONDS` | 新上传 blob 的宽限期（秒），在此期间不会被删除 | `600` (10 分钟) | 否 |
 | `GC_DRY_RUN` | 试运行模式，只报告统计信息但不实际删除 | `true` | 否 |
-| `GC_HUB_BASE_URL` | Hub API 服务器 URL，用于查询被引用的哈希列表 | `http://localhost:8080` | 否 |
-| `GC_HUB_INTERNAL_TOKEN` | Hub 内部认证令牌，用于访问 /internal/* 端点 | 空 | 是* |
-| `GC_HTTP_TIMEOUT_SECONDS` | GC 请求 Hub API 的 HTTP 超时（秒） | `300` (5 分钟) | 否 |
+| `GC_DATA_DIR` | GC 工作目录（存储 checkpoints、bloom filter、leases） | `/var/lib/cas/gc` | 否 |
+
+#### Bloom Filter 设置
+
+| 环境变量 | 描述 | 默认值 | 必需 |
+|---------|------|--------|------|
+| `GC_BLOOM_EXPECTED_ITEMS` | Bloom filter 预期插入数量（建议设置为实际 chunk 数量的 1.5 倍） | `10000000` (10M) | 否 |
+| `GC_BLOOM_FALSE_POSITIVE_RATE` | Bloom filter 误报率（0.0-1.0，越低占用内存越多） | `0.001` | 否 |
+| `GC_BLOOM_REBUILD_THRESHOLD` | Bloom filter 占用率达到此阈值时自动重建（0.0-1.0） | `0.8` | 否 |
+
+#### 扫描器设置
+
+| 环境变量 | 描述 | 默认值 | 必需 |
+|---------|------|--------|------|
+| `GC_SCANNER_PAGE_SIZE` | 每页扫描对象数（分页扫描，支持崩溃恢复） | `1000` | 否 |
+| `GC_SCANNER_CHECKPOINT_INTERVAL` | 强制 checkpoint 间隔（每 N 个对象强制保存进度） | `10000` | 否 |
+| `GC_SCANNER_MAX_DURATION_SECONDS` | 单次扫描最大时长（秒），防止扫描器长时间占用资源 | `1800` (30分钟) | 否 |
+
+#### 宽限期设置
+
+| 环境变量 | 描述 | 默认值 | 必需 |
+|---------|------|--------|------|
+| `GC_GRACE_ABSOLUTE_SECONDS` | 绝对宽限期（秒），新上传的 blob 在此期间不会被删除 | `3600` (1小时) | 否 |
+| `GC_GRACE_SOFT_CYCLES` | 软宽限期（周期数），blob 需经过 N 个完整 GC 周期后才可删除 | `2` | 否 |
+
+#### 多节点协调设置
+
+| 环境变量 | 描述 | 默认值 | 必需 |
+|---------|------|--------|------|
+| `GC_LEASE_TTL_SECONDS` | 多节点 GC lease TTL（秒），防止多节点同时扫描同一分区 | `3600` (1小时) | 否 |
+| `GC_LEASE_RENEW_INTERVAL_SECONDS` | lease 续期间隔（秒），应远小于 TTL | `600` (10分钟) | 否 |
+
+#### 引用追踪设置
+
+| 环境变量 | 描述 | 默认值 | 必需 |
+|---------|------|--------|------|
+| `GC_REFERENCE_TRACKER_MODE` | 引用追踪模式：`sidecar`（查询 Hub）或 `local_cache_db`（本地缓存） | `sidecar` | 否 |
+| `GC_LOCAL_CACHE_DB_PATH` | 本地缓存数据库路径（仅 `local_cache_db` 模式使用） | `/var/lib/cas/gc/refs.db` | 否 |
+
+#### 删除操作设置
+
+| 环境变量 | 描述 | 默认值 | 必需 |
+|---------|------|--------|------|
+| `GC_DELETE_BATCH_SIZE` | 每批次删除数量上限，限制单个 GC 周期的 I/O 影响 | `100` | 否 |
+| `GC_DELETE_MAX_RETRIES` | 删除失败最大重试次数 | `3` | 否 |
 
 **说明**：
-- GC 定期扫描存储后端，查找不再被任何文件引用的孤立 blob 并删除
-- `GC_GRACE_PERIOD_SECONDS` 防止竞态条件：blob 已上传但 commit 尚未写入文件树时，blob 不应被删除
+- **增量 GC v2** 使用 Bloom Filter 进行 O(1) 概率性成员测试，大幅降低内存和 I/O 成本
+- **两层宽限期** 防止过早删除：`GC_GRACE_ABSOLUTE_SECONDS`（绝对年龄）+ `GC_GRACE_SOFT_CYCLES`（观测周期数）
+- **增量扫描** 支持崩溃恢复，扫描进度定期保存到 checkpoint，重启后从断点继续
+- **多节点协调** 通过 S3-based 租约确保单节点运行，避免冲突
+- **Sidecar 引用追踪**：每个 shard 写入 `.refs.json` 文件存储引用集
 - `GC_DRY_RUN=true` 时，GC 只会记录将删除哪些 blob，但不会实际删除，适合初次部署时测试
-- `GC_HUB_INTERNAL_TOKEN` 需要 Hub 端生成具有 `internal` scope 的令牌
 - 建议生产环境设置 `GC_DRY_RUN=false` 前先以试运行模式观察几天
 
 **示例**：
 ```bash
-# 启用 GC（生产环境）
+# 基本配置（生产环境）
 export GC_ENABLED=true
 export GC_INTERVAL_SECONDS=3600
-export GC_GRACE_PERIOD_SECONDS=600
 export GC_DRY_RUN=false
-export GC_HUB_BASE_URL=http://localhost:8080
-export GC_HUB_INTERNAL_TOKEN=hf_xxx_internal_token
+export GC_DATA_DIR=/data/gc
 
-# 试运行模式（测试）
+# Bloom Filter 调优（根据实际 chunk 数量调整）
+export GC_BLOOM_EXPECTED_ITEMS=15000000  # 15M chunks
+export GC_BLOOM_FALSE_POSITIVE_RATE=0.001
+
+# 宽限期配置（防止误删）
+export GC_GRACE_ABSOLUTE_SECONDS=3600    # 1 小时
+export GC_GRACE_SOFT_CYCLES=2            # 2 个 GC 周期
+
+# 试运行模式（初次部署测试）
 export GC_ENABLED=true
 export GC_DRY_RUN=true
+
+# 多节点部署
+export GC_LEASE_TTL_SECONDS=3600
+export GC_LEASE_RENEW_INTERVAL_SECONDS=600
 ```
 
 ### 完整性验证设置

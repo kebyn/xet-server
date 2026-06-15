@@ -46,6 +46,10 @@ struct JwtHeader {
 }
 
 /// Claims embedded in a xet JWT token
+///
+/// **IMPORTANT:** This struct must stay in sync with `hub/src/auth/xet_signer.rs::XetClaims`.
+/// Any field changes here must be mirrored there (and vice versa) to maintain
+/// wire compatibility between CAS and Hub token verification.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct XetClaims {
     /// Subject (user identity)

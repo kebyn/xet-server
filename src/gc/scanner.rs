@@ -40,6 +40,11 @@ pub struct IncrementalScanner {
     storage: Arc<Box<dyn StorageBackend>>,
     ref_tracker: Arc<dyn ReferenceTracker>,
     config: ScannerConfig,
+    /// I2 fix: Limits concurrent sidecar regeneration tasks.
+    /// Without this, first GC scan on a large store could spawn thousands of
+    /// concurrent S3 writes (one per missing sidecar), risking connection pool
+    /// exhaustion or S3 rate limiting.
+    sidecar_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 impl IncrementalScanner {
@@ -53,6 +58,9 @@ impl IncrementalScanner {
             storage,
             ref_tracker,
             config,
+            // I2 fix: Allow at most 10 concurrent sidecar regenerations.
+            // This bounds S3 write concurrency while still allowing parallelism.
+            sidecar_semaphore: Arc::new(tokio::sync::Semaphore::new(10)),
         }
     }
 
@@ -212,12 +220,18 @@ impl IncrementalScanner {
 
         match self.extract_references_from_shard(shard_hash, &shard_data) {
             Ok(refs) => {
-                // Layer 2 succeeded — asynchronously regenerate sidecar (best effort)
+                // Layer 2 succeeded — regenerate sidecar asynchronously (best effort).
+                // I2 fix: Use semaphore to limit concurrent sidecar writes.
+                // Acquire a permit before spawning; the permit is moved into the task
+                // and released when the task completes (on drop).
+                let semaphore = self.sidecar_semaphore.clone();
                 let ref_tracker = self.ref_tracker.clone();
                 let shard_hash_owned = shard_hash.to_string();
                 let lfs_refs = refs.lfs_refs.clone();
                 let xorb_refs = refs.xorb_refs.clone();
                 tokio::spawn(async move {
+                    // Acquire permit — blocks if 10 sidecar writes are already in flight
+                    let _permit = semaphore.acquire().await;
                     if let Err(e) = ref_tracker.record_references(
                         &shard_hash_owned,
                         &lfs_refs,

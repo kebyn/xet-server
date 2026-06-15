@@ -12,7 +12,14 @@ struct JwtHeader {
 }
 
 /// Claims for Xet access tokens
-#[derive(Debug, Serialize, Deserialize)]
+///
+/// I6 fix: Added Clone, PartialEq, Eq derives to match CAS's XetClaims definition.
+/// Both Hub and CAS define XetClaims with identical fields and serde annotations,
+/// ensuring wire compatibility. The extra derives enable test assertions and cloning.
+///
+/// **IMPORTANT:** This struct must stay in sync with `src/api/auth.rs::XetClaims` in
+/// the CAS crate. Any field changes here must be mirrored there (and vice versa).
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct XetClaims {
     pub sub: String,
     pub scope: String,
