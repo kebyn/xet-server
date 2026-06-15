@@ -30,6 +30,7 @@ use super::{StorageBackend, StorageError, StorageResult};
 use async_trait::async_trait;
 use aws_sdk_s3::{Client, Config};
 use aws_sdk_s3::config::Credentials;
+use aws_sdk_s3::error::ProvideErrorMetadata;
 use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 use bytes::Bytes;
 use std::path::Path;
@@ -435,7 +436,7 @@ impl StorageBackend for S3Storage {
             .send()
             .await
             .map_err(|e| {
-                if e.to_string().contains("NoSuchKey") {
+                if e.code() == Some("NoSuchKey") || e.code() == Some("NotFound") {
                     StorageError::NotFound(key.to_string())
                 } else {
                     StorageError::Internal(format!("S3 get failed: {}", e))
@@ -470,7 +471,7 @@ impl StorageBackend for S3Storage {
             .send()
             .await
             .map_err(|e| {
-                if e.to_string().contains("NoSuchKey") {
+                if e.code() == Some("NoSuchKey") || e.code() == Some("NotFound") {
                     StorageError::NotFound(key.to_string())
                 } else {
                     StorageError::Internal(format!("S3 get failed: {}", e))
@@ -530,7 +531,7 @@ impl StorageBackend for S3Storage {
             .await
         {
             Ok(_) => Ok(true),
-            Err(e) if e.to_string().contains("NotFound") => Ok(false),
+            Err(e) if e.code() == Some("NotFound") || e.code() == Some("NoSuchKey") => Ok(false),
             Err(e) => Err(StorageError::Internal(format!("S3 head failed: {}", e))),
         }
     }
@@ -634,7 +635,7 @@ impl StorageBackend for S3Storage {
             .send()
             .await
             .map_err(|e| {
-                if e.to_string().contains("NotFound") {
+                if e.code() == Some("NotFound") || e.code() == Some("NoSuchKey") {
                     StorageError::NotFound(key.to_string())
                 } else {
                     StorageError::Internal(format!("S3 head_object failed: {}", e))
@@ -659,7 +660,7 @@ impl StorageBackend for S3Storage {
             .send()
             .await
             .map_err(|e| {
-                if e.to_string().contains("NotFound") {
+                if e.code() == Some("NotFound") || e.code() == Some("NoSuchKey") {
                     StorageError::NotFound(key.to_string())
                 } else {
                     StorageError::Internal(format!("S3 head_object failed: {}", e))
@@ -753,9 +754,8 @@ impl StorageBackend for S3Storage {
                 Ok(new_etag)
             }
             Err(e) => {
-                let err_str = e.to_string();
                 // S3 returns PreconditionFailed for If-None-Match / If-Match failures
-                if err_str.contains("PreconditionFailed") || err_str.contains("precondition") {
+                if e.code() == Some("PreconditionFailed") {
                     Err(StorageError::ConditionFailed)
                 } else {
                     Err(StorageError::Internal(format!("S3 conditional put failed: {}", e)))
@@ -774,7 +774,7 @@ impl StorageBackend for S3Storage {
             .send()
             .await
             .map_err(|e| {
-                if e.to_string().contains("NotFound") {
+                if e.code() == Some("NotFound") || e.code() == Some("NoSuchKey") {
                     StorageError::NotFound(key.to_string())
                 } else {
                     StorageError::Internal(format!("S3 head_object failed: {}", e))
@@ -801,10 +801,9 @@ impl StorageBackend for S3Storage {
         match result {
             Ok(_) => Ok(()),
             Err(e) => {
-                let err_str = e.to_string();
-                if err_str.contains("PreconditionFailed") || err_str.contains("precondition") {
+                if e.code() == Some("PreconditionFailed") {
                     Err(StorageError::ConditionFailed)
-                } else if err_str.contains("NoSuchKey") || err_str.contains("NotFound") {
+                } else if e.code() == Some("NoSuchKey") || e.code() == Some("NotFound") {
                     // Object already gone — treat as success (idempotent)
                     Ok(())
                 } else {
