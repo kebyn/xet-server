@@ -172,4 +172,14 @@ pub trait MetadataStore: Send + Sync {
         entries: &[FileEntry],
         expected_parent: Option<&str>,
     ) -> Result<(), MetadataError>;
+
+    /// Check if a user is a member of a namespace (for organization/team support).
+    /// Default: returns false (no organization support). Override to add team membership checks.
+    async fn is_namespace_member(
+        &self,
+        _username: &str,
+        _namespace: &str,
+    ) -> Result<bool, MetadataError> {
+        Ok(false)
+    }
 }

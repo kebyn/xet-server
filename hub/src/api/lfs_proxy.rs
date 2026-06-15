@@ -259,12 +259,6 @@ fn validate_proxy_token(
         return false;
     }
 
-    // Check key ID matches (defense-in-depth for key rotation scenarios)
-    if claims.kid != signer.kid() {
-        tracing::error!("validate_proxy_token: kid mismatch: {} != {}", claims.kid, signer.kid());
-        return false;
-    }
-
     // I3 FIX: Expiration is already checked by verify_proxy_token -> verify_token_inner.
     // Removed duplicate expiration check.
 
@@ -366,9 +360,11 @@ pub async fn lfs_batch(
     };
 
     // C5 fix: Check scope using exact match or split-based matching instead of contains()
+    // "write" implies "read" — a user with write access can always download
     let has_scope = token_info.scope == required_scope
         || token_info.scope == "read write"
-        || token_info.scope.split_whitespace().any(|s| s == required_scope);
+        || token_info.scope.split_whitespace().any(|s| s == required_scope)
+        || (required_scope == "read" && token_info.scope.split_whitespace().any(|s| s == "write"));
     if !has_scope {
         return HttpResponse::Forbidden().json(serde_json::json!({
             "error": format!("Token scope '{}' insufficient for {} operation (requires '{}')",

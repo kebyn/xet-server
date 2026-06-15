@@ -122,9 +122,17 @@ async fn handle_resolve(
                                 .insert_header(("ETag", format!("\"{}\"", file_entry.cas_hash)))
                                 .body(data);
                         }
+                        Err(crate::error::HubError::NotFound(_)) => {
+                            // I8 fix: If CAS explicitly returns 404, propagate it to client
+                            // instead of redirecting to a URL that will also 404
+                            return HttpResponse::NotFound().json(serde_json::json!({
+                                "error": format!("File content not found in storage: {}", file_entry.cas_hash),
+                                "error_type": "NotFoundError"
+                            }));
+                        }
                         Err(e) => {
                             tracing::warn!("CAS inline fetch failed for {}: {}", file_entry.cas_hash, e);
-                            // Fall through to redirect
+                            // Fall through to redirect for transient errors (network, timeout)
                         }
                     }
                 }

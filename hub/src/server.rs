@@ -29,6 +29,8 @@ pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
         .await
         .map_err(|e| std::io::Error::other(format!("Failed to connect to database: {}", e)))?;
 
+    let shared_pool_for_shutdown = shared_pool.clone();
+
     tracing::info!(
         "Using shared SQLite connection pool ({} connections) for TokenStore + MetadataStore",
         config.metadata.db_pool_size
@@ -243,6 +245,15 @@ pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
             )
     })
     .bind(&bind_addr)?
+    // M3 fix: Request timeout prevents slow clients from holding connections indefinitely
+    .client_request_timeout(std::time::Duration::from_secs(300))
+    .client_disconnect_timeout(std::time::Duration::from_secs(5))
     .run()
-    .await
+    .await?;
+
+    // I3 fix: Gracefully close connection pool on shutdown to flush pending transactions
+    shared_pool_for_shutdown.close().await;
+    tracing::info!("Database connection pool closed");
+
+    Ok(())
 }

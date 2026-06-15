@@ -5,7 +5,6 @@
 
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 use sqlx::FromRow;
-use sha2::{Sha256, Digest};
 
 /// Token information returned after validation
 #[derive(Debug, Clone)]
@@ -348,11 +347,18 @@ impl TokenStore {
             .collect())
     }
 
-    /// Hash a token using SHA256 with server-side salt.
+    /// Hash a token using HMAC-SHA256 with server-side salt.
     /// M4 fix: Salt prevents offline dictionary attacks if database is compromised.
+    /// M2 fix: Uses HMAC instead of simple concatenation for cryptographic soundness.
     fn hash_token(&self, token: &str) -> String {
-        let salted_token = format!("{}{}", self.hash_salt, token);
-        hex::encode(Sha256::digest(salted_token.as_bytes()))
+        use sha2::Sha256;
+        use hmac::{Hmac, Mac};
+        type HmacSha256 = Hmac<Sha256>;
+
+        let mut mac = HmacSha256::new_from_slice(self.hash_salt.as_bytes())
+            .expect("HMAC can take key of any size");
+        mac.update(token.as_bytes());
+        hex::encode(mac.finalize().into_bytes())
     }
 
     /// Set expiration on a token (for testing)
@@ -393,7 +399,7 @@ pub struct TokenMetadata {
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_secs()
 }
 
