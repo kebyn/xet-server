@@ -174,13 +174,27 @@ pub fn compress(scheme: CompressionScheme, data: &[u8]) -> Result<Vec<u8>> {
 
 pub fn decompress(scheme: CompressionScheme, data: &[u8], original_size: usize) -> Result<Vec<u8>> {
     match scheme {
-        CompressionScheme::None => Ok(data.to_vec()),
+        CompressionScheme::None => {
+            if data.len() != original_size {
+                return Err(XetError::ParseError(format!(
+                    "Uncompressed data size {} != expected {}", data.len(), original_size
+                )));
+            }
+            Ok(data.to_vec())
+        }
         CompressionScheme::LZ4 => {
-            decompress_size_prepended(data)
-                .map_err(|e| XetError::ParseError(format!("LZ4 decompression failed: {}", e)))
+            check_lz4_prefix(data, original_size)?;
+            let out = decompress_size_prepended(data)
+                .map_err(|e| XetError::ParseError(format!("LZ4 decompression failed: {}", e)))?;
+            if out.len() != original_size {
+                return Err(XetError::ParseError(format!(
+                    "LZ4 output size {} != expected {}", out.len(), original_size
+                )));
+            }
+            Ok(out)
         }
         CompressionScheme::ByteGrouping4LZ4 => {
-            // LZ4 decompression, then BG4 regrouping
+            check_lz4_prefix(data, original_size)?;
             let decompressed = decompress_size_prepended(data)
                 .map_err(|e| XetError::ParseError(format!("BG4-LZ4 decompression failed: {}", e)))?;
             bg4_regroup(&decompressed, original_size)
@@ -188,9 +202,45 @@ pub fn decompress(scheme: CompressionScheme, data: &[u8], original_size: usize) 
     }
 }
 
+/// lz4_flex 在压缩数据头部写入 4 字节小端 u32 表示解压后长度。
+/// 解压前用可信的 `original_size`(来自 chunk header 的 uncompressed_length)
+/// 比对该前缀,防止恶意/损坏前缀触发巨量内存分配(解压炸弹)。
+fn check_lz4_prefix(data: &[u8], original_size: usize) -> Result<()> {
+    if data.len() < 4 {
+        return Err(XetError::ParseError(
+            "LZ4 data too short for size prefix".to_string(),
+        ));
+    }
+    let prefix = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+    if prefix != original_size {
+        return Err(XetError::ParseError(format!(
+            "LZ4 size prefix {} does not match expected uncompressed size {}",
+            prefix, original_size
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_decompress_lz4_rejects_oversized_prefix() {
+        // 前缀谎称 ~4GB,实际数据极小 → 必须在分配前拒绝。
+        let mut data = vec![0xFFu8, 0xFF, 0xFF, 0xFF]; // LE u32 = 4294967295
+        data.extend_from_slice(&[0u8; 4]);
+        let result = decompress(CompressionScheme::LZ4, &data, 100);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_decompress_lz4_roundtrip_ok() {
+        let original = b"hello world, this is some test data".repeat(10);
+        let compressed = compress(CompressionScheme::LZ4, &original).unwrap();
+        let out = decompress(CompressionScheme::LZ4, &compressed, original.len()).unwrap();
+        assert_eq!(out, original);
+    }
 
     #[test]
     fn test_bg4_split_empty() {
