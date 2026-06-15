@@ -34,6 +34,14 @@ async fn handle_resolve(
         }
     };
 
+    // C-AUTH-1: 私有 repo 仅 owner 可访问。返回 404 而非 403,避免泄露私有 repo 的存在性。
+    if repo.private && repo.namespace != auth.info.username {
+        return HttpResponse::NotFound().json(serde_json::json!({
+            "error": "Repository not found",
+            "error_type": "NotFoundError"
+        }));
+    }
+
     // Resolve revision
     let commit_id = match resolve_revision(metadata.as_ref().as_ref(), repo.id, &revision).await {
         Ok(c) => c,
@@ -307,6 +315,38 @@ mod tests {
             .insert_header(("Authorization", format!("Bearer {}", token)))
             .to_request();
 
+        let resp = actix_test::call_service(&app, req).await;
+        assert_eq!(resp.status(), actix_web::http::StatusCode::NOT_FOUND);
+    }
+
+    #[actix_web::test]
+    async fn test_resolve_private_repo_denies_non_owner() {
+        let (token_store, metadata, config) = setup_test_env_with_files().await;
+        // attacker 的 read token
+        let token = token_store.create_token("attacker", "t", "read").await.unwrap();
+        // 私有 repo,owner 是别人
+        let repo = metadata.create_repo("owner", "secret-model", RepoType::Model, true).await.unwrap();
+        let commit_id = "abc123";
+        metadata.add_revision(Revision {
+            commit_id: commit_id.to_string(), repo_id: repo.id, parent: None,
+            message: "i".to_string(), author: "owner".to_string(), created_at: 1000,
+        }).await.unwrap();
+        metadata.set_head(repo.id, commit_id).await.unwrap();
+        metadata.add_file_entries(vec![FileEntry {
+            path: "model.bin".to_string(), repo_id: repo.id, commit_id: commit_id.to_string(),
+            size: 10, cas_hash: "h".to_string(), is_lfs: true,
+        }]).await.unwrap();
+
+        let app = actix_test::init_service(App::new()
+            .app_data(web::Data::new(token_store.clone()))
+            .app_data(web::Data::new(metadata.clone()))
+            .app_data(web::Data::new(config.clone()))
+            .route("/{ns}/{repo}/resolve/{revision}/{path}", web::get().to(resolve_model))
+        ).await;
+        let req = actix_test::TestRequest::get()
+            .uri("/owner/secret-model/resolve/main/model.bin")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request();
         let resp = actix_test::call_service(&app, req).await;
         assert_eq!(resp.status(), actix_web::http::StatusCode::NOT_FOUND);
     }
