@@ -42,7 +42,7 @@ fn classify_upload_mode(size: u64, inline_threshold: u64) -> String {
 
 /// Internal helper for preupload handling
 async fn handle_preupload(
-    _auth: AuthUser<AuthWrite>,
+    auth: AuthUser<AuthWrite>,
     path: web::Path<(String, String, String)>,
     body: web::Json<PreuploadRequest>,
     repo_type: RepoType,
@@ -50,6 +50,18 @@ async fn handle_preupload(
     config: web::Data<crate::config::HubConfig>,
 ) -> HttpResponse {
     let (namespace, repo_name, _revision) = path.into_inner();
+
+    // C-AUTH: preupload 是 commit 的写前置步骤,需校验对目标 namespace 的写权限
+    // (与 handle_commit 一致)。在 repo 查询前返回 403,不泄露私有 repo 存在性。
+    if namespace != auth.info.username {
+        let has_access = metadata.is_namespace_member(&auth.info.username, &namespace).await.unwrap_or(false);
+        if !has_access {
+            return HttpResponse::Forbidden().json(serde_json::json!({
+                "error": format!("User '{}' cannot access namespace '{}'", auth.info.username, namespace),
+                "error_type": "ForbiddenError"
+            }));
+        }
+    }
 
     // Check repo exists
     match metadata.get_repo(&namespace, &repo_name, repo_type).await {

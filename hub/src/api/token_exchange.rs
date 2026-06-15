@@ -3,6 +3,7 @@ use crate::auth::extract::{AuthUser, AuthRead, AuthWrite};
 use crate::auth::token_store::TokenInfo;
 use crate::auth::xet_signer::XetSigner;
 use crate::metadata::{MetadataStore, RepoType};
+use super::shared::can_access_repo;
 use serde::{Deserialize, Serialize};
 
 /// Token exchange response
@@ -47,7 +48,7 @@ async fn do_exchange(
     };
 
     // C-AUTH-2: 私有 repo 仅 owner 可换取 token(读写皆然)。404 不泄露存在性。
-    if repo.private && repo.namespace != info.username {
+    if !can_access_repo(&repo, &info.username) {
         return HttpResponse::NotFound().json(serde_json::json!({
             "error": "Repository not found",
             "error_type": "NotFoundError"

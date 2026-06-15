@@ -206,6 +206,17 @@ pub fn decompress(scheme: CompressionScheme, data: &[u8], original_size: usize) 
 /// 解压前用可信的 `original_size`(来自 chunk header 的 uncompressed_length)
 /// 比对该前缀,防止恶意/损坏前缀触发巨量内存分配(解压炸弹)。
 fn check_lz4_prefix(data: &[u8], original_size: usize) -> Result<()> {
+    // 防御性硬上限:解压后大小不应超过 chunk 格式允许的最大值
+    // (XorbChunkHeader.uncompressed_length 为 3 字节序列化,上限 ~16 MiB)。
+    // 这一上限独立于下面的 prefix==original_size 等值校验,确保即便某个调用方
+    // 传入未经 chunk-hash 校验的 original_size,也不会触发巨量内存分配。
+    const MAX_DECOMPRESSED_SIZE: usize = 16 * 1024 * 1024;
+    if original_size > MAX_DECOMPRESSED_SIZE {
+        return Err(XetError::ParseError(format!(
+            "Declared uncompressed size {} exceeds maximum {}",
+            original_size, MAX_DECOMPRESSED_SIZE
+        )));
+    }
     if data.len() < 4 {
         return Err(XetError::ParseError(
             "LZ4 data too short for size prefix".to_string(),
@@ -231,6 +242,17 @@ mod tests {
         let mut data = vec![0xFFu8, 0xFF, 0xFF, 0xFF]; // LE u32 = 4294967295
         data.extend_from_slice(&[0u8; 4]);
         let result = decompress(CompressionScheme::LZ4, &data, 100);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_decompress_lz4_rejects_oversized_original_size() {
+        // 即便 prefix == original_size,只要超过硬上限(16 MiB)也必须拒绝,
+        // 防止未经 chunk-hash 校验的调用方触发巨量分配。
+        let huge = 32 * 1024 * 1024usize;
+        let mut data = (huge as u32).to_le_bytes().to_vec();
+        data.extend_from_slice(&[0u8; 4]);
+        let result = decompress(CompressionScheme::LZ4, &data, huge);
         assert!(result.is_err());
     }
 

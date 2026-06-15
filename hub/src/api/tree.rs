@@ -3,7 +3,7 @@ use crate::auth::extract::{AuthUser, AuthRead};
 use crate::metadata::{FileEntry, MetadataStore, RepoType};
 use serde::Serialize;
 use std::collections::HashSet;
-use super::shared::resolve_revision;
+use super::shared::{resolve_revision, can_access_repo};
 
 /// Tree entry response
 #[derive(Debug, Serialize, serde::Deserialize)]
@@ -43,7 +43,7 @@ async fn handle_tree(
     req: HttpRequest,
     path: web::Path<(String, String, String, String)>,
     repo_type: RepoType,
-    _auth: AuthUser<AuthRead>,
+    auth: AuthUser<AuthRead>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
     let (namespace, repo_name, revision, tree_path) = path.into_inner();
@@ -66,6 +66,14 @@ async fn handle_tree(
             };
         }
     };
+
+    // C-AUTH: 私有 repo 仅 owner 可列出文件树(泄露 cas_hash 等内容指纹)。404 不泄露存在性。
+    if !can_access_repo(&repo, &auth.info.username) {
+        return HttpResponse::NotFound().json(serde_json::json!({
+            "error": "Repository not found",
+            "error_type": "NotFoundError"
+        }));
+    }
 
     // Resolve revision
     let commit_id = match resolve_revision(metadata.as_ref().as_ref(), repo.id, &revision).await {
@@ -314,6 +322,67 @@ mod tests {
 
         let body: Vec<TreeEntry> = actix_test::read_body_json(resp).await;
         assert_eq!(body.len(), 2);
+    }
+
+    #[actix_web::test]
+    async fn test_tree_private_repo_denies_non_owner() {
+        let (token_store, metadata) = setup_test_env_with_files().await;
+        let token = token_store.create_token("attacker", "t", "read").await.unwrap();
+        // 私有 repo,owner 是别人
+        let repo = metadata.create_repo("owner", "secret", RepoType::Model, true).await.unwrap();
+        let commit_id = "abc123";
+        metadata.add_revision(Revision {
+            commit_id: commit_id.to_string(), repo_id: repo.id, parent: None,
+            message: "i".to_string(), author: "owner".to_string(), created_at: 1000,
+        }).await.unwrap();
+        metadata.set_head(repo.id, commit_id).await.unwrap();
+        metadata.add_file_entries(vec![FileEntry {
+            path: "model.bin".to_string(), repo_id: repo.id, commit_id: commit_id.to_string(),
+            size: 1024, cas_hash: "secret_hash".to_string(), is_lfs: true,
+        }]).await.unwrap();
+
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(token_store.clone()))
+                .app_data(web::Data::new(metadata.clone()))
+                .route("/api/models/{ns}/{repo}/tree/{revision}/{path:.*}", web::get().to(tree_model))
+        ).await;
+        let req = actix_test::TestRequest::get()
+            .uri("/api/models/owner/secret/tree/main/")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request();
+        let resp = actix_test::call_service(&app, req).await;
+        assert_eq!(resp.status(), actix_web::http::StatusCode::NOT_FOUND);
+    }
+
+    #[actix_web::test]
+    async fn test_tree_private_repo_allows_owner() {
+        let (token_store, metadata) = setup_test_env_with_files().await;
+        let token = token_store.create_token("owner", "t", "read").await.unwrap();
+        let repo = metadata.create_repo("owner", "secret", RepoType::Model, true).await.unwrap();
+        let commit_id = "abc123";
+        metadata.add_revision(Revision {
+            commit_id: commit_id.to_string(), repo_id: repo.id, parent: None,
+            message: "i".to_string(), author: "owner".to_string(), created_at: 1000,
+        }).await.unwrap();
+        metadata.set_head(repo.id, commit_id).await.unwrap();
+        metadata.add_file_entries(vec![FileEntry {
+            path: "model.bin".to_string(), repo_id: repo.id, commit_id: commit_id.to_string(),
+            size: 1024, cas_hash: "h".to_string(), is_lfs: true,
+        }]).await.unwrap();
+
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(token_store.clone()))
+                .app_data(web::Data::new(metadata.clone()))
+                .route("/api/models/{ns}/{repo}/tree/{revision}/{path:.*}", web::get().to(tree_model))
+        ).await;
+        let req = actix_test::TestRequest::get()
+            .uri("/api/models/owner/secret/tree/main/")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request();
+        let resp = actix_test::call_service(&app, req).await;
+        assert!(resp.status().is_success());
     }
 
     #[actix_web::test]
