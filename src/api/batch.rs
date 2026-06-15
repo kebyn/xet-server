@@ -163,6 +163,21 @@ pub async fn batch_operation(
     let base_url = config.server.base_url();
 
     for obj in &body.objects {
+        // I11 fix: Validate OID format before constructing URLs
+        if obj.oid.len() != 64 || !obj.oid.chars().all(|c| c.is_ascii_hexdigit()) {
+            response_objects.push(BatchResponseObject {
+                oid: obj.oid.clone(),
+                size: obj.size,
+                authenticated: false,
+                actions: None,
+                error: Some(BatchError {
+                    code: 422,
+                    message: "Invalid OID format: expected 64-character hex string".to_string(),
+                }),
+            });
+            continue;
+        }
+
         // I5 fix: Generate proxy token if signing key is available, otherwise fall back to user token
         let auth_token_for_action = if can_sign_proxy {
             auth.sign_proxy_token(&claims.sub, &obj.oid, &body.operation)

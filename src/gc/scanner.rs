@@ -153,8 +153,10 @@ impl IncrementalScanner {
 
                 // Periodic checkpoint save
                 if scanned_since_checkpoint >= self.config.checkpoint_interval {
-                    // M1 fix: Use next_cursor from storage response for consistent pagination.
-                    checkpoint.update_cursor(next_cursor.clone());
+                    // C2 fix: Use current key as cursor, not next_cursor.
+                    // If we crash mid-page and recover, we must resume from the last
+                    // processed shard, not skip to the end of the page.
+                    checkpoint.update_cursor(Some(key.clone()));
                     if let Err(e) = checkpoint.save(&**self.storage).await {
                         tracing::warn!("Failed to save checkpoint: {}", e);
                     }

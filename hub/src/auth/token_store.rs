@@ -167,7 +167,11 @@ impl TokenStore {
         }
 
         // No salt found - generate and persist a new one
-        let new_salt = uuid::Uuid::new_v4().to_string();
+        // I12 fix: Use OsRng for cryptographically secure random salt instead of UUID
+        use rand::RngCore;
+        let mut salt_bytes = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut salt_bytes);
+        let new_salt = hex::encode(salt_bytes);
         let now = now_secs() as i64;
 
         // I2 fix: Use INSERT OR IGNORE to handle concurrent inserts atomically.

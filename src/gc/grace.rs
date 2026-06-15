@@ -50,10 +50,15 @@ impl GracePeriod {
     /// Returns `true` if the blob's age exceeds the absolute grace period.
     /// Returns `false` if the blob should be protected.
     pub async fn can_delete(&self, _key: &str, mtime: u64) -> bool {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        // I1 fix: Use unwrap_or_default instead of unwrap to avoid panic on clock issues.
+        // If clock is broken, we conservatively return false (don't delete).
+        let now = match SystemTime::now().duration_since(UNIX_EPOCH) {
+            Ok(d) => d.as_secs(),
+            Err(_) => {
+                tracing::warn!("System clock appears to be before UNIX_EPOCH, refusing to delete");
+                return false;
+            }
+        };
 
         let age = now.saturating_sub(mtime);
         if age < self.absolute_grace.as_secs() {

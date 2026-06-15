@@ -237,6 +237,26 @@ pub fn verify_xet_token(
         return Err(AuthError::Expired);
     }
 
+    // I9 fix: Validate iat (issued-at) to limit max token lifetime.
+    // If a signing key leaks, tokens with exp set far in the future are
+    // still bounded by this max-age check.
+    const MAX_TOKEN_LIFETIME_SECS: u64 = 7 * 24 * 3600; // 7 days
+    if claims.iat > now {
+        return Err(AuthError::InvalidToken); // iat in the future
+    }
+    if now - claims.iat > MAX_TOKEN_LIFETIME_SECS {
+        return Err(AuthError::Expired); // token too old regardless of exp
+    }
+
+    // C2 fix (security): Enforce that proxy tokens can only have lfs-* scopes
+    if claims.token_type == "proxy" {
+        let valid_proxy_scope = claims.scope.split_whitespace()
+            .all(|s| s.starts_with("lfs-"));
+        if !valid_proxy_scope {
+            return Err(AuthError::InvalidToken);
+        }
+    }
+
     Ok(claims)
 }
 

@@ -63,7 +63,7 @@ pub struct CommitResponse {
 fn now_timestamp() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_secs() as i64
 }
 
@@ -163,6 +163,24 @@ async fn handle_commit(
     }
 
     let (namespace, repo_name, _revision) = path.into_inner();
+
+    // C4 fix: Verify the authenticated user owns the target namespace
+    if namespace != auth.info.username {
+        return HttpResponse::Forbidden().json(serde_json::json!({
+            "error": format!("User '{}' cannot commit to namespace '{}'", auth.info.username, namespace),
+            "error_type": "ForbiddenError"
+        }));
+    }
+
+    // I6 fix: Limit number of operations per commit to prevent resource exhaustion
+    const MAX_COMMIT_OPERATIONS: usize = 10_000;
+    let operation_count = body.lines().filter(|l| !l.trim().is_empty()).count();
+    if operation_count > MAX_COMMIT_OPERATIONS {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": format!("Too many operations in commit ({}, max {})", operation_count, MAX_COMMIT_OPERATIONS),
+            "error_type": "ValidationError"
+        }));
+    }
 
     // Get the repo
     let repo = match metadata.get_repo(&namespace, &repo_name, repo_type).await {

@@ -304,10 +304,14 @@ impl GcCoordinator {
                     return Ok(());
                 }
                 Err(crate::storage::StorageError::Internal(_)) => {
-                    // Backend doesn't support conditional delete — fall through to regular delete
-                    tracing::debug!(
-                        "Backend doesn't support conditional delete, falling back to regular delete"
+                    // I6 fix: Internal error (network timeout etc) should NOT fall through
+                    // to unconditional delete. Retrying or returning error is safer than
+                    // potentially deleting another node's lease.
+                    tracing::warn!(
+                        node_id = %node_id,
+                        "Lease release failed with internal error, will not fall through to unconditional delete"
                     );
+                    return Ok(());
                 }
                 Err(e) => {
                     return Err(GcError::Io(std::io::Error::other(

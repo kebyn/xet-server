@@ -241,7 +241,24 @@ impl BloomFilterProtectedSet {
             active,
             refreshing: None,
             config,
-            stats: BloomStats::default(),
+            // I4 fix: Estimate items_inserted from bitmap popcount after loading.
+            // Without this, should_rebuild() never triggers because it thinks the
+            // filter is empty. We estimate using: items ≈ -n * ln(1 - popcount/n)
+            // where n = num_bits. This is the inverse of the bloom false-positive formula.
+            stats: BloomStats {
+                items_inserted: {
+                    let ones = bitmap.iter().map(|b| b.count_ones() as u64).sum::<u64>();
+                    let total_bits = num_bits;
+                    if total_bits > 0 && ones > 0 && ones < total_bits {
+                        let ratio = ones as f64 / total_bits as f64;
+                        let estimated = -(total_bits as f64) * (1.0 - ratio).ln() / num_hashes as f64;
+                        estimated as u64
+                    } else {
+                        ones // fallback: use raw bit count as rough lower bound
+                    }
+                },
+                rebuild_count: 0,
+            },
         })
     }
 

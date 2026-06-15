@@ -231,8 +231,20 @@ impl HubConfig {
                     .unwrap_or(5),
             },
             cas: CasSettings {
-                base_url: env::var("CAS_BASE_URL")
-                    .unwrap_or_else(|_| "http://localhost:8081".to_string()),  // Changed from 3000 to match CAS default port
+                base_url: {
+                    // I14 fix: Validate CAS_BASE_URL format at config load time
+                    let url = env::var("CAS_BASE_URL")
+                        .unwrap_or_else(|_| "http://localhost:8081".to_string());
+                    if url::Url::parse(&url).is_err() {
+                        tracing::warn!(
+                            "CAS_BASE_URL '{}' is not a valid URL, using default http://localhost:8081",
+                            url
+                        );
+                        "http://localhost:8081".to_string()
+                    } else {
+                        url
+                    }
+                },
                 internal_timeout_seconds: env::var("HUB_CAS_TIMEOUT_SECS")
                     .ok()
                     .and_then(|t| t.parse().ok())

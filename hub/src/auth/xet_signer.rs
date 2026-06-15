@@ -132,11 +132,13 @@ impl XetSigner {
     /// I1 fix: Use unwrap_or_default() for system time to avoid panic on clock issues
     /// I2 fix: Return Result to propagate serialization errors instead of returning empty string
     pub fn sign(&self, sub: &str, scope: &str, repo_id: &str, repo_type: &str, revision: &str) -> Result<(String, u64), String> {
-        // I1 fix: Use unwrap_or_default() to avoid panic if system clock is before UNIX_EPOCH
+        // M4 fix: Reject signing if system clock is broken instead of using 0.
+        // With iat=0, the verifier's max-age check would reject the token anyway,
+        // but failing fast here gives a clearer error.
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
-            .unwrap_or(0);
+            .map_err(|_| "System clock is before UNIX_EPOCH, cannot sign tokens".to_string())?;
         let exp = now + self.ttl_seconds;
 
         let claims = XetClaims {
@@ -162,11 +164,11 @@ impl XetSigner {
     /// I1 fix: Use unwrap_or_default() for system time to avoid panic on clock issues
     /// I2 fix: Return Result to propagate serialization errors instead of returning empty string
     pub fn sign_proxy(&self, sub: &str, oid: &str, operation: &str, repo_id: &str, repo_type: &str) -> Result<(String, u64), String> {
-        // I1 fix: Use unwrap_or_default() to avoid panic if system clock is before UNIX_EPOCH
+        // M4 fix: Reject signing if system clock is broken
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
-            .unwrap_or(0);
+            .map_err(|_| "System clock is before UNIX_EPOCH, cannot sign tokens".to_string())?;
         // Proxy tokens use configurable TTL (default 300s / 5 minutes)
         let exp = now + self.proxy_ttl_seconds;
 
@@ -193,11 +195,11 @@ impl XetSigner {
     /// I1 fix: Use unwrap_or_default() for system time to avoid panic on clock issues
     /// I2 fix: Return Result to propagate serialization errors instead of returning empty string
     pub fn sign_internal(&self) -> Result<(String, u64), String> {
-        // I1 fix: Use unwrap_or_default() to avoid panic if system clock is before UNIX_EPOCH
+        // M4 fix: Reject signing if system clock is broken
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
-            .unwrap_or(0);
+            .map_err(|_| "System clock is before UNIX_EPOCH, cannot sign tokens".to_string())?;
         let exp = now + self.internal_ttl_seconds; // C1 fix: Configurable TTL (was hardcoded 60s)
 
         let claims = XetClaims {
@@ -270,11 +272,11 @@ impl XetSigner {
         }
 
         // Check expiration
-        // I1 fix: Use unwrap_or(0) to avoid panic if system clock is before UNIX_EPOCH
+        // M4 fix: If system clock is broken, reject all tokens (safe default)
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
-            .unwrap_or(0);
+            .unwrap_or(u64::MAX); // Treats all tokens as expired when clock is broken
         if claims.exp < now {
             return None; // Token expired
         }

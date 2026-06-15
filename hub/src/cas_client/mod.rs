@@ -208,6 +208,7 @@ impl CasClient {
 
     /// Download a blob from CAS via LFS endpoint (buffered version)
     /// Loads entire file into memory. Use proxy_lfs_download_streaming for large files.
+    /// I7 fix: Check Content-Length before loading body to prevent memory exhaustion.
     pub async fn proxy_lfs_download(&self, oid: &str, token: &str) -> Result<bytes::Bytes, HubError> {
         let url = format!("{}/lfs/objects/{}", self.base_url, oid);
         let resp = self.client
@@ -219,12 +220,22 @@ impl CasClient {
 
         match resp.status().as_u16() {
             200 => {
+                // I7 fix: Check Content-Length before loading body into memory
+                if let Some(content_length) = resp.content_length() {
+                    if content_length > self.max_download_size {
+                        return Err(HubError::CasError(format!(
+                            "Download too large: {} bytes (max: {} bytes)",
+                            content_length, self.max_download_size
+                        )));
+                    }
+                }
+
                 let body = resp
                     .bytes()
                     .await
                     .map_err(|e| HubError::CasError(e.to_string()))?;
 
-                // Check size limit
+                // Double-check actual size (Content-Length could be absent or wrong)
                 if body.len() as u64 > self.max_download_size {
                     return Err(HubError::CasError(format!(
                         "Download too large: {} bytes (max: {} bytes)",
