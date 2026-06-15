@@ -105,6 +105,14 @@ pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
     tracing::info!("Starting Hub API on {}", bind_addr);
     tracing::info!("CAS: {}", config.cas.base_url);
 
+    if config.server.host == "0.0.0.0" {
+        tracing::warn!(
+            "Hub is binding to 0.0.0.0 (all interfaces) on port {}. Ensure it sits behind a trusted proxy/firewall; authentication is always enforced.",
+            config.server.port
+        );
+    }
+    tracing::info!("Authentication: enforced — all public endpoints require a valid bearer token");
+
     // Warn about relative paths that depend on process CWD
     if !std::path::Path::new(&config.auth.private_key_path).is_absolute() {
         tracing::warn!(

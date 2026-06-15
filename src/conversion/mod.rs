@@ -85,8 +85,10 @@ impl std::fmt::Display for ConversionError {
     }
 }
 
-/// Pipeline for converting raw LFS blobs into xorb+shard format
-/// with global chunk-level deduplication.
+/// Pipeline for converting raw LFS blobs into xorb+shard format.
+/// Deduplication is performed at whole-xorb granularity (an identical xorb is
+/// stored once). `num_deduped` counts chunks observed to already exist as a
+/// statistic only — chunks are still packed into the new xorb.
 pub struct ConversionPipeline {
     storage: Arc<Box<dyn StorageBackend>>,
     index: Arc<MetadataIndex>,

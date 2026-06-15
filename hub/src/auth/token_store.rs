@@ -29,9 +29,10 @@ struct TokenRow {
 /// Async SQLite-based token store with connection pooling
 pub struct TokenStore {
     pool: SqlitePool,
-    /// M4 fix: Server-side salt for token hashing.
-    /// Prevents offline dictionary attacks if database is compromised.
-    /// Tokens are already high-entropy (UUID), but salt adds defense-in-depth.
+    /// M4: Server-side salt for token hashing. When provided out-of-band via
+    /// HUB_TOKEN_HASH_SALT, it mitigates offline attacks against a leaked DB.
+    /// If auto-generated, the salt is persisted in this same DB, so a full DB
+    /// compromise exposes both — set HUB_TOKEN_HASH_SALT in production.
     hash_salt: String,
 }
 
@@ -383,7 +384,8 @@ impl TokenStore {
     }
 
     /// Hash a token using HMAC-SHA256 with server-side salt.
-    /// M4 fix: Salt prevents offline dictionary attacks if database is compromised.
+    /// M4: An out-of-band salt (HUB_TOKEN_HASH_SALT) mitigates offline attacks
+    /// against a leaked DB; an auto-generated salt persisted in the same DB does not.
     /// M2 fix: Uses HMAC instead of simple concatenation for cryptographic soundness.
     fn hash_token(&self, token: &str) -> String {
         use sha2::Sha256;
