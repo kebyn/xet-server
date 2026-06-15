@@ -108,8 +108,11 @@ impl Drop for GcLeaseGuard {
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
                 // I1 fix: Pass etag for conditional delete to prevent race condition
+                // M4 fix: If delete_if_match returns ConditionFailed, this just means
+                // the renewal task updated the etag since we last saw it — the lease
+                // will be released by expiry or next renewal cycle. No warning needed.
                 if let Err(e) = coordinator.release_lease(&node_id, etag.as_deref()).await {
-                    tracing::warn!("Failed to release GC lease on drop: {}", e);
+                    tracing::debug!("Failed to release GC lease on drop (will expire via TTL): {}", e);
                 }
             });
         } else {
@@ -156,7 +159,7 @@ impl GcCoordinator {
     /// Returns `Ok(Some(guard))` if the lease was acquired.
     /// Returns `Ok(None)` if another node holds a valid lease.
     /// Returns `Err` on storage errors.
-    pub async fn try_acquire_lease(&self) -> GcResult<Option<GcLeaseGuard>> {
+    pub async fn try_acquire_lease(self: &Arc<Self>) -> GcResult<Option<GcLeaseGuard>> {
         // 1. Read existing lease (if any)
         let existing_lease = self.read_lease().await?;
         let existing_etag = self.storage.get_etag(LEASE_KEY).await
@@ -206,11 +209,7 @@ impl GcCoordinator {
                 lease.etag = Some(new_etag);
 
                 // 5. Start renewal task
-                let coordinator = Arc::new(GcCoordinator {
-                    storage: self.storage.clone(),
-                    node_id: self.node_id.clone(),
-                    config: self.config.clone(),
-                });
+                let coordinator = Arc::clone(self);
 
                 let renewal_handle = Self::start_renewal_task(
                     coordinator.clone(),

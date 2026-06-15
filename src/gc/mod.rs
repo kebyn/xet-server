@@ -393,15 +393,16 @@ impl IncrementalGarbageCollector {
                 .map_err(|e| format!("Failed to list LFS blobs: {}", e))?;
 
             for (key, mtime) in page {
-                let oid = key.strip_prefix("lfs/objects/").unwrap_or(&key)
+                let oid_raw = key.strip_prefix("lfs/objects/").unwrap_or(&key)
                     .split('/').next_back().unwrap_or(&key);
+                let oid = oid_raw.to_lowercase();
 
                 if bloom.contains(oid.as_bytes()) {
                     stats.bloom_protected += 1;
                     continue;
                 }
 
-                if !grace.can_delete(&key, mtime).await {
+                if !grace.can_delete(&key, mtime) {
                     stats.grace_period_skipped += 1;
                     continue;
                 }
@@ -424,14 +425,15 @@ impl IncrementalGarbageCollector {
                 .map_err(|e| format!("Failed to list xorbs: {}", e))?;
 
             for (key, mtime) in page {
-                let xorb_hash = key.strip_prefix("xorbs/").unwrap_or(&key);
+                let xorb_hash_raw = key.strip_prefix("xorbs/").unwrap_or(&key);
+                let xorb_hash = xorb_hash_raw.to_lowercase();
 
                 if bloom.contains(xorb_hash.as_bytes()) {
                     stats.bloom_protected += 1;
                     continue;
                 }
 
-                if !grace.can_delete(&key, mtime).await {
+                if !grace.can_delete(&key, mtime) {
                     stats.grace_period_skipped += 1;
                     continue;
                 }
@@ -473,6 +475,7 @@ impl IncrementalGarbageCollector {
     ) -> Result<(), String> {
         let max_per_cycle = self.config.delete_batch_size;
         let max_retries = self.config.delete_max_retries;
+        let grace = GracePeriod::new(&self.config.grace);
 
         // I6 fix: Combine candidates and limit total per cycle.
         // Prioritize LFS blobs first, then xorbs.
@@ -487,6 +490,30 @@ impl IncrementalGarbageCollector {
                     "Reached per-cycle delete limit, remaining candidates deferred to next cycle"
                 );
                 break;
+            }
+
+            // I1 fix: Re-check mtime before deletion to prevent race condition.
+            // If the object was re-uploaded since compute_candidates, its mtime will
+            // be newer and the grace period check will protect it.
+            match self.storage.get_mtime(key).await {
+                Ok(current_mtime) => {
+                    if !grace.can_delete(key, current_mtime) {
+                        tracing::debug!(
+                            key = %key,
+                            "Object mtime changed since scan, skipping deletion"
+                        );
+                        stats.grace_period_skipped += 1;
+                        continue;
+                    }
+                }
+                Err(crate::storage::StorageError::NotFound(_)) => {
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(key = %key, error = %e, "Failed to re-check mtime, skipping deletion for safety");
+                    stats.errors += 1;
+                    continue;
+                }
             }
 
             // I5 fix: Retry failed deletions
@@ -506,7 +533,6 @@ impl IncrementalGarbageCollector {
                                 error = %e,
                                 "Delete failed, retrying"
                             );
-                            // Brief backoff before retry
                             tokio::time::sleep(std::time::Duration::from_millis(100 * (attempt as u64 + 1))).await;
                         } else {
                             warn!(
@@ -529,6 +555,28 @@ impl IncrementalGarbageCollector {
                     "Reached per-cycle delete limit, remaining candidates deferred to next cycle"
                 );
                 break;
+            }
+
+            // I1 fix: Re-check mtime before deletion (same as LFS above)
+            match self.storage.get_mtime(key).await {
+                Ok(current_mtime) => {
+                    if !grace.can_delete(key, current_mtime) {
+                        tracing::debug!(
+                            key = %key,
+                            "Object mtime changed since scan, skipping deletion"
+                        );
+                        stats.grace_period_skipped += 1;
+                        continue;
+                    }
+                }
+                Err(crate::storage::StorageError::NotFound(_)) => {
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(key = %key, error = %e, "Failed to re-check mtime, skipping deletion for safety");
+                    stats.errors += 1;
+                    continue;
+                }
             }
 
             // I5 fix: Retry failed deletions

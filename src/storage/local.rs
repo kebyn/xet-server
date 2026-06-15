@@ -16,6 +16,19 @@ impl LocalStorage {
         Ok(Self { base_path: path })
     }
 
+    /// C2 fix: Compute etag from file metadata using nanosecond-precision mtime.
+    /// Nanosecond precision dramatically reduces the race window for lease coordination
+    /// compared to second-level precision. Most Linux filesystems (ext4, xfs, btrfs)
+    /// support nanosecond timestamps.
+    fn file_etag_from_metadata(meta: &Option<std::fs::Metadata>) -> String {
+        let nanos = meta.as_ref()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        format!("\"{}\"", nanos)
+    }
+
     /// Validate key and construct object path, preventing path traversal attacks.
     fn object_path(&self, key: &str) -> StorageResult<PathBuf> {
         // Reject absolute paths
@@ -234,7 +247,10 @@ impl StorageBackend for LocalStorage {
     /// - expected_etag = Some(mtime_str): write only if current mtime matches
     ///
     /// Uses a lock file for atomicity on the local filesystem.
-    /// The "etag" for local storage is the mtime as a string (e.g., "1718000000").
+    /// The "etag" for local storage is the mtime in nanoseconds as a quoted string.
+    ///
+    /// NOTE: Local storage lease coordination is only safe for single-node deployments.
+    /// For multi-node GC, use S3 storage which provides true conditional operations via ETags.
     async fn put_if_absent_or_expired(
         &self,
         key: &str,
@@ -264,14 +280,8 @@ impl StorageBackend for LocalStorage {
                         use tokio::io::AsyncWriteExt;
                         f.write_all(&data).await
                             .map_err(|e| StorageError::Internal(format!("Failed to write: {}", e)))?;
-                        // Get the mtime as the new etag
-                        let mtime = f.metadata().await
-                            .ok()
-                            .and_then(|m| m.modified().ok())
-                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                            .map(|d| d.as_secs())
-                            .unwrap_or(0);
-                        Ok(format!("\"{}\"", mtime))
+                        let etag = Self::file_etag_from_metadata(&f.metadata().await.ok());
+                        Ok(etag)
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                         Err(StorageError::ConditionFailed)
@@ -283,13 +293,8 @@ impl StorageBackend for LocalStorage {
             }
             Some(expected) => {
                 // Write only if current mtime matches expected etag
-                let current_mtime = match fs::metadata(&path).await {
-                    Ok(meta) => meta
-                        .modified()
-                        .ok()
-                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                        .map(|d| d.as_secs())
-                        .unwrap_or(0),
+                let current_etag = match fs::metadata(&path).await {
+                    Ok(meta) => Self::file_etag_from_metadata(&Some(meta)),
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                         return Err(StorageError::NotFound(key.to_string()));
                     }
@@ -298,7 +303,6 @@ impl StorageBackend for LocalStorage {
                     }
                 };
 
-                let current_etag = format!("\"{}\"", current_mtime);
                 if current_etag != expected {
                     return Err(StorageError::ConditionFailed);
                 }
@@ -307,31 +311,24 @@ impl StorageBackend for LocalStorage {
                 fs::write(&path, &data).await
                     .map_err(|e| StorageError::Internal(format!("Failed to write: {}", e)))?;
 
-                // Get the new mtime
-                let new_mtime = fs::metadata(&path).await
-                    .ok()
-                    .and_then(|m| m.modified().ok())
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                Ok(format!("\"{}\"", new_mtime))
+                // Get the new etag
+                let new_etag = match fs::metadata(&path).await {
+                    Ok(meta) => Self::file_etag_from_metadata(&Some(meta)),
+                    _ => "\"0\"".to_string(),
+                };
+                Ok(new_etag)
             }
         }
     }
 
-    /// ETag for local storage: mtime as a quoted string.
+    /// ETag for local storage: mtime in nanoseconds as a quoted string.
+    /// C2 fix: Uses nanosecond precision to minimize race window in lease coordination.
     async fn get_etag(&self, key: &str) -> StorageResult<Option<String>> {
         let path = self.object_path(key)?;
 
         match fs::metadata(&path).await {
             Ok(meta) => {
-                let mtime = meta
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                Ok(Some(format!("\"{}\"", mtime)))
+                Ok(Some(Self::file_etag_from_metadata(&Some(meta))))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 Err(StorageError::NotFound(key.to_string()))

@@ -75,11 +75,15 @@ pub trait StorageBackend: Send + Sync {
     /// Returns (key, unix_timestamp_seconds) pairs.
     /// Used by GC to determine which blobs are older than the grace period.
     ///
-    /// # Safety
+    /// # Breaking Change (v2)
     ///
-    /// Backends MUST override this method. The default implementation returns an error
-    /// because returning `mtime=0` would cause all objects to appear extremely old
-    /// and be deleted by GC's grace period check.
+    /// This method's default implementation returns an error. All `StorageBackend`
+    /// implementations MUST override this method if GC is enabled. The previous
+    /// default returned `mtime=0` which caused all objects to appear extremely old
+    /// and be immediately eligible for deletion by GC's grace period check.
+    ///
+    /// If you have a custom StorageBackend implementation, you must add this method
+    /// after upgrading, or GC will fail at runtime with a clear error message.
     async fn list_objects_with_mtime(&self, _prefix: &str) -> StorageResult<Vec<(String, u64)>> {
         Err(StorageError::Internal(
             "list_objects_with_mtime is not implemented for this storage backend. \

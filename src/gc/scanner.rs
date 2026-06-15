@@ -125,7 +125,10 @@ impl IncrementalScanner {
 
                 // Extract references using three-layer defense
                 match self.load_shard_references(shard_hash).await {
-                    Ok(refs) => {
+                    Ok((refs, sidecar_was_missing)) => {
+                        if sidecar_was_missing {
+                            result.sidecar_missing += 1;
+                        }
                         // Insert references into bloom filter
                         let ref_count = refs.lfs_refs.len() + refs.xorb_refs.len();
                         for lfs_ref in &refs.lfs_refs {
@@ -165,7 +168,12 @@ impl IncrementalScanner {
             }
 
             // M1 fix: Use next_cursor from storage response.
-            checkpoint.update_cursor(next_cursor);
+            // C3 fix: Only update cursor if next_cursor is Some. When has_more is false,
+            // next_cursor may be None — setting cursor to None here would lose our position
+            // if a crash occurs before mark_completed(). Keep the last processed key instead.
+            if let Some(ref nc) = next_cursor {
+                checkpoint.update_cursor(Some(nc.clone()));
+            }
 
             if !has_more {
                 // No more pages — scan completed
@@ -200,15 +208,17 @@ impl IncrementalScanner {
     /// 1. **Sidecar**: read `shard_refs/{hash}.refs.json` (fast, preferred)
     /// 2. **Parse shard**: download and parse the shard file (slow fallback)
     /// 3. **Conservative skip**: return empty refs (safest, may retain orphans)
+    ///
+    /// Returns (references, sidecar_was_missing) tuple.
     async fn load_shard_references(
         &self,
         shard_hash: &str,
-    ) -> GcResult<crate::gc::reference_tracker::ReferenceSet> {
+    ) -> GcResult<(crate::gc::reference_tracker::ReferenceSet, bool)> {
         use crate::gc::reference_tracker::ReferenceSet;
 
         // Layer 1: Try sidecar
         if let Some(refs) = self.ref_tracker.get_references(shard_hash).await? {
-            return Ok(refs);
+            return Ok((refs, false));
         }
 
         // Layer 2: Parse the shard directly
@@ -247,7 +257,7 @@ impl IncrementalScanner {
                     }
                 });
 
-                Ok(refs)
+                Ok((refs, true))
             }
             Err(e) => {
                 // Layer 3: Conservative skip — return empty refs
@@ -258,7 +268,7 @@ impl IncrementalScanner {
                     error = %e,
                     "Shard parse failed, using conservative empty references"
                 );
-                Ok(ReferenceSet::new(shard_hash.to_string()))
+                Ok((ReferenceSet::new(shard_hash.to_string()), true))
             }
         }
     }

@@ -128,6 +128,12 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
     //
     // This is effectively "requests per minute" with burst tolerance.
     // Uses default PeerIpKeyExtractor for per-IP rate limiting (not global).
+    //
+    // IMPORTANT: When running behind a reverse proxy (nginx, ALB, etc.), ensure the proxy
+    // sets X-Forwarded-For or X-Real-IP headers. Without these, all requests appear to
+    // come from the proxy's IP, causing all clients to share a single rate limit bucket.
+    // Configure your proxy to pass the real client IP, and if using actix-web's
+    // trusted proxies feature, set the appropriate trust configuration.
     let rpm = config.server.rate_limit_rpm;
     let governor_conf = GovernorConfigBuilder::default()
         .per_second(60)  // 60-second refill window
