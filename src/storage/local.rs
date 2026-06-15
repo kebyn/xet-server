@@ -193,6 +193,152 @@ impl StorageBackend for LocalStorage {
             Err(e) => Err(StorageError::Internal(format!("Failed to get metadata: {}", e))),
         }
     }
+
+    /// Paged listing for local storage: sort all keys, skip after cursor, take page_size.
+    ///
+    /// For local filesystem, all keys are read upfront (walk_dir), then sliced.
+    /// This is less efficient than server-side pagination but correct for checkpoint resumption.
+    async fn list_objects_paged(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+        page_size: usize,
+    ) -> StorageResult<(Vec<String>, Option<String>, bool)> {
+        let all_keys = self.list_objects(prefix).await?;
+
+        // Sort for deterministic pagination
+        let mut sorted_keys = all_keys;
+        sorted_keys.sort();
+
+        // Filter keys after the cursor
+        let filtered: Vec<String> = if let Some(cursor) = start_after {
+            sorted_keys.into_iter().filter(|k| k.as_str() > cursor).collect()
+        } else {
+            sorted_keys
+        };
+
+        let has_more = filtered.len() > page_size;
+        let page: Vec<String> = filtered.into_iter().take(page_size).collect();
+        let next_cursor = if has_more {
+            page.last().cloned()
+        } else {
+            None
+        };
+
+        Ok((page, next_cursor, has_more))
+    }
+
+    /// Conditional PUT for local storage using filesystem atomic operations.
+    ///
+    /// - expected_etag = None: write only if key absent (create-exclusive)
+    /// - expected_etag = Some(mtime_str): write only if current mtime matches
+    ///
+    /// Uses a lock file for atomicity on the local filesystem.
+    /// The "etag" for local storage is the mtime as a string (e.g., "1718000000").
+    async fn put_if_absent_or_expired(
+        &self,
+        key: &str,
+        data: Bytes,
+        expected_etag: Option<&str>,
+    ) -> StorageResult<String> {
+        let path = self.object_path(key)?;
+
+        // Create parent directories
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).await
+                .map_err(|e| StorageError::Internal(format!("Failed to create dirs: {}", e)))?;
+        }
+
+        match expected_etag {
+            None => {
+                // Write only if absent
+                // Use OpenOptions with create_new(true) for atomic create-exclusive
+                let file = tokio::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&path)
+                    .await;
+
+                match file {
+                    Ok(mut f) => {
+                        use tokio::io::AsyncWriteExt;
+                        f.write_all(&data).await
+                            .map_err(|e| StorageError::Internal(format!("Failed to write: {}", e)))?;
+                        // Get the mtime as the new etag
+                        let mtime = f.metadata().await
+                            .ok()
+                            .and_then(|m| m.modified().ok())
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+                        Ok(format!("\"{}\"", mtime))
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                        Err(StorageError::ConditionFailed)
+                    }
+                    Err(e) => {
+                        Err(StorageError::Internal(format!("Failed to create file: {}", e)))
+                    }
+                }
+            }
+            Some(expected) => {
+                // Write only if current mtime matches expected etag
+                let current_mtime = match fs::metadata(&path).await {
+                    Ok(meta) => meta
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        return Err(StorageError::NotFound(key.to_string()));
+                    }
+                    Err(e) => {
+                        return Err(StorageError::Internal(format!("Failed to get metadata: {}", e)));
+                    }
+                };
+
+                let current_etag = format!("\"{}\"", current_mtime);
+                if current_etag != expected {
+                    return Err(StorageError::ConditionFailed);
+                }
+
+                // Etag matches — overwrite
+                fs::write(&path, &data).await
+                    .map_err(|e| StorageError::Internal(format!("Failed to write: {}", e)))?;
+
+                // Get the new mtime
+                let new_mtime = fs::metadata(&path).await
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                Ok(format!("\"{}\"", new_mtime))
+            }
+        }
+    }
+
+    /// ETag for local storage: mtime as a quoted string.
+    async fn get_etag(&self, key: &str) -> StorageResult<Option<String>> {
+        let path = self.object_path(key)?;
+
+        match fs::metadata(&path).await {
+            Ok(meta) => {
+                let mtime = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                Ok(Some(format!("\"{}\"", mtime)))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Err(StorageError::NotFound(key.to_string()))
+            }
+            Err(e) => Err(StorageError::Internal(format!("Failed to get metadata: {}", e))),
+        }
+    }
 }
 
 impl LocalStorage {

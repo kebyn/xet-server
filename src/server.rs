@@ -8,7 +8,8 @@ use tokio::sync::RwLock;
 use crate::api::auth::AuthVerifier;
 use crate::config::ServerConfig;
 use crate::conversion::ConvertingOids;
-use crate::gc::{GarbageCollector, GcStats, start_gc_background_task};
+use crate::gc::{IncrementalGarbageCollector, IncrementalGcStats, start_incremental_gc_background_task};
+use crate::gc::reference_tracker::s3::SidecarReferenceTracker;
 use crate::storage::{create_storage, StorageBackend};
 use crate::middleware::metrics_middleware;
 
@@ -50,23 +51,32 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
     // Concurrent conversion tracker (in-memory, resets on restart)
     let converting = Arc::new(ConvertingOids::new());
 
-    // GC: Garbage collector for orphaned blobs
+    // GC: Incremental garbage collector for orphaned blobs
     // Validate GC configuration
     for warning in crate::config::validate_gc_config(&config) {
         tracing::warn!("{}", warning);
     }
-    // I4 fix: Handle GC creation error gracefully
-    let gc = match GarbageCollector::new(storage.clone(), config.gc.clone()) {
+
+    // Create sidecar reference tracker for incremental GC
+    let ref_tracker: Arc<dyn crate::gc::reference_tracker::ReferenceTracker> =
+        Arc::new(SidecarReferenceTracker::new(storage.clone()));
+
+    // Create incremental GC
+    let gc = match IncrementalGarbageCollector::new(
+        storage.clone(),
+        ref_tracker.clone(),
+        config.gc.clone(),
+    ) {
         Ok(gc) => Arc::new(gc),
         Err(e) => {
-            tracing::error!("Failed to create garbage collector: {}", e);
+            tracing::error!("Failed to create incremental garbage collector: {}", e);
             return Err(std::io::Error::other(format!("Failed to create GC: {}", e)));
         }
     };
-    let last_gc_stats = Arc::new(RwLock::new(None::<GcStats>));
+    let last_gc_stats = Arc::new(RwLock::new(None::<IncrementalGcStats>));
 
     // Start background GC task (if enabled)
-    start_gc_background_task(gc.clone(), last_gc_stats.clone()).await;
+    start_incremental_gc_background_task(gc.clone(), last_gc_stats.clone()).await;
 
     let bind_addr = format!("{}:{}", config.server.host, config.server.port);
 
@@ -84,7 +94,7 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
     tracing::info!("Storage backend: {}", config.storage.backend);
     tracing::info!("Max upload size: {} MB", config.server.max_body_size_mb);
     tracing::info!("Conversion: {}", if config.conversion.enabled { "enabled" } else { "disabled" });
-    tracing::info!("GC: {} (interval={}s, dry_run={})",
+    tracing::info!("GC: {} (incremental, interval={}s, dry_run={})",
         if config.gc.enabled { "enabled" } else { "disabled" },
         config.gc.interval_seconds,
         config.gc.dry_run
