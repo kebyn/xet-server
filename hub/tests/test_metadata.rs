@@ -499,6 +499,37 @@ async fn test_commit_atomic_rejects_mismatched_parent() {
 }
 
 #[tokio::test]
+async fn test_commit_atomic_rejects_first_commit_when_head_exists() {
+    let store = create_test_store().await;
+    let repo = store
+        .create_repo("u", "r", RepoType::Model, false)
+        .await
+        .expect("Failed to create repo");
+
+    let empty: Vec<FileEntry> = Vec::new();
+
+    // 第一个首提交(parent=None)在 HEAD 为空时成功。
+    let first = Revision {
+        commit_id: "c1".to_string(), repo_id: repo.id, parent: None,
+        message: "init".to_string(), author: "u".to_string(), created_at: 1,
+    };
+    store.commit_atomic(&first, &empty, None).await.expect("first commit failed");
+
+    // 第二个「首提交」(parent=None)必须被拒绝,因为 HEAD 现在是 c1。
+    // 这正是并发首次提交场景下保护数据不被覆盖的不变量。
+    let second = Revision {
+        commit_id: "c2".to_string(), repo_id: repo.id, parent: None,
+        message: "init2".to_string(), author: "u".to_string(), created_at: 2,
+    };
+    let result = store.commit_atomic(&second, &empty, None).await;
+    assert!(matches!(result, Err(hub_api::metadata::MetadataError::Conflict(_))));
+
+    // HEAD 仍是 c1,未被覆盖。
+    let head = store.get_head(repo.id).await.expect("Failed to get head");
+    assert_eq!(head, Some("c1".to_string()));
+}
+
+#[tokio::test]
 async fn test_commit_atomic_concurrent_protection() {
     let store = create_test_store().await;
 
