@@ -1,6 +1,7 @@
 use actix_web::{web, HttpResponse};
 use crate::auth::extract::{AuthUser, AuthRead, AuthWrite};
 use crate::metadata::{MetadataStore, Repo, RepoType};
+use super::shared::can_access_repo;
 use serde::{Deserialize, Serialize};
 use chrono::DateTime;
 
@@ -177,7 +178,7 @@ pub async fn create_repo_unified(
 
 /// Internal helper to get repo info
 async fn get_repo_info(
-    _auth: AuthUser<AuthRead>,
+    auth: AuthUser<AuthRead>,
     path: web::Path<(String, String)>,
     repo_type: RepoType,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
@@ -202,6 +203,14 @@ async fn get_repo_info(
             };
         }
     };
+
+    // C-AUTH: 私有 repo 仅 owner 可读元数据。404 不泄露存在性。
+    if !can_access_repo(&repo, &auth.info.username) {
+        return HttpResponse::NotFound().json(serde_json::json!({
+            "error": "Repository not found",
+            "error_type": "NotFoundError"
+        }));
+    }
 
     HttpResponse::Ok().json(repo_to_json(&repo))
 }
@@ -356,7 +365,7 @@ pub async fn get_revision_space(
 }
 
 async fn get_revision_handler(
-    _auth: AuthUser<AuthRead>,
+    auth: AuthUser<AuthRead>,
     path: web::Path<(String, String, String)>,
     repo_type: RepoType,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
@@ -373,6 +382,14 @@ async fn get_revision_handler(
             }));
         }
     };
+
+    // C-AUTH: 私有 repo 仅 owner 可读 commit 元数据。404 不泄露存在性。
+    if !can_access_repo(&repo, &auth.info.username) {
+        return HttpResponse::NotFound().json(serde_json::json!({
+            "error": "Repository not found",
+            "error_type": "RepositoryNotFoundError"
+        }));
+    }
 
     // Try to get the revision
     match metadata.get_revision(repo.id, &revision).await {
@@ -519,6 +536,52 @@ mod tests {
         let body: serde_json::Value = actix_test::read_body_json(resp).await;
         assert_eq!(body["id"], "testuser/my-model");
         assert_eq!(body["name"], "my-model");
+    }
+
+    #[actix_web::test]
+    async fn test_get_repo_info_private_denies_non_owner() {
+        let (token_store, metadata) = setup_test_env().await;
+        let token = token_store.create_token("attacker", "t", "read").await.unwrap();
+        // 私有 repo,owner 是别人
+        metadata.create_repo("owner", "secret", RepoType::Model, true).await.unwrap();
+
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(token_store.clone()))
+                .app_data(web::Data::new(metadata.clone()))
+                .route("/api/models/{ns}/{repo}", web::get().to(get_repo_model))
+        ).await;
+
+        let req = actix_test::TestRequest::get()
+            .uri("/api/models/owner/secret")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request();
+
+        let resp = actix_test::call_service(&app, req).await;
+        assert_eq!(resp.status(), actix_web::http::StatusCode::NOT_FOUND);
+    }
+
+    #[actix_web::test]
+    async fn test_get_revision_private_denies_non_owner() {
+        let (token_store, metadata) = setup_test_env().await;
+        let token = token_store.create_token("attacker", "t", "read").await.unwrap();
+        // 私有 repo;访问校验在 repo 加载后、revision 解析前触发,无需 HEAD。
+        metadata.create_repo("owner", "secret", RepoType::Model, true).await.unwrap();
+
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(token_store.clone()))
+                .app_data(web::Data::new(metadata.clone()))
+                .route("/api/models/{ns}/{repo}/revision/{revision}", web::get().to(get_revision_model))
+        ).await;
+
+        let req = actix_test::TestRequest::get()
+            .uri("/api/models/owner/secret/revision/main")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request();
+
+        let resp = actix_test::call_service(&app, req).await;
+        assert_eq!(resp.status(), actix_web::http::StatusCode::NOT_FOUND);
     }
 
     #[actix_web::test]

@@ -2,7 +2,7 @@ use actix_web::{web, HttpRequest, HttpResponse};
 use crate::auth::extract::{AuthUser, AuthRead};
 use crate::metadata::{MetadataStore, RepoType};
 use crate::config::HubConfig;
-use super::shared::resolve_revision;
+use super::shared::{resolve_revision, can_access_repo};
 
 /// Internal helper for file resolve/download
 async fn handle_resolve(
@@ -35,7 +35,7 @@ async fn handle_resolve(
     };
 
     // C-AUTH-1: 私有 repo 仅 owner 可访问。返回 404 而非 403,避免泄露私有 repo 的存在性。
-    if repo.private && repo.namespace != auth.info.username {
+    if !can_access_repo(&repo, &auth.info.username) {
         return HttpResponse::NotFound().json(serde_json::json!({
             "error": "Repository not found",
             "error_type": "NotFoundError"
