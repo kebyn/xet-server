@@ -46,6 +46,14 @@ async fn do_exchange(
         }
     };
 
+    // C-AUTH-2: 私有 repo 仅 owner 可换取 token(读写皆然)。404 不泄露存在性。
+    if repo.private && repo.namespace != info.username {
+        return HttpResponse::NotFound().json(serde_json::json!({
+            "error": "Repository not found",
+            "error_type": "NotFoundError"
+        }));
+    }
+
     // Determine revision
     let revision = if path_revision == "main" || path_revision.is_empty() {
         match metadata.get_head(repo.id).await {
@@ -319,6 +327,26 @@ mod tests {
 
         let resp = test::call_service(&app, req).await;
         assert!(resp.status().is_success());
+    }
+
+    #[actix_web::test]
+    async fn test_exchange_private_repo_denies_non_owner() {
+        let (token_store, xet_signer, metadata, config) = setup_test_env().await;
+        let token = token_store.create_token("attacker", "t", "read").await.unwrap();
+        metadata.create_repo("owner", "repo", RepoType::Model, true).await.unwrap();
+        let app = test::init_service(App::new()
+            .app_data(web::Data::new(token_store.clone()))
+            .app_data(web::Data::new(xet_signer.clone()))
+            .app_data(web::Data::new(metadata.clone()))
+            .app_data(web::Data::new(config.clone()))
+            .route("/api/models/{namespace}/{repo}/read/{revision}", web::post().to(exchange_model_read))
+        ).await;
+        let req = test::TestRequest::post()
+            .uri("/api/models/owner/repo/read/main")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), actix_web::http::StatusCode::NOT_FOUND);
     }
 
     #[actix_web::test]
