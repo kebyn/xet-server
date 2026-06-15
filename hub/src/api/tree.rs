@@ -24,7 +24,8 @@ fn infer_directories(entries: &[FileEntry], prefix: &str) -> Vec<String> {
         let rel_path = if prefix.is_empty() {
             entry.path.clone()
         } else {
-            entry.path.strip_prefix(prefix).unwrap_or(&entry.path).to_string()
+            let prefix_with_slash = format!("{}/", prefix);
+            entry.path.strip_prefix(&prefix_with_slash).unwrap_or(&entry.path).to_string()
         };
 
         // If path contains '/', the part before '/' is a directory
@@ -141,7 +142,8 @@ async fn handle_tree(
             let rel_path = if tree_path.is_empty() {
                 entry.path.clone()
             } else {
-                entry.path.strip_prefix(&tree_path).unwrap_or(&entry.path).to_string()
+                let prefix_with_slash = format!("{}/", tree_path);
+                entry.path.strip_prefix(&prefix_with_slash).unwrap_or(&entry.path).to_string()
             };
             if !rel_path.contains('/') {
                 tree_entries.push(TreeEntry {
@@ -236,6 +238,16 @@ mod tests {
     use actix_web::{test as actix_test, App};
     use crate::auth::token_store::TokenStore;
     use crate::metadata::{FileEntry, Revision, SqliteMetadataStore};
+
+    #[test]
+    fn test_infer_directories_respects_path_boundary() {
+        let entries = vec![FileEntry {
+            path: "model/sub/a.bin".to_string(), repo_id: 1, commit_id: "c".to_string(),
+            size: 1, cas_hash: "h".to_string(), is_lfs: true,
+        }];
+        let dirs = infer_directories(&entries, "model");
+        assert_eq!(dirs, vec!["sub".to_string()]);
+    }
 
     async fn setup_test_env_with_files() -> (std::sync::Arc<TokenStore>, std::sync::Arc<dyn MetadataStore>) {
         let token_store = std::sync::Arc::new(TokenStore::in_memory().await.unwrap());
