@@ -117,7 +117,6 @@ pub async fn gc_status(
                 "candidates": s.candidates,
                 "deleted_lfs_blobs": s.deleted_lfs_blobs,
                 "deleted_xorbs": s.deleted_xorbs,
-                "deleted_shards": s.deleted_shards,
                 "bloom_protected": s.bloom_protected,
                 "grace_period_skipped": s.grace_period_skipped,
                 "errors": s.errors,

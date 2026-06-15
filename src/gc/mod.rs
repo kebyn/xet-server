@@ -40,7 +40,7 @@ use crate::gc::scanner::IncrementalScanner;
 use crate::config::GcConfig;
 use crate::storage::StorageBackend;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
@@ -60,7 +60,8 @@ pub struct IncrementalGcStats {
     /// Number of objects actually deleted.
     pub deleted_lfs_blobs: usize,
     pub deleted_xorbs: usize,
-    pub deleted_shards: usize,
+    /// Note: shards are NEVER deleted by incremental GC (C2 fix).
+    /// Shard references are tracked by Hub's file_tree, which we cannot query.
     /// Objects skipped by grace period.
     pub grace_period_skipped: usize,
     /// Objects skipped because they're in the bloom filter (referenced).
@@ -203,6 +204,27 @@ impl IncrementalGarbageCollector {
                     completed = scan_result.scan_completed,
                     "Incremental scan phase completed"
                 );
+
+                // C1 fix: If scan is incomplete (timeout), skip deletion phase.
+                // The bloom filter only contains a subset of references, so computing
+                // deletion candidates would risk deleting referenced data.
+                // Save checkpoint to resume next cycle from where we left off.
+                if !scan_result.scan_completed {
+                    warn!(
+                        "Scan incomplete (timeout or error). Skipping deletion phase. \
+                         Checkpoint saved — next GC cycle will resume from cursor."
+                    );
+                    // Save bloom and checkpoint, then return without deleting
+                    if let Err(e) = self.save_bloom_filter(&bloom).await {
+                        warn!("Failed to save bloom filter: {}", e);
+                    }
+                    if let Err(e) = checkpoint.save(&**self.storage).await {
+                        warn!("Failed to save checkpoint: {}", e);
+                    }
+                    stats.duration_seconds = start.elapsed().as_secs_f64();
+                    stats.last_run = Some(chrono::Utc::now());
+                    return Ok(stats);
+                }
             }
             Err(e) => {
                 error!("Incremental scan failed: {}", e);
@@ -215,14 +237,14 @@ impl IncrementalGarbageCollector {
         // ── Phase 4: Compute Candidates ────────────────────────────────────
         let grace = GracePeriod::new(&self.config.grace);
 
-        // List all objects and compute deletion candidates
-        let (lfs_candidates, xorb_candidates, shard_candidates) =
+        // List all objects and compute deletion candidates.
+        // C2 fix: Shards are not candidates for deletion.
+        let (lfs_candidates, xorb_candidates) =
             self.compute_candidates(&bloom, &grace, &mut stats).await?;
 
         info!(
             lfs_candidates = lfs_candidates.len(),
             xorb_candidates = xorb_candidates.len(),
-            shard_candidates = shard_candidates.len(),
             bloom_protected = stats.bloom_protected,
             grace_skipped = stats.grace_period_skipped,
             "Computed deletion candidates"
@@ -230,16 +252,14 @@ impl IncrementalGarbageCollector {
 
         // ── Phase 5: Delete + Save ─────────────────────────────────────────
         if !self.config.dry_run {
-            self.delete_candidates(&lfs_candidates, &xorb_candidates, &shard_candidates, &mut stats).await?;
+            self.delete_candidates(&lfs_candidates, &xorb_candidates, &mut stats).await?;
         } else {
             stats.deleted_lfs_blobs = lfs_candidates.len();
             stats.deleted_xorbs = xorb_candidates.len();
-            stats.deleted_shards = shard_candidates.len();
             info!(
-                "Dry run: would delete {} LFS, {} xorbs, {} shards",
+                "Dry run: would delete {} LFS, {} xorbs",
                 lfs_candidates.len(),
                 xorb_candidates.len(),
-                shard_candidates.len(),
             );
         }
 
@@ -262,12 +282,11 @@ impl IncrementalGarbageCollector {
         stats.last_run = Some(chrono::Utc::now());
 
         info!(
-            "Incremental GC completed in {:.1}s: deleted {} LFS, {} xorbs, {} shards \
+            "Incremental GC completed in {:.1}s: deleted {} LFS, {} xorbs \
              (dry_run={}, bloom_items={}, scan_completed={})",
             stats.duration_seconds,
             stats.deleted_lfs_blobs,
             stats.deleted_xorbs,
-            stats.deleted_shards,
             stats.dry_run,
             stats.bloom_items,
             stats.scan_completed,
@@ -307,15 +326,18 @@ impl IncrementalGarbageCollector {
     }
 
     /// Compute deletion candidates by comparing storage contents against the bloom filter.
+    ///
+    /// C2 fix: Shards are NOT deleted by incremental GC because we have no way to verify
+    /// whether they're still referenced by Hub's file_tree. Shard lifecycle requires
+    /// a separate mechanism (e.g., Hub webhook, manual cleanup, or future reference tracking).
     async fn compute_candidates(
         &self,
         bloom: &BloomFilterProtectedSet,
         grace: &GracePeriod,
         stats: &mut IncrementalGcStats,
-    ) -> Result<(Vec<(String, u64)>, Vec<(String, u64)>, Vec<(String, u64)>), String> {
+    ) -> Result<(Vec<(String, u64)>, Vec<(String, u64)>), String> {
         let mut lfs_candidates = Vec::new();
         let mut xorb_candidates = Vec::new();
-        let mut shard_candidates = Vec::new();
 
         // Scan LFS blobs
         let lfs_blobs = self.storage.list_objects_with_mtime("lfs/objects").await
@@ -358,32 +380,26 @@ impl IncrementalGarbageCollector {
             xorb_candidates.push((key, mtime));
         }
 
-        // Scan shards (using mtime heuristic since we don't track shard refs in bloom)
-        let shards = self.storage.list_objects_with_mtime("shards").await
-            .map_err(|e| format!("Failed to list shards: {}", e))?;
+        // C2 fix: Shards are scanned for reference extraction (in Phase 3) but NEVER deleted.
+        // Shard references are tracked by Hub's file_tree, which the incremental GC cannot query.
+        // Deleting shards based on mtime alone would cause cascading data loss:
+        //   1. Shard is deleted (age > grace period)
+        //   2. Next GC: shard can't be scanned → its xorb/LFS refs not in bloom filter
+        //   3. Those xorbs/LFS blobs are then falsely identified as orphans and deleted
 
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-        for (key, mtime) in shards {
-            // Shards don't have bloom filter protection — use grace period only
-            let age = now.saturating_sub(mtime);
-            if age <= self.config.grace.absolute_seconds {
-                stats.grace_period_skipped += 1;
-                continue;
-            }
-            shard_candidates.push((key, mtime));
-        }
+        stats.candidates = (lfs_candidates.len() + xorb_candidates.len()) as u64;
 
-        stats.candidates = (lfs_candidates.len() + xorb_candidates.len() + shard_candidates.len()) as u64;
-
-        Ok((lfs_candidates, xorb_candidates, shard_candidates))
+        Ok((lfs_candidates, xorb_candidates))
     }
 
-    /// Delete candidate objects in batches with retry.
+    /// Delete candidate objects in batches.
+    ///
+    /// C2 fix: Only deletes LFS blobs and xorbs. Shards are NOT deleted by incremental GC
+    /// because we cannot verify whether they're still referenced by Hub's file_tree.
     async fn delete_candidates(
         &self,
         lfs_keys: &[(String, u64)],
         xorb_keys: &[(String, u64)],
-        shard_keys: &[(String, u64)],
         stats: &mut IncrementalGcStats,
     ) -> Result<(), String> {
         let batch_size = self.config.delete_batch_size;
@@ -414,23 +430,7 @@ impl IncrementalGarbageCollector {
             }
         }
 
-        // Delete shards + cleanup sidecars
-        for chunk in shard_keys.chunks(batch_size) {
-            for (key, _) in chunk {
-                let shard_hash = key.strip_prefix("shards/").unwrap_or(key);
-                match self.storage.delete(key).await {
-                    Ok(_) => {
-                        stats.deleted_shards += 1;
-                        // Clean up sidecar
-                        let _ = self.ref_tracker.remove_references(shard_hash).await;
-                    }
-                    Err(e) => {
-                        warn!("Failed to delete shard {}: {}", key, e);
-                        stats.errors += 1;
-                    }
-                }
-            }
-        }
+        // C2 fix: Shards are NOT deleted. See compute_candidates for rationale.
 
         Ok(())
     }
