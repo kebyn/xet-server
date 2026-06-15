@@ -647,4 +647,114 @@ impl StorageBackend for S3Storage {
 
         Ok(size)
     }
+
+    /// S3-native paged listing using list_objects_v2 with max-keys and start-after.
+    ///
+    /// This is efficient for incremental GC: the scanner can resume from a checkpoint
+    /// cursor without listing all objects. Server-side pagination avoids loading
+    /// the entire key space into memory.
+    async fn list_objects_paged(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+        page_size: usize,
+    ) -> StorageResult<(Vec<String>, Option<String>, bool)> {
+        let mut req = self
+            .client
+            .list_objects_v2()
+            .bucket(&self.bucket)
+            .prefix(prefix)
+            .max_keys(page_size as i32);
+
+        if let Some(cursor) = start_after {
+            req = req.start_after(cursor);
+        }
+
+        let resp = req.send().await.map_err(|e| {
+            StorageError::Internal(format!("S3 list_objects_v2 paged failed: {}", e))
+        })?;
+
+        let keys: Vec<String> = resp.contents().iter()
+            .filter_map(|obj| obj.key().map(|k| k.to_string()))
+            .collect();
+
+        let has_more = resp.is_truncated().unwrap_or(false);
+        let next_cursor = if has_more {
+            keys.last().cloned()
+        } else {
+            None
+        };
+
+        Ok((keys, next_cursor, has_more))
+    }
+
+    /// S3 conditional PUT using If-None-Match / If-Match headers.
+    ///
+    /// - expected_etag = None: If-None-Match: * (write only if key absent)
+    /// - expected_etag = Some(etag): If-Match: etag (write only if etag matches)
+    ///
+    /// Returns the new ETag on success.
+    /// Returns StorageError::ConditionFailed if the condition is not met.
+    async fn put_if_absent_or_expired(
+        &self,
+        key: &str,
+        data: Bytes,
+        expected_etag: Option<&str>,
+    ) -> StorageResult<String> {
+        let mut req = self
+            .client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .body(data.to_vec().into());
+
+        match expected_etag {
+            None => {
+                // Write only if absent: If-None-Match: *
+                req = req.if_none_match("*");
+            }
+            Some(etag) => {
+                // Write only if existing etag matches (lease expired check)
+                req = req.if_match(etag);
+            }
+        }
+
+        let result = req.send().await;
+
+        match result {
+            Ok(output) => {
+                let new_etag = output.e_tag().unwrap_or("\"unknown\"").to_string();
+                Ok(new_etag)
+            }
+            Err(e) => {
+                let err_str = e.to_string();
+                // S3 returns PreconditionFailed for If-None-Match / If-Match failures
+                if err_str.contains("PreconditionFailed") || err_str.contains("precondition") {
+                    Err(StorageError::ConditionFailed)
+                } else {
+                    Err(StorageError::Internal(format!("S3 conditional put failed: {}", e)))
+                }
+            }
+        }
+    }
+
+    /// Get the S3 ETag for an object (used for lease management).
+    async fn get_etag(&self, key: &str) -> StorageResult<Option<String>> {
+        let result = self
+            .client
+            .head_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await
+            .map_err(|e| {
+                if e.to_string().contains("NotFound") {
+                    StorageError::NotFound(key.to_string())
+                } else {
+                    StorageError::Internal(format!("S3 head_object failed: {}", e))
+                }
+            })?;
+
+        Ok(result.e_tag().map(|s| s.to_string()))
+    }
 }

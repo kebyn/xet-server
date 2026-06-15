@@ -865,6 +865,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "bit-vec"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2c54ff287cfc0a34f38a6b832ea1bd8e448a330b3e40a50859e6488bee07f22"
+
+[[package]]
 name = "bitflags"
 version = "2.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -903,6 +909,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cdd35008169921d80bc60d3d0ab416eecb028c4cd653352907921d95084790be"
 dependencies = [
  "hybrid-array",
+]
+
+[[package]]
+name = "bloomfilter"
+version = "1.0.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c541c70a910b485670304fd420f0eab8f7bde68439db6a8d98819c3d2774d7e2"
+dependencies = [
+ "bit-vec",
+ "getrandom 0.2.17",
+ "siphasher",
 ]
 
 [[package]]
@@ -3619,6 +3636,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "703d5c7ef118737c72f1af64ad2f6f8c5e1921f818cdcb97b8fe6fc69bf66214"
 
 [[package]]
+name = "siphasher"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
+
+[[package]]
 name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4983,8 +5006,10 @@ dependencies = [
  "base64 0.22.1",
  "bincode",
  "blake3",
+ "bloomfilter",
  "bytes",
  "chrono",
+ "crc32fast",
  "criterion",
  "ed25519-dalek",
  "futures-util",
@@ -4996,7 +5021,6 @@ dependencies = [
  "parking_lot",
  "pkcs8",
  "rand 0.8.6",
- "reqwest",
  "serde",
  "serde_json",
  "serial_test",

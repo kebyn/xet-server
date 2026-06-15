@@ -351,33 +351,20 @@ impl Default for ReferenceTrackerConfig {
 ///
 /// # Incremental GC (v2)
 ///
-/// The v2 incremental GC system adds Bloom filter-based reference tracking,
-/// checkpoint-based scanning, grace periods with soft cycles, multi-node
-/// lease coordination, and an optional local SQLite reference cache.
-/// Legacy fields (`hub_base_url`, `hub_internal_token`, `http_timeout_seconds`,
-/// `grace_period_seconds`) are retained for backward compatibility with the
-/// original sidecar GC implementation in `src/gc/mod.rs`. They will be removed
-/// in Task 20 once the incremental GC fully replaces the legacy path.
+/// The v2 incremental GC system uses:
+/// - Bloom filter-based reference tracking (O(1) lookups, ~17MB for 10M items)
+/// - Checkpoint-based incremental scanning (crash recovery, resume from cursor)
+/// - Two-tier grace periods (absolute wall-clock + soft cycle-based)
+/// - S3-based lease coordination for multi-node deployments
+/// - Sidecar `.refs.json` files for reference tracking
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GcConfig {
-    // ── Legacy fields (used by existing src/gc/mod.rs) ──────────────────
     /// Enable background GC task
     pub enabled: bool,
     /// GC run interval in seconds
     pub interval_seconds: u64,
-    /// Grace period in seconds for newly uploaded blobs (legacy flat field).
-    /// New code should prefer `grace.absolute_seconds`.
-    pub grace_period_seconds: u64,
     /// Dry-run mode: report stats but don't actually delete
     pub dry_run: bool,
-    /// Hub API base URL (for querying referenced hashes)
-    pub hub_base_url: String,
-    /// Internal token for authenticating with Hub's /internal/* endpoints
-    pub hub_internal_token: String,
-    /// HTTP timeout in seconds for GC requests to Hub.
-    /// Configure via `GC_HTTP_TIMEOUT_SECONDS` environment variable.
-    /// Default: 300 (5 minutes).
-    pub http_timeout_seconds: u64,
 
     // ── Incremental GC v2 fields ────────────────────────────────────────
     /// Working directory for GC state (checkpoints, bloom filter, leases).
@@ -402,14 +389,9 @@ pub struct GcConfig {
 impl Default for GcConfig {
     fn default() -> Self {
         Self {
-            // Legacy defaults
             enabled: false,             // Disabled by default, must opt-in
             interval_seconds: 3600,     // Every hour
-            grace_period_seconds: 600,  // 10 minutes grace period (legacy)
             dry_run: true,              // Dry-run by default for safety
-            hub_base_url: "http://localhost:8080".to_string(),
-            hub_internal_token: String::new(),
-            http_timeout_seconds: 300,
             // Incremental GC v2 defaults
             data_dir: "/var/lib/cas/gc".to_string(),
             bloom: BloomConfig::default(),
@@ -473,19 +455,6 @@ impl GcConfig {
         }
         if let Ok(val) = std::env::var("GC_DELETE_BATCH_SIZE") {
             config.delete_batch_size = val.parse().unwrap_or(config.delete_batch_size);
-        }
-        // Legacy env var support (for src/gc/mod.rs compat)
-        if let Ok(val) = std::env::var("GC_GRACE_PERIOD_SECONDS") {
-            config.grace_period_seconds = val.parse().unwrap_or(config.grace_period_seconds);
-        }
-        if let Ok(val) = std::env::var("GC_HUB_BASE_URL") {
-            config.hub_base_url = val;
-        }
-        if let Ok(val) = std::env::var("GC_HUB_INTERNAL_TOKEN") {
-            config.hub_internal_token = val;
-        }
-        if let Ok(val) = std::env::var("GC_HTTP_TIMEOUT_SECONDS") {
-            config.http_timeout_seconds = val.parse().unwrap_or(config.http_timeout_seconds);
         }
 
         // Incremental GC v2 environment variables
@@ -566,9 +535,6 @@ impl ServerConfig {
         if self.gc.enabled {
             if self.gc.interval_seconds == 0 {
                 return Err("GC_INTERVAL_SECONDS must be > 0 when GC is enabled (got 0).".to_string());
-            }
-            if self.gc.grace_period_seconds == 0 {
-                tracing::warn!("GC_GRACE_PERIOD_SECONDS is 0. This disables the grace period and may cause race conditions with concurrent uploads.");
             }
             if self.gc.grace.absolute_seconds == 0 && self.gc.grace.soft_cycles == 0 {
                 tracing::warn!(
@@ -763,17 +729,23 @@ pub fn check_public_key_permissions(path: &str) -> Option<String> {
 pub fn validate_gc_config(config: &ServerConfig) -> Vec<String> {
     let mut warnings = Vec::new();
     if config.gc.enabled {
-        if config.gc.hub_internal_token.is_empty() {
+        if config.gc.bloom.expected_items == 0 {
             warnings.push(
-                "GC is enabled but GC_HUB_INTERNAL_TOKEN is empty. \
-                GC requires an internal token to query Hub's /internal/referenced-hashes endpoint. \
-                Set GC_HUB_INTERNAL_TOKEN to a valid token before enabling GC.".to_string(),
+                "GC is enabled but bloom.expected_items is 0. \
+                Set GC_BLOOM_EXPECTED_ITEMS to a reasonable estimate of total chunks.".to_string(),
             );
         }
-        if config.gc.hub_base_url == "http://localhost:8080" && config.server.host != "127.0.0.1" {
+        if config.gc.grace.absolute_seconds == 0 && config.gc.grace.soft_cycles == 0 {
             warnings.push(
-                "GC is enabled with default hub_base_url (http://localhost:8080) but CAS is not bound to localhost. \
-                In distributed deployments, set GC_HUB_BASE_URL to the actual Hub address.".to_string(),
+                "GC is enabled with no grace period protection. \
+                Set GC_GRACE_ABSOLUTE_SECONDS or GC_GRACE_SOFT_CYCLES to prevent \
+                premature deletion of recently uploaded blobs.".to_string(),
+            );
+        }
+        if config.gc.dry_run {
+            warnings.push(
+                "GC is enabled in dry-run mode. No blobs will actually be deleted. \
+                Set GC_DRY_RUN=false to enable actual deletion.".to_string(),
             );
         }
     }

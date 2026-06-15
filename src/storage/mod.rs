@@ -18,6 +18,9 @@ pub enum StorageError {
 
     #[error("Invalid argument: {0}")]
     InvalidArgument(String),
+
+    #[error("Condition failed (optimistic locking)")]
+    ConditionFailed,
 }
 
 pub type StorageResult<T> = Result<T, StorageError>;
@@ -122,6 +125,99 @@ pub trait StorageBackend: Send + Sync {
                 format!("Failed to write to {}: {}", dest.display(), e)
             ))?;
         Ok(())
+    }
+
+    /// List objects matching a prefix in pages, supporting incremental scanning.
+    ///
+    /// Returns `(keys, next_cursor, has_more)` where:
+    /// - `keys`: up to `page_size` object keys (full keys like "shards/abc123")
+    /// - `next_cursor`: pass as `start_after` to get the next page; None if no more pages
+    /// - `has_more`: true if there are more objects beyond this page
+    ///
+    /// Used by incremental GC to resume scanning from a checkpoint without
+    /// listing all objects at once.
+    ///
+    /// Default implementation: calls list_objects() and slices by page.
+    /// Storage backends should override for efficient server-side pagination.
+    async fn list_objects_paged(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+        page_size: usize,
+    ) -> StorageResult<(Vec<String>, Option<String>, bool)> {
+        let all_keys = self.list_objects(prefix).await?;
+
+        // Filter keys after the cursor (if provided)
+        let filtered: Vec<String> = if let Some(cursor) = start_after {
+            all_keys.into_iter().filter(|k| k.as_str() > cursor).collect()
+        } else {
+            all_keys
+        };
+
+        let has_more = filtered.len() > page_size;
+        let page: Vec<String> = filtered.into_iter().take(page_size).collect();
+        let next_cursor = if has_more {
+            page.last().cloned()
+        } else {
+            None
+        };
+
+        Ok((page, next_cursor, has_more))
+    }
+
+    /// Conditionally put an object only if it doesn't exist or the existing etag matches.
+    ///
+    /// This implements optimistic locking for concurrent operations:
+    /// - `expected_etag = None`: write only if the key does NOT exist (If-None-Match: *)
+    /// - `expected_etag = Some(etag)`: write only if existing object's etag matches (If-Match)
+    ///
+    /// Returns the new etag on success.
+    /// Returns `StorageError::ConditionFailed` if the condition is not met.
+    ///
+    /// Used by GC coordinator for S3-based lease management.
+    ///
+    /// Default implementation: uses exists() + put() (NOT atomic — backends should override).
+    async fn put_if_absent_or_expired(
+        &self,
+        key: &str,
+        data: Bytes,
+        expected_etag: Option<&str>,
+    ) -> StorageResult<String> {
+        // Default: non-atomic check-then-put. Backends MUST override for atomicity.
+        tracing::warn!(
+            "put_if_absent_or_expired using default (non-atomic) implementation for key={}; \
+             this is a race condition. Override in your StorageBackend implementation.",
+            key
+        );
+
+        let exists = self.exists(key).await?;
+
+        match expected_etag {
+            None => {
+                // Write only if absent
+                if exists {
+                    return Err(StorageError::ConditionFailed);
+                }
+                self.put(key, data).await?;
+                // No real etag in default impl, return placeholder
+                Ok("\"default\"".to_string())
+            }
+            Some(_expected) => {
+                // Write if expired (etag match) — default impl can't check etag
+                // Just overwrite; backends should override for proper etag checking
+                self.put(key, data).await?;
+                Ok("\"default\"".to_string())
+            }
+        }
+    }
+
+    /// Get the etag (or equivalent identifier) of an object.
+    /// Used for conditional operations (lease management).
+    ///
+    /// Default implementation: returns None (not supported).
+    /// Storage backends should override for etag support.
+    async fn get_etag(&self, _key: &str) -> StorageResult<Option<String>> {
+        Ok(None)
     }
 }
 

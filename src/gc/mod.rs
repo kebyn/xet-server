@@ -1,593 +1,433 @@
 //! Garbage collection for orphaned blobs
 //!
-//! GC runs as a background task that periodically:
-//! 1. Scans storage for all blobs (LFS and xorbs)
-//! 2. Queries Hub for all referenced hashes
-//! 3. Computes orphaned set (storage - referenced)
-//! 4. Applies grace period protection
-//! 5. Deletes orphaned blobs (or reports in dry_run mode)
+//! # Incremental GC (v2)
+//!
+//! The incremental GC system uses a 5-phase approach:
+//!
+//! 1. **Acquire lease** — multi-node coordination via S3 conditional PUT
+//! 2. **Load checkpoint + bloom filter** — crash recovery, resume from cursor
+//! 3. **Incremental scan** — populate bloom filter from shard references
+//! 4. **Compute candidates** — storage - bloom protected set, apply grace period
+//! 5. **Batch delete** — delete orphans, save bloom + checkpoint, release lease
+//!
+//! Key components:
+//! - `BloomFilterProtectedSet` — O(1) probabilistic reference tracking
+//! - `GcCheckpoint` — crash recovery via S3 pagination cursor
+//! - `IncrementalScanner` — paged scanning with 3-layer defense
+//! - `GcCoordinator` — multi-node lease management
+//! - `GracePeriod` — two-tier protection (absolute + soft cycles)
+//! - `SidecarReferenceTracker` — reference tracking via JSON sidecar files
 
 pub mod errors;
+pub mod bloom;
+pub mod checkpoint;
+pub mod reference_tracker;
+pub mod scanner;
+pub mod coordinator;
+pub mod grace;
 
+
+// ============================================================================
+// Incremental GC (v2) — replaces the legacy full-scan GC above
+// ============================================================================
+
+use crate::gc::bloom::BloomFilterProtectedSet;
+use crate::gc::checkpoint::GcCheckpoint;
+use crate::gc::coordinator::GcCoordinator;
+use crate::gc::grace::GracePeriod;
+use crate::gc::reference_tracker::ReferenceTracker;
+use crate::gc::scanner::IncrementalScanner;
 use crate::config::GcConfig;
 use crate::storage::StorageBackend;
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
-/// Statistics from a GC run
+/// Statistics from an incremental GC run.
 #[derive(Debug, Clone, Default)]
-pub struct GcStats {
-    pub total_lfs_blobs: usize,
-    pub total_xorbs: usize,
-    pub total_shards: usize,
-    pub referenced_lfs_blobs: usize,
-    pub referenced_xorbs: usize,
-    pub orphaned_lfs_blobs: usize,
-    pub orphaned_xorbs: usize,
+pub struct IncrementalGcStats {
+    /// Whether this was a dry run (no actual deletions).
+    pub dry_run: bool,
+    /// Whether the lease was acquired.
+    pub lease_acquired: bool,
+    /// Number of shards scanned.
+    pub shards_scanned: u64,
+    /// Number of references inserted into the bloom filter.
+    pub refs_inserted: u64,
+    /// Number of candidate objects for deletion (before grace period).
+    pub candidates: u64,
+    /// Number of objects actually deleted.
     pub deleted_lfs_blobs: usize,
     pub deleted_xorbs: usize,
-    /// C1 fix: Track deleted shards
     pub deleted_shards: usize,
+    /// Objects skipped by grace period.
     pub grace_period_skipped: usize,
+    /// Objects skipped because they're in the bloom filter (referenced).
+    pub bloom_protected: usize,
+    /// Errors encountered during deletion.
     pub errors: usize,
+    /// Sidecars that were missing (fell back to shard parsing).
+    pub sidecar_missing: u64,
+    /// Total duration in seconds.
     pub duration_seconds: f64,
-    pub dry_run: bool,
-    /// M5 fix: Use DateTime<Utc> for type safety instead of String
+    /// When this run completed.
     pub last_run: Option<chrono::DateTime<chrono::Utc>>,
+    /// Bloom filter stats.
+    pub bloom_items: u64,
+    pub bloom_rebuild_count: u32,
+    /// Whether the scan completed (vs. timed out).
+    pub scan_completed: bool,
 }
 
-/// Garbage collector for cleaning up orphaned blobs
-pub struct GarbageCollector {
+/// Incremental garbage collector.
+///
+/// Replaces the legacy full-scan GC with a bloom-filter-based incremental
+/// approach. The 5-phase run flow:
+///
+/// 1. Acquire lease (multi-node coordination)
+/// 2. Load checkpoint + bloom filter (crash recovery)
+/// 3. Incremental scan → populate bloom filter
+/// 4. Compute candidates = storage - bloom protected set → apply grace period
+/// 5. Batch delete → save bloom + checkpoint → release lease
+pub struct IncrementalGarbageCollector {
     storage: Arc<Box<dyn StorageBackend>>,
-    hub_client: reqwest::Client,
+    ref_tracker: Arc<dyn ReferenceTracker>,
     config: GcConfig,
+    node_id: String,
 }
 
-impl GarbageCollector {
-    /// Create a new GarbageCollector
-    /// I4 fix: Returns Result instead of panicking on client build failure
-    pub fn new(storage: Arc<Box<dyn StorageBackend>>, config: GcConfig) -> Result<Self, String> {
-        let hub_client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(config.http_timeout_seconds))
-            .build()
-            .map_err(|e| format!("Failed to build GC hub client: {}", e))?;
-
+impl IncrementalGarbageCollector {
+    /// Create a new incremental GC.
+    pub fn new(
+        storage: Arc<Box<dyn StorageBackend>>,
+        ref_tracker: Arc<dyn ReferenceTracker>,
+        config: GcConfig,
+    ) -> Result<Self, String> {
+        let node_id = uuid::Uuid::new_v4().to_string();
         Ok(Self {
             storage,
-            hub_client,
+            ref_tracker,
             config,
+            node_id,
         })
     }
 
-    /// Get GC configuration
+    /// Get the GC configuration.
     pub fn config(&self) -> &GcConfig {
         &self.config
     }
 
-    /// Run a full GC cycle
-    pub async fn run(&self) -> Result<GcStats, String> {
+    /// Run a full incremental GC cycle.
+    pub async fn run(&self) -> Result<IncrementalGcStats, String> {
         let start = Instant::now();
-        let mut stats = GcStats {
+        let mut stats = IncrementalGcStats {
             dry_run: self.config.dry_run,
             ..Default::default()
         };
 
-        info!("GC started (dry_run={})", self.config.dry_run);
+        info!("Incremental GC started (dry_run={}, node_id={})", self.config.dry_run, self.node_id);
 
-        // Step 1: Scan storage for all blobs
-        let (lfs_blobs, xorbs, shards) = self.scan_storage(&mut stats).await?;
-        stats.total_lfs_blobs = lfs_blobs.len();
-        stats.total_xorbs = xorbs.len();
-        stats.total_shards = shards.len();
+        // ── Phase 1: Acquire Lease ─────────────────────────────────────────
+        let coordinator = Arc::new(GcCoordinator::new(
+            self.storage.clone(),
+            self.node_id.clone(),
+            self.config.lease.clone(),
+        ));
 
-        info!(
-            "GC scanned storage: {} LFS blobs, {} xorbs, {} shards",
-            stats.total_lfs_blobs, stats.total_xorbs, stats.total_shards
+        let lease_guard = match coordinator.try_acquire_lease().await {
+            Ok(Some(guard)) => {
+                stats.lease_acquired = true;
+                info!("Acquired GC lease");
+                guard
+            }
+            Ok(None) => {
+                info!("Could not acquire GC lease, skipping this cycle");
+                stats.duration_seconds = start.elapsed().as_secs_f64();
+                return Ok(stats);
+            }
+            Err(e) => {
+                return Err(format!("Failed to acquire lease: {}", e));
+            }
+        };
+
+        // ── Phase 2: Load Checkpoint + Bloom Filter ────────────────────────
+        let mut checkpoint = match GcCheckpoint::load(&**self.storage).await {
+            Ok(cp) => {
+                info!(
+                    cursor = ?cp.s3_cursor,
+                    status = ?cp.status,
+                    "Loaded GC checkpoint"
+                );
+                cp
+            }
+            Err(e) => {
+                warn!("Failed to load checkpoint: {}, starting fresh", e);
+                GcCheckpoint::new()
+            }
+        };
+
+        // Reset for new cycle (preserves cursor if previous cycle was incomplete)
+        checkpoint.reset_for_new_cycle();
+
+        let mut bloom = match self.load_bloom_filter().await {
+            Ok(b) => {
+                info!(
+                    items = b.stats().items_inserted,
+                    "Loaded bloom filter"
+                );
+                b
+            }
+            Err(e) => {
+                warn!("Failed to load bloom filter: {}, creating new one", e);
+                BloomFilterProtectedSet::new(self.config.bloom.clone())
+            }
+        };
+
+        // ── Phase 3: Incremental Scan ──────────────────────────────────────
+        let scanner = IncrementalScanner::new(
+            self.storage.clone(),
+            self.ref_tracker.clone(),
+            self.config.scanner.clone(),
         );
 
-        // Step 2: Query Hub for referenced hashes
-        let referenced_lfs = self.fetch_referenced_hashes().await?;
-        stats.referenced_lfs_blobs = referenced_lfs.len();
+        match scanner.scan(&mut bloom, &mut checkpoint).await {
+            Ok(scan_result) => {
+                stats.shards_scanned = scan_result.shards_scanned;
+                stats.refs_inserted = scan_result.refs_inserted;
+                stats.sidecar_missing = scan_result.sidecar_missing;
+                stats.scan_completed = scan_result.scan_completed;
+                info!(
+                    shards = scan_result.shards_scanned,
+                    refs = scan_result.refs_inserted,
+                    completed = scan_result.scan_completed,
+                    "Incremental scan phase completed"
+                );
+            }
+            Err(e) => {
+                error!("Incremental scan failed: {}", e);
+                checkpoint.mark_failed(e.to_string());
+                let _ = checkpoint.save(&**self.storage).await;
+                return Err(format!("Scan failed: {}", e));
+            }
+        }
 
-        info!("GC fetched {} referenced LFS hashes from Hub", stats.referenced_lfs_blobs);
+        // ── Phase 4: Compute Candidates ────────────────────────────────────
+        let grace = GracePeriod::new(&self.config.grace);
 
-        // Step 3: C1 fix - Identify orphaned shards first (using mtime heuristic)
-        // Only scan non-orphaned shards for xorb references to prevent storage leak
-        let orphaned_shards = self.compute_orphaned_shards(&shards, &mut stats);
-        let active_shard_keys: Vec<String> = shards
-            .iter()
-            .filter(|(key, _)| !orphaned_shards.contains(key))
-            .map(|(key, _)| key.clone())
-            .collect();
-
-        info!(
-            "GC identified {} orphaned shards (using mtime heuristic), {} active shards",
-            orphaned_shards.len(),
-            active_shard_keys.len()
-        );
-
-        // Step 4: Scan ONLY active shards for referenced xorbs
-        // This prevents orphaned shards from keeping their xorbs alive forever
-        let referenced_xorbs = self.scan_referenced_xorbs(&active_shard_keys).await?;
-        stats.referenced_xorbs = referenced_xorbs.len();
-
-        info!("GC scanned {} active shards, found {} referenced xorbs",
-            active_shard_keys.len(), stats.referenced_xorbs);
-
-        // Step 5: Compute orphaned sets
-        let orphaned_lfs = self.compute_orphaned_lfs(&lfs_blobs, &referenced_lfs, &mut stats);
-        let orphaned_xorbs = self.compute_orphaned_xorbs(&xorbs, &referenced_xorbs, &mut stats);
-        stats.orphaned_lfs_blobs = orphaned_lfs.len();
-        stats.orphaned_xorbs = orphaned_xorbs.len();
+        // List all objects and compute deletion candidates
+        let (lfs_candidates, xorb_candidates, shard_candidates) =
+            self.compute_candidates(&bloom, &grace, &mut stats).await?;
 
         info!(
-            "GC found {} orphaned LFS blobs, {} orphaned xorbs",
-            stats.orphaned_lfs_blobs, stats.orphaned_xorbs
+            lfs_candidates = lfs_candidates.len(),
+            xorb_candidates = xorb_candidates.len(),
+            shard_candidates = shard_candidates.len(),
+            bloom_protected = stats.bloom_protected,
+            grace_skipped = stats.grace_period_skipped,
+            "Computed deletion candidates"
         );
 
-        // Step 6: Delete orphans (or report in dry_run)
-        self.cleanup_orphans(&orphaned_lfs, &orphaned_xorbs, &mut stats).await?;
+        // ── Phase 5: Delete + Save ─────────────────────────────────────────
+        if !self.config.dry_run {
+            self.delete_candidates(&lfs_candidates, &xorb_candidates, &shard_candidates, &mut stats).await?;
+        } else {
+            stats.deleted_lfs_blobs = lfs_candidates.len();
+            stats.deleted_xorbs = xorb_candidates.len();
+            stats.deleted_shards = shard_candidates.len();
+            info!(
+                "Dry run: would delete {} LFS, {} xorbs, {} shards",
+                lfs_candidates.len(),
+                xorb_candidates.len(),
+                shard_candidates.len(),
+            );
+        }
 
-        // Step 7: C1 fix - Delete orphaned shards
-        self.cleanup_orphaned_shards(&orphaned_shards, &mut stats).await?;
+        // Save bloom filter and checkpoint
+        if let Err(e) = self.save_bloom_filter(&bloom).await {
+            warn!("Failed to save bloom filter: {}", e);
+        }
+        if let Err(e) = checkpoint.save(&**self.storage).await {
+            warn!("Failed to save checkpoint: {}", e);
+        }
+
+        // Update bloom stats
+        stats.bloom_items = bloom.stats().items_inserted;
+        stats.bloom_rebuild_count = bloom.stats().rebuild_count;
+
+        // Drop the lease guard (releases lease)
+        drop(lease_guard);
 
         stats.duration_seconds = start.elapsed().as_secs_f64();
-        stats.last_run = Some(chrono::Utc::now());  // M5 fix: Use DateTime<Utc> directly
+        stats.last_run = Some(chrono::Utc::now());
 
         info!(
-            "GC completed in {:.1}s: deleted {} LFS, {} xorbs, {} shards (dry_run={}, grace_skipped={})",
+            "Incremental GC completed in {:.1}s: deleted {} LFS, {} xorbs, {} shards \
+             (dry_run={}, bloom_items={}, scan_completed={})",
             stats.duration_seconds,
             stats.deleted_lfs_blobs,
             stats.deleted_xorbs,
             stats.deleted_shards,
             stats.dry_run,
-            stats.grace_period_skipped
+            stats.bloom_items,
+            stats.scan_completed,
         );
 
         Ok(stats)
     }
 
-    /// Scan storage and categorize blobs by type
-    /// Returns (lfs_blobs_with_mtime, xorbs_with_mtime, shards_with_mtime)
-    /// C1 fix: Also return mtime for shards to enable orphan detection
-    async fn scan_storage(
-        &self,
-        stats: &mut GcStats,
-    ) -> Result<(Vec<(String, u64)>, Vec<(String, u64)>, Vec<(String, u64)>), String> {
-        let lfs_blobs = self
-            .storage
-            .list_objects_with_mtime("lfs/objects")
-            .await
-            .map_err(|e| format!("Failed to list LFS blobs: {}", e))?;
-
-        let xorbs = self
-            .storage
-            .list_objects_with_mtime("xorbs")
-            .await
-            .map_err(|e| format!("Failed to list xorbs: {}", e))?;
-
-        // C1 fix: Get shards with mtime for orphan detection
-        let shards = self
-            .storage
-            .list_objects_with_mtime("shards")
-            .await
-            .map_err(|e| format!("Failed to list shards: {}", e))?;
-
-        // Count for stats (these are set later after computing orphans)
-        let _ = stats; // stats updated by caller
-
-        Ok((lfs_blobs, xorbs, shards))
+    /// Load the bloom filter from storage.
+    async fn load_bloom_filter(&self) -> Result<BloomFilterProtectedSet, String> {
+        let bloom_key = ".gc/bloom.bin";
+        match self.storage.get(bloom_key).await {
+            Ok(data) => {
+                let mut cursor = std::io::Cursor::new(data.to_vec());
+                BloomFilterProtectedSet::load(&mut cursor, self.config.bloom.clone())
+                    .map_err(|e| format!("Failed to load bloom filter: {}", e))
+            }
+            Err(crate::storage::StorageError::NotFound(_)) => {
+                Ok(BloomFilterProtectedSet::new(self.config.bloom.clone()))
+            }
+            Err(e) => Err(format!("Failed to read bloom filter: {}", e)),
+        }
     }
 
-    /// Fetch all referenced LFS hashes from Hub
-    /// M3 fix: Implements exponential backoff retry to handle transient network errors.
-    /// Retries up to 3 times with delays: 1s, 2s, 4s.
-    async fn fetch_referenced_hashes(&self) -> Result<HashSet<String>, String> {
-        let url = format!("{}/internal/referenced-hashes", self.config.hub_base_url);
+    /// Save the bloom filter to storage.
+    async fn save_bloom_filter(&self, bloom: &BloomFilterProtectedSet) -> Result<(), String> {
+        let bloom_key = ".gc/bloom.bin";
+        let mut buf = Vec::new();
+        bloom.save(&mut buf)
+            .map_err(|e| format!("Failed to serialize bloom filter: {}", e))?;
 
-        const MAX_RETRIES: u32 = 3;
-        let mut last_error = String::new();
+        self.storage.put(bloom_key, bytes::Bytes::from(buf))
+            .await
+            .map_err(|e| format!("Failed to save bloom filter: {}", e))?;
 
-        for attempt in 0..=MAX_RETRIES {
-            // Exponential backoff: 1s, 2s, 4s (skip delay on first attempt)
-            if attempt > 0 {
-                let delay = Duration::from_secs(1 << (attempt - 1));
-                // M3 fix: Log message clearly indicates this is a retry wait, not a failure
-                tracing::info!(
-                    "GC Hub request failed, waiting {}s before retry attempt {}/{}",
-                    delay.as_secs(), attempt, MAX_RETRIES
-                );
-                tokio::time::sleep(delay).await;
-            }
+        Ok(())
+    }
 
-            let resp = match self
-                .hub_client
-                .get(&url)
-                .header("Authorization", format!("Bearer {}", self.config.hub_internal_token))
-                .send()
-                .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    last_error = format!("Failed to query Hub: {}", e);
-                    tracing::warn!("GC Hub request failed (attempt {}/{}): {}", attempt + 1, MAX_RETRIES + 1, last_error);
-                    continue;
-                }
-            };
+    /// Compute deletion candidates by comparing storage contents against the bloom filter.
+    async fn compute_candidates(
+        &self,
+        bloom: &BloomFilterProtectedSet,
+        grace: &GracePeriod,
+        stats: &mut IncrementalGcStats,
+    ) -> Result<(Vec<(String, u64)>, Vec<(String, u64)>, Vec<(String, u64)>), String> {
+        let mut lfs_candidates = Vec::new();
+        let mut xorb_candidates = Vec::new();
+        let mut shard_candidates = Vec::new();
 
-            if !resp.status().is_success() {
-                last_error = format!("Hub returned status {}", resp.status());
-                tracing::warn!("GC Hub request failed (attempt {}/{}): {}", attempt + 1, MAX_RETRIES + 1, last_error);
-                // Don't retry on 4xx client errors (except 408, 429)
-                let status = resp.status();
-                if status.is_client_error() && status.as_u16() != 408 && status.as_u16() != 429 {
-                    return Err(last_error);
-                }
+        // Scan LFS blobs
+        let lfs_blobs = self.storage.list_objects_with_mtime("lfs/objects").await
+            .map_err(|e| format!("Failed to list LFS blobs: {}", e))?;
+
+        for (key, mtime) in lfs_blobs {
+            let oid = key.strip_prefix("lfs/objects/").unwrap_or(&key)
+                .split('/').next_back().unwrap_or(&key);
+
+            if bloom.contains(oid.as_bytes()) {
+                stats.bloom_protected += 1;
                 continue;
             }
 
-            let body: serde_json::Value = match resp.json().await {
-                Ok(b) => b,
-                Err(e) => {
-                    last_error = format!("Failed to parse Hub response: {}", e);
-                    tracing::warn!("GC Hub request failed (attempt {}/{}): {}", attempt + 1, MAX_RETRIES + 1, last_error);
-                    continue;
-                }
-            };
-
-            let hashes_array = body["hashes"]
-                .as_array()
-                .ok_or_else(|| "Hub response missing 'hashes' array".to_string())?;
-
-            let hashes: HashSet<String> = hashes_array
-                .iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect();
-
-            // Success - log retry if this wasn't the first attempt
-            if attempt > 0 {
-                tracing::info!("GC Hub request succeeded after {} retries", attempt);
+            if !grace.can_delete(&key, mtime).await {
+                stats.grace_period_skipped += 1;
+                continue;
             }
 
-            return Ok(hashes);
+            lfs_candidates.push((key, mtime));
         }
 
-        // All retries exhausted
-        Err(format!(
-            "GC Hub request failed after {} attempts: {}",
-            MAX_RETRIES + 1,
-            last_error
-        ))
-    }
+        // Scan xorbs
+        let xorbs = self.storage.list_objects_with_mtime("xorbs").await
+            .map_err(|e| format!("Failed to list xorbs: {}", e))?;
 
-    /// Scan all shards and collect referenced xorb hashes
-    /// I3 fix: Use concurrent shard fetching with bounded parallelism to reduce total GC time.
-    /// Processes shards in batches to avoid overwhelming the storage backend.
-    async fn scan_referenced_xorbs(&self, shard_keys: &[String]) -> Result<HashSet<String>, String> {
-        let mut referenced = HashSet::new();
+        for (key, mtime) in xorbs {
+            let xorb_hash = key.strip_prefix("xorbs/").unwrap_or(&key);
 
-        // I3: Process shards concurrently with bounded parallelism
-        // Using chunks of 10 to balance parallelism with resource usage
-        const BATCH_SIZE: usize = 10;
-
-        for chunk in shard_keys.chunks(BATCH_SIZE) {
-            let mut handles = vec![];
-
-            for shard_key in chunk {
-                let storage = self.storage.clone();
-                let key = shard_key.clone();
-
-                let handle = tokio::spawn(async move {
-                    let data = storage.get(&key).await
-                        .map_err(|e| format!("Failed to read shard {}: {}", key, e))?;
-
-                    // Parse shard to extract xorb references
-                    // For now, we use a simplified approach - in production, parse the shard properly
-                    // using MDBShardFile::parse() and iterate xorb_entries
-                    let mut xorb_hashes = HashSet::new();
-                    if let Ok(shard) = crate::format::shard::MDBShardFile::parse(&data) {
-                        for xorb_entry in &shard.xorb_entries {
-                            // M4 fix: Use to_hex() for consistency with xorb storage key format.
-                            // to_hex() is hex::encode(as_bytes()), but using the named method
-                            // makes the intent clearer and prevents future divergence.
-                            xorb_hashes.insert(xorb_entry.xorb_hash.to_hex());
-                        }
-                    } else {
-                        warn!("Failed to parse shard {}, skipping xorb extraction", key);
-                    }
-
-                    Ok::<HashSet<String>, String>(xorb_hashes)
-                });
-
-                handles.push(handle);
+            if bloom.contains(xorb_hash.as_bytes()) {
+                stats.bloom_protected += 1;
+                continue;
             }
 
-            // Wait for all tasks in this batch to complete
-            for handle in handles {
-                match handle.await {
-                    Ok(Ok(xorb_hashes)) => {
-                        referenced.extend(xorb_hashes);
-                    }
-                    Ok(Err(e)) => {
-                        return Err(e);
-                    }
-                    Err(e) => {
-                        return Err(format!("Task join error: {}", e));
-                    }
-                }
+            if !grace.can_delete(&key, mtime).await {
+                stats.grace_period_skipped += 1;
+                continue;
             }
+
+            xorb_candidates.push((key, mtime));
         }
 
-        Ok(referenced)
+        // Scan shards (using mtime heuristic since we don't track shard refs in bloom)
+        let shards = self.storage.list_objects_with_mtime("shards").await
+            .map_err(|e| format!("Failed to list shards: {}", e))?;
+
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        for (key, mtime) in shards {
+            // Shards don't have bloom filter protection — use grace period only
+            let age = now.saturating_sub(mtime);
+            if age <= self.config.grace.absolute_seconds {
+                stats.grace_period_skipped += 1;
+                continue;
+            }
+            shard_candidates.push((key, mtime));
+        }
+
+        stats.candidates = (lfs_candidates.len() + xorb_candidates.len() + shard_candidates.len()) as u64;
+
+        Ok((lfs_candidates, xorb_candidates, shard_candidates))
     }
 
-    /// Compute orphaned LFS blobs (excluding those in grace period)
-    /// I2 fix: Returns (key, mtime) pairs to avoid redundant get_mtime calls in cleanup
-    fn compute_orphaned_lfs(
-        &self,
-        all_blobs: &[(String, u64)],
-        referenced: &HashSet<String>,
-        stats: &mut GcStats,
-    ) -> Vec<(String, u64)> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let grace = self.config.grace_period_seconds;
-
-        all_blobs
-            .iter()
-            .filter(|(key, mtime)| {
-                // Extract OID from key
-                // Supports both formats: "lfs/objects/{oid}" and "lfs/objects/{prefix}/{oid}"
-                // M2 fix: Validate OID format (64 hex chars) for safety
-                let oid = key
-                    .strip_prefix("lfs/objects/")
-                    .unwrap_or(key)
-                    .split('/')
-                    .next_back()
-                    .unwrap_or(key);
-
-                // M2 fix: Validate OID format
-                let is_valid_oid = oid.len() == 64 && oid.chars().all(|c| c.is_ascii_hexdigit());
-                if !is_valid_oid {
-                    warn!("GC skipping LFS blob with invalid OID format: {} (OID: {})", key, oid);
-                    return false;
-                }
-
-                let is_orphaned = !referenced.contains(oid);
-                let is_old_enough = (now.saturating_sub(*mtime)) > grace;
-
-                if is_orphaned && !is_old_enough {
-                    stats.grace_period_skipped += 1;
-                }
-
-                is_orphaned && is_old_enough
-            })
-            .map(|(key, mtime)| (key.clone(), *mtime))
-            .collect()
-    }
-
-    /// Compute orphaned xorbs (excluding those in grace period)
-    /// I2 fix: Returns (key, mtime) pairs to avoid redundant get_mtime calls in cleanup
-    fn compute_orphaned_xorbs(
-        &self,
-        all_xorbs: &[(String, u64)],
-        referenced: &HashSet<String>,
-        stats: &mut GcStats,
-    ) -> Vec<(String, u64)> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let grace = self.config.grace_period_seconds;
-
-        all_xorbs
-            .iter()
-            .filter(|(key, mtime)| {
-                // Extract xorb hash from key (e.g., "xorbs/{hash}" -> "{hash}")
-                let xorb_hash = key.strip_prefix("xorbs/").unwrap_or(key);
-
-                let is_orphaned = !referenced.contains(xorb_hash);
-                let is_old_enough = (now.saturating_sub(*mtime)) > grace;
-
-                if is_orphaned && !is_old_enough {
-                    stats.grace_period_skipped += 1;
-                }
-
-                is_orphaned && is_old_enough
-            })
-            .map(|(key, mtime)| (key.clone(), *mtime))
-            .collect()
-    }
-
-    /// Delete orphaned blobs (or report in dry_run mode)
-    /// I2 fix: Uses mtime from scan_storage to avoid redundant get_mtime calls
-    async fn cleanup_orphans(
+    /// Delete candidate objects in batches with retry.
+    async fn delete_candidates(
         &self,
         lfs_keys: &[(String, u64)],
         xorb_keys: &[(String, u64)],
-        stats: &mut GcStats,
+        shard_keys: &[(String, u64)],
+        stats: &mut IncrementalGcStats,
     ) -> Result<(), String> {
-        if self.config.dry_run {
-            stats.deleted_lfs_blobs = lfs_keys.len();
-            stats.deleted_xorbs = xorb_keys.len();
-            info!(
-                "GC dry_run: would delete {} LFS blobs, {} xorbs",
-                lfs_keys.len(),
-                xorb_keys.len()
-            );
-            return Ok(());
-        }
-
-        // I2 fix: Use mtime passed from compute_orphaned_* instead of re-fetching.
-        // However, we still re-check mtime before deletion to prevent race conditions
-        // where a blob is uploaded between scan and delete phases.
-        // I5 fix: Re-fetch current time for each blob to prevent grace period bypass
-        // when GC runs for a long time.
+        let batch_size = self.config.delete_batch_size;
 
         // Delete LFS blobs
-        for (key, scan_mtime) in lfs_keys {
-            // I5 fix: Re-fetch current time for each blob
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
-
-            // I2 optimization: Only re-check mtime if scan was a while ago.
-            // If scan_mtime is recent (within last 10 seconds), trust it.
-            // This reduces S3 HEAD requests for fast GC runs.
-            let mtime_age = now.saturating_sub(*scan_mtime);
-            if mtime_age > 10 {
-                // Scan was more than 10 seconds ago, re-check mtime
-                match self.storage.get_mtime(key).await {
-                    Ok(current_mtime) => {
-                        // If mtime changed, blob was replaced - skip deletion
-                        if current_mtime != *scan_mtime {
-                            warn!("GC skipping {} - mtime changed since scan ({} != {})", key, current_mtime, scan_mtime);
-                            continue;
-                        }
-                        let age = now.saturating_sub(current_mtime);
-                        if age <= self.config.grace_period_seconds {
-                            // Blob was recently uploaded, skip deletion
-                            stats.grace_period_skipped += 1;
-                            continue;
-                        }
-                    }
-                    Err(crate::storage::StorageError::NotFound(_)) => {
-                        // Blob already deleted, skip
-                        continue;
-                    }
+        for chunk in lfs_keys.chunks(batch_size) {
+            for (key, _) in chunk {
+                match self.storage.delete(key).await {
+                    Ok(_) => stats.deleted_lfs_blobs += 1,
                     Err(e) => {
-                        warn!("GC failed to check mtime for {}: {}", key, e);
-                        // Proceed with deletion attempt
+                        warn!("Failed to delete LFS blob {}: {}", key, e);
+                        stats.errors += 1;
                     }
-                }
-            } else {
-                // Scan was recent, trust the mtime but still check grace period
-                if mtime_age <= self.config.grace_period_seconds {
-                    stats.grace_period_skipped += 1;
-                    continue;
-                }
-            }
-
-            match self.storage.delete(key).await {
-                Ok(_) => stats.deleted_lfs_blobs += 1,
-                Err(e) => {
-                    warn!("GC failed to delete LFS blob {}: {}", key, e);
-                    stats.errors += 1;
                 }
             }
         }
 
         // Delete xorbs
-        for (key, scan_mtime) in xorb_keys {
-            // I5 fix: Re-fetch current time for each xorb
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
-
-            // I2 optimization: Only re-check mtime if scan was a while ago
-            let mtime_age = now.saturating_sub(*scan_mtime);
-            if mtime_age > 10 {
-                // Scan was more than 10 seconds ago, re-check mtime
-                match self.storage.get_mtime(key).await {
-                    Ok(current_mtime) => {
-                        // If mtime changed, xorb was replaced - skip deletion
-                        if current_mtime != *scan_mtime {
-                            warn!("GC skipping {} - mtime changed since scan ({} != {})", key, current_mtime, scan_mtime);
-                            continue;
-                        }
-                        let age = now.saturating_sub(current_mtime);
-                        if age <= self.config.grace_period_seconds {
-                            // Xorb was recently uploaded, skip deletion
-                            stats.grace_period_skipped += 1;
-                            continue;
-                        }
+        for chunk in xorb_keys.chunks(batch_size) {
+            for (key, _) in chunk {
+                match self.storage.delete(key).await {
+                    Ok(_) => stats.deleted_xorbs += 1,
+                    Err(e) => {
+                        warn!("Failed to delete xorb {}: {}", key, e);
+                        stats.errors += 1;
                     }
-                    Err(crate::storage::StorageError::NotFound(_)) => {
-                        // Xorb already deleted, skip
-                        continue;
+                }
+            }
+        }
+
+        // Delete shards + cleanup sidecars
+        for chunk in shard_keys.chunks(batch_size) {
+            for (key, _) in chunk {
+                let shard_hash = key.strip_prefix("shards/").unwrap_or(key);
+                match self.storage.delete(key).await {
+                    Ok(_) => {
+                        stats.deleted_shards += 1;
+                        // Clean up sidecar
+                        let _ = self.ref_tracker.remove_references(shard_hash).await;
                     }
                     Err(e) => {
-                        warn!("GC failed to check mtime for {}: {}", key, e);
-                        // Proceed with deletion attempt
+                        warn!("Failed to delete shard {}: {}", key, e);
+                        stats.errors += 1;
                     }
-                }
-            } else {
-                // Scan was recent, trust the mtime but still check grace period
-                if mtime_age <= self.config.grace_period_seconds {
-                    stats.grace_period_skipped += 1;
-                    continue;
-                }
-            }
-
-            match self.storage.delete(key).await {
-                Ok(_) => stats.deleted_xorbs += 1,
-                Err(e) => {
-                    warn!("GC failed to delete xorb {}: {}", key, e);
-                    stats.errors += 1;
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// C1 fix: Compute orphaned shards using mtime heuristic.
-    ///
-    /// Since Hub doesn't track shard references, we use mtime as a heuristic:
-    /// shards older than the grace period are considered orphaned.
-    /// This is not perfect (may delete recently created but unused shards)
-    /// but prevents storage leak from orphaned shards.
-    ///
-    /// A proper solution would require Hub to track shard references in its database.
-    fn compute_orphaned_shards(
-        &self,
-        all_shards: &[(String, u64)],
-        stats: &mut GcStats,
-    ) -> Vec<String> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let grace = self.config.grace_period_seconds;
-
-        all_shards
-            .iter()
-            .filter(|(_, mtime)| {
-                // Shards older than grace period are considered orphaned
-                let is_old_enough = (now.saturating_sub(*mtime)) > grace;
-                if !is_old_enough {
-                    stats.grace_period_skipped += 1;
-                }
-                is_old_enough
-            })
-            .map(|(key, _)| key.clone())
-            .collect()
-    }
-
-    /// C1 fix: Delete orphaned shards
-    async fn cleanup_orphaned_shards(
-        &self,
-        shard_keys: &[String],
-        stats: &mut GcStats,
-    ) -> Result<(), String> {
-        if self.config.dry_run {
-            info!("GC dry_run: would delete {} shards", shard_keys.len());
-            return Ok(());
-        }
-
-        for key in shard_keys {
-            match self.storage.delete(key).await {
-                Ok(_) => stats.deleted_shards += 1,
-                Err(e) => {
-                    warn!("GC failed to delete shard {}: {}", key, e);
-                    stats.errors += 1;
                 }
             }
         }
@@ -596,20 +436,20 @@ impl GarbageCollector {
     }
 }
 
-/// Start the background GC task
-pub async fn start_gc_background_task(
-    gc: Arc<GarbageCollector>,
-    last_stats: Arc<RwLock<Option<GcStats>>>,
+/// Start the background incremental GC task.
+pub async fn start_incremental_gc_background_task(
+    gc: Arc<IncrementalGarbageCollector>,
+    last_stats: Arc<RwLock<Option<IncrementalGcStats>>>,
 ) {
     if !gc.config.enabled {
-        info!("GC background task disabled");
+        info!("Incremental GC background task disabled");
         return;
     }
 
     let interval = Duration::from_secs(gc.config.interval_seconds);
 
     info!(
-        "Starting GC background task (interval={}s, dry_run={})",
+        "Starting incremental GC background task (interval={}s, dry_run={})",
         gc.config.interval_seconds, gc.config.dry_run
     );
 
@@ -618,11 +458,11 @@ pub async fn start_gc_background_task(
             tokio::time::sleep(interval).await;
 
             match gc.run().await {
-                Ok(stats) => {
-                    *last_stats.write().await = Some(stats);
+                Ok(run_stats) => {
+                    *last_stats.write().await = Some(run_stats);
                 }
                 Err(e) => {
-                    error!("GC background task failed: {}", e);
+                    error!("Incremental GC background task failed: {}", e);
                 }
             }
         }
@@ -631,59 +471,11 @@ pub async fn start_gc_background_task(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    #[test]
-    fn test_gc_stats_default() {
-        let stats = GcStats::default();
-        assert_eq!(stats.total_lfs_blobs, 0);
-        assert!(!stats.dry_run);
-    }
-
-    #[test]
-    fn test_compute_orphaned_filters_grace_period() {
-        let config = GcConfig {
-            grace_period_seconds: 600, // 10 minutes
-            ..Default::default()
-        };
-
-        let storage: Arc<Box<dyn StorageBackend>> = Arc::new(Box::new(
-            crate::storage::local::LocalStorage::new("/tmp/test-gc").unwrap()
-        ));
-
-        let gc = GarbageCollector::new(storage, config).expect("Failed to create GC");
-
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-
-        // Blobs: (key, mtime) - use valid 64-char hex OIDs for M2 validation
-        let all_blobs = vec![
-            ("lfs/objects/ab/cd/0000000000000000000000000000000000000000000000000000000000000001".to_string(), now - 3600), // 1 hour old
-            ("lfs/objects/ab/cd/0000000000000000000000000000000000000000000000000000000000000002".to_string(), now - 60),   // 1 minute old (in grace)
-            ("lfs/objects/ab/cd/0000000000000000000000000000000000000000000000000000000000000003".to_string(), now - 7200), // 2 hours old
-        ];
-
-        let referenced: HashSet<String> = vec!["0000000000000000000000000000000000000000000000000000000000000003".to_string()].into_iter().collect();
-
-        let mut stats = GcStats::default();
-        let orphaned = gc.compute_orphaned_lfs(&all_blobs, &referenced, &mut stats);
-
-        // Only the first blob should be deleted (second is in grace period, third is referenced)
-        assert_eq!(orphaned.len(), 1);
-        assert!(orphaned[0].0.ends_with("0000000000000000000000000000000000000000000000000000000000000001"));  // I2 fix: orphaned is now Vec<(String, u64)>
-        assert_eq!(stats.grace_period_skipped, 1);
-    }
-
     // M4 fix: Verify that xorb hash hex encoding matches storage key format.
-    // xorb storage keys use format!("xorbs/{}", xorb_hash.to_hex()),
-    // so GC must use the same encoding when comparing referenced xorbs.
     #[test]
     fn test_xorb_hash_hex_encoding_consistency() {
         use crate::types::MerkleHash;
 
-        // Create a known hash value
         let hash_bytes: [u8; 32] = [
             0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
             0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10,
@@ -692,14 +484,12 @@ mod tests {
         ];
         let hash = MerkleHash::from(hash_bytes);
 
-        // to_hex() and hex::encode(as_bytes()) must produce identical output
         assert_eq!(
             hash.to_hex(),
             hex::encode(hash.as_bytes()),
             "MerkleHash::to_hex() must equal hex::encode(as_bytes()) for xorb key consistency"
         );
 
-        // Verify the storage key format matches what GC computes
         let storage_key = format!("xorbs/{}", hash.to_hex());
         let extracted_hash = storage_key.strip_prefix("xorbs/").unwrap();
         assert_eq!(extracted_hash, hash.to_hex());

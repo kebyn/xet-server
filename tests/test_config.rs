@@ -107,35 +107,30 @@ fn test_min_conversion_size_default_64kb() {
 }
 
 #[test]
-fn test_gc_token_validation() {
+fn test_gc_incremental_validation() {
     use xet_server::config::validate_gc_config;
 
-    // GC disabled — token can be empty
+    // GC disabled — no warnings
     let config = ServerConfig {
-        gc: xet_server::config::GcConfig { enabled: false, hub_internal_token: String::new(), ..Default::default() },
+        gc: xet_server::config::GcConfig { enabled: false, ..Default::default() },
         ..Default::default()
     };
     assert!(validate_gc_config(&config).is_empty());
 
-    // GC enabled but token empty — should warn
+    // GC enabled in dry-run mode — should warn about dry-run
     let config = ServerConfig {
-        gc: xet_server::config::GcConfig { enabled: true, hub_internal_token: String::new(), ..Default::default() },
+        gc: xet_server::config::GcConfig { enabled: true, dry_run: true, ..Default::default() },
         ..Default::default()
     };
     let warnings = validate_gc_config(&config);
-    assert_eq!(warnings.len(), 1);
-    assert!(warnings[0].contains("GC_HUB_INTERNAL_TOKEN"));
-
-    // GC enabled with token — no warning
-    let config = ServerConfig {
-        gc: xet_server::config::GcConfig { enabled: true, hub_internal_token: "secret".to_string(), ..Default::default() },
-        ..Default::default()
-    };
-    assert!(validate_gc_config(&config).is_empty());
+    assert!(!warnings.is_empty());
+    assert!(warnings.iter().any(|w| w.contains("dry-run")));
 }
 
 #[test]
-fn test_gc_http_timeout_default() {
+fn test_gc_incremental_defaults() {
     let config = ServerConfig::default();
-    assert_eq!(config.gc.http_timeout_seconds, 300);
+    assert_eq!(config.gc.dry_run, true);
+    assert_eq!(config.gc.bloom.expected_items, 10_000_000);
+    assert_eq!(config.gc.grace.absolute_seconds, 3600);
 }
