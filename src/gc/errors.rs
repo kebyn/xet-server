@@ -1,3 +1,9 @@
+//! GC error types.
+//!
+//! I7 fix: Uses `crate::storage::StorageError` instead of a duplicate type.
+//! This eliminates confusion between the two StorageError variants and allows
+//! using `?` operator to convert storage errors to GcError.
+
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -26,8 +32,9 @@ pub enum GcError {
     #[error("Scan timeout after {0} seconds")]
     ScanTimeout(u64),
 
+    /// I7 fix: Uses storage::StorageError directly (no duplicate type).
     #[error("Storage error: {0}")]
-    Storage(#[from] StorageError),
+    Storage(#[from] crate::storage::StorageError),
 
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
@@ -37,21 +44,6 @@ pub enum GcError {
 
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
-}
-
-#[derive(Error, Debug)]
-pub enum StorageError {
-    #[error("Object not found: {0}")]
-    NotFound(String),
-
-    #[error("Condition failed (optimistic locking)")]
-    ConditionFailed,
-
-    #[error("S3 error: {0}")]
-    S3(String),
-
-    #[error("Permission denied: {0}")]
-    PermissionDenied(String),
 }
 
 pub type GcResult<T> = Result<T, GcError>;

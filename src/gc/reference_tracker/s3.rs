@@ -63,13 +63,12 @@ impl ReferenceTracker for SidecarReferenceTracker {
         };
 
         let json = serde_json::to_vec_pretty(&refs)
-            .map_err(|e| GcError::Json(e))?;
+            .map_err(GcError::Json)?;
 
         let key = Self::sidecar_key(shard_hash);
         self.storage.put(&key, Bytes::from(json))
             .await
-            .map_err(|e| GcError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            .map_err(|e| GcError::Io(std::io::Error::other(
                 format!("Failed to write sidecar {}: {}", key, e),
             )))?;
 
@@ -89,8 +88,7 @@ impl ReferenceTracker for SidecarReferenceTracker {
         match self.storage.delete(&key).await {
             Ok(()) => Ok(()),
             Err(crate::storage::StorageError::NotFound(_)) => Ok(()),
-            Err(e) => Err(GcError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            Err(e) => Err(GcError::Io(std::io::Error::other(
                 format!("Failed to delete sidecar {}: {}", key, e),
             ))),
         }
@@ -101,12 +99,11 @@ impl ReferenceTracker for SidecarReferenceTracker {
         match self.storage.get(&key).await {
             Ok(data) => {
                 let refs: ReferenceSet = serde_json::from_slice(&data)
-                    .map_err(|e| GcError::Json(e))?;
+                    .map_err(GcError::Json)?;
                 Ok(Some(refs))
             }
             Err(crate::storage::StorageError::NotFound(_)) => Ok(None),
-            Err(e) => Err(GcError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            Err(e) => Err(GcError::Io(std::io::Error::other(
                 format!("Failed to read sidecar {}: {}", key, e),
             ))),
         }
@@ -115,8 +112,7 @@ impl ReferenceTracker for SidecarReferenceTracker {
     async fn list_all_references(&self) -> GcResult<Vec<ReferenceSet>> {
         let keys = self.storage.list_objects("shard_refs/")
             .await
-            .map_err(|e| GcError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            .map_err(|e| GcError::Io(std::io::Error::other(
                 format!("Failed to list sidecars: {}", e),
             )))?;
 
@@ -149,8 +145,7 @@ impl ReferenceTracker for SidecarReferenceTracker {
         // Simple health check: verify we can list the shard_refs prefix
         let _ = self.storage.list_objects("shard_refs/")
             .await
-            .map_err(|e| GcError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            .map_err(|e| GcError::Io(std::io::Error::other(
                 format!("Health check failed: {}", e),
             )))?;
         Ok(())

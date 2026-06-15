@@ -339,6 +339,62 @@ impl StorageBackend for LocalStorage {
             Err(e) => Err(StorageError::Internal(format!("Failed to get metadata: {}", e))),
         }
     }
+
+    /// M4 fix: Atomic write using write-to-temp + rename pattern.
+    ///
+    /// Writes data to `{key}.tmp` first, then atomically renames to `{key}`.
+    /// This prevents partial writes from corrupting files during crashes.
+    /// The rename operation is atomic on POSIX filesystems.
+    async fn put_atomic(&self, key: &str, data: Bytes) -> StorageResult<()> {
+        let path = self.object_path(key)?;
+        let temp_path = path.with_extension("tmp");
+
+        // Create parent directories
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).await
+                .map_err(|e| StorageError::Internal(format!("Failed to create dirs: {}", e)))?;
+        }
+
+        // Write to temp file
+        fs::write(&temp_path, &data).await
+            .map_err(|e| StorageError::Internal(format!("Failed to write temp file: {}", e)))?;
+
+        // Atomic rename
+        fs::rename(&temp_path, &path).await
+            .map_err(|e| {
+                // Best-effort cleanup of temp file
+                let _ = std::fs::remove_file(&temp_path);
+                StorageError::Internal(format!("Failed to rename temp to final: {}", e))
+            })?;
+
+        Ok(())
+    }
+
+    /// I1 fix: Conditional delete using etag (mtime) check.
+    ///
+    /// Only deletes the file if its current mtime matches the expected etag.
+    /// Uses a two-step check-then-delete pattern (not truly atomic on local fs,
+    /// but minimizes the race window compared to unconditional delete).
+    async fn delete_if_match(&self, key: &str, expected_etag: &str) -> StorageResult<()> {
+        let path = self.object_path(key)?;
+
+        // Get current mtime
+        let current_etag = match self.get_etag(key).await? {
+            Some(etag) => etag,
+            None => return Ok(()), // File already gone
+        };
+
+        if current_etag != expected_etag {
+            return Err(StorageError::ConditionFailed);
+        }
+
+        // Delete (small race window between check and delete)
+        match fs::remove_file(&path).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()), // Idempotent
+            Err(e) => Err(StorageError::Internal(format!("Failed to delete: {}", e))),
+        }
+    }
 }
 
 impl LocalStorage {

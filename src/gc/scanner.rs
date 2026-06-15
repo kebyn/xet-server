@@ -95,11 +95,11 @@ impl IncrementalScanner {
             }
 
             // List next page of shards
-            let (keys, _next_cursor, has_more) = self.storage
+            // M1 fix: Use next_cursor from storage for consistent pagination.
+            let (keys, next_cursor, has_more) = self.storage
                 .list_objects_paged("shards/", checkpoint.s3_cursor.as_deref(), self.config.page_size)
                 .await
-                .map_err(|e| GcError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
+                .map_err(|e| GcError::Io(std::io::Error::other(
                     format!("Failed to list shards: {}", e),
                 )))?;
 
@@ -145,7 +145,8 @@ impl IncrementalScanner {
 
                 // Periodic checkpoint save
                 if scanned_since_checkpoint >= self.config.checkpoint_interval {
-                    checkpoint.update_cursor(Some(key.clone()));
+                    // M1 fix: Use next_cursor from storage response for consistent pagination.
+                    checkpoint.update_cursor(next_cursor.clone());
                     if let Err(e) = checkpoint.save(&**self.storage).await {
                         tracing::warn!("Failed to save checkpoint: {}", e);
                     }
@@ -153,8 +154,8 @@ impl IncrementalScanner {
                 }
             }
 
-            // Update cursor to last key in this page
-            checkpoint.update_cursor(Some(keys.last().unwrap().clone()));
+            // M1 fix: Use next_cursor from storage response.
+            checkpoint.update_cursor(next_cursor);
 
             if !has_more {
                 // No more pages — scan completed
@@ -205,8 +206,7 @@ impl IncrementalScanner {
 
         let shard_key = format!("shards/{}", shard_hash);
         let shard_data = self.storage.get(&shard_key).await
-            .map_err(|e| GcError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            .map_err(|e| GcError::Io(std::io::Error::other(
                 format!("Failed to read shard {}: {}", shard_key, e),
             )))?;
 
@@ -278,12 +278,16 @@ impl IncrementalScanner {
     }
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ScannerConfig;
+    use crate::config::{BloomConfig, ScannerConfig};
     use crate::gc::bloom::BloomFilterProtectedSet;
-    use crate::config::BloomConfig;
+    use crate::gc::checkpoint::GcCheckpoint;
+    use crate::gc::reference_tracker::s3::SidecarReferenceTracker;
+    use crate::storage::local::LocalStorage;
+    use tempfile::TempDir;
 
     #[test]
     fn test_scan_result_default() {
@@ -293,6 +297,140 @@ mod tests {
         assert!(!result.scan_completed);
     }
 
-    // Integration tests for the scanner require a storage backend with shards,
-    // which is better covered by the integration test suite.
+    /// Helper to create a scanner with LocalStorage for testing.
+    fn make_scanner() -> (IncrementalScanner, Arc<Box<dyn StorageBackend>>, TempDir) {
+        let tmp = TempDir::new().unwrap();
+        let storage: Arc<Box<dyn StorageBackend>> = Arc::new(Box::new(
+            LocalStorage::new(tmp.path().to_str().unwrap()).unwrap()
+        ));
+        let ref_tracker: Arc<dyn ReferenceTracker> =
+            Arc::new(SidecarReferenceTracker::new(storage.clone()));
+
+        let scanner_config = ScannerConfig {
+            page_size: 10,
+            checkpoint_interval: 5,
+            max_duration_seconds: 60,
+        };
+
+        let scanner = IncrementalScanner::new(
+            storage.clone(),
+            ref_tracker,
+            scanner_config,
+        );
+        (scanner, storage, tmp)
+    }
+
+    #[tokio::test]
+    async fn test_scan_empty_storage() {
+        let (scanner, _storage, _tmp) = make_scanner();
+        let bloom_config = BloomConfig {
+            expected_items: 100,
+            false_positive_rate: 0.01,
+            rebuild_threshold: 0.8,
+        };
+        let mut bloom = BloomFilterProtectedSet::new(bloom_config);
+        let mut checkpoint = GcCheckpoint::new();
+
+        let result = scanner.scan(&mut bloom, &mut checkpoint).await.unwrap();
+
+        assert!(result.scan_completed);
+        assert_eq!(result.shards_scanned, 0);
+        assert_eq!(result.refs_inserted, 0);
+        assert_eq!(checkpoint.status, crate::gc::checkpoint::CheckpointStatus::Completed);
+    }
+
+    #[tokio::test]
+    async fn test_scan_with_sidecar_references() {
+        let (scanner, storage, _tmp) = make_scanner();
+        let ref_tracker = SidecarReferenceTracker::new(storage.clone());
+
+        ref_tracker.record_references(
+            "shard_abc",
+            &["lfs_ref_1".to_string()],
+            &["xorb_ref_1".to_string(), "xorb_ref_2".to_string()],
+        ).await.unwrap();
+
+        storage.put("shards/shard_abc", bytes::Bytes::from("fake shard data"))
+            .await.unwrap();
+
+        let bloom_config = BloomConfig {
+            expected_items: 100,
+            false_positive_rate: 0.01,
+            rebuild_threshold: 0.8,
+        };
+        let mut bloom = BloomFilterProtectedSet::new(bloom_config);
+        let mut checkpoint = GcCheckpoint::new();
+
+        let result = scanner.scan(&mut bloom, &mut checkpoint).await.unwrap();
+
+        assert!(result.scan_completed);
+        assert_eq!(result.shards_scanned, 1);
+        assert_eq!(result.refs_inserted, 3);
+
+        assert!(bloom.contains(b"lfs_ref_1"));
+        assert!(bloom.contains(b"xorb_ref_1"));
+        assert!(bloom.contains(b"xorb_ref_2"));
+    }
+
+    #[tokio::test]
+    async fn test_scan_multiple_pages() {
+        let (scanner, storage, _tmp) = make_scanner();
+        let ref_tracker = SidecarReferenceTracker::new(storage.clone());
+
+        for i in 0..15 {
+            let shard_hash = format!("shard_{:03}", i);
+            ref_tracker.record_references(
+                &shard_hash,
+                &[],
+                &[format!("xorb_{}", i)],
+            ).await.unwrap();
+            storage.put(&format!("shards/{}", shard_hash), bytes::Bytes::from("data"))
+                .await.unwrap();
+        }
+
+        let bloom_config = BloomConfig {
+            expected_items: 100,
+            false_positive_rate: 0.01,
+            rebuild_threshold: 0.8,
+        };
+        let mut bloom = BloomFilterProtectedSet::new(bloom_config);
+        let mut checkpoint = GcCheckpoint::new();
+
+        let result = scanner.scan(&mut bloom, &mut checkpoint).await.unwrap();
+
+        assert!(result.scan_completed);
+        assert_eq!(result.shards_scanned, 15);
+        assert_eq!(result.refs_inserted, 15);
+    }
+
+    #[tokio::test]
+    async fn test_scan_missing_sidecar_falls_back() {
+        let (scanner, storage, _tmp) = make_scanner();
+
+        // Create a shard without a sidecar and with invalid data.
+        // The scanner should use Layer 3 (conservative skip) — return empty refs
+        // rather than failing. This ensures GC doesn't delete referenced data
+        // when a shard can't be parsed.
+        storage.put("shards/orphan_shard", bytes::Bytes::from("not a valid shard"))
+            .await.unwrap();
+
+        let bloom_config = BloomConfig {
+            expected_items: 100,
+            false_positive_rate: 0.01,
+            rebuild_threshold: 0.8,
+        };
+        let mut bloom = BloomFilterProtectedSet::new(bloom_config);
+        let mut checkpoint = GcCheckpoint::new();
+
+        let result = scanner.scan(&mut bloom, &mut checkpoint).await.unwrap();
+
+        // Scan completes successfully (Layer 3 conservative skip)
+        assert!(result.scan_completed);
+        assert_eq!(result.shards_scanned, 1);
+        // parse_errors is 0 because Layer 3 is a graceful fallback, not an error.
+        // The scanner intentionally returns empty refs to avoid deleting referenced data.
+        assert_eq!(result.parse_errors, 0);
+        // No references inserted (conservative — safer to retain orphans than delete referenced)
+        assert_eq!(result.refs_inserted, 0);
+    }
 }

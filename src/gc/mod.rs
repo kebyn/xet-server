@@ -234,6 +234,23 @@ impl IncrementalGarbageCollector {
             }
         }
 
+        // M3 fix: Check if bloom filter needs rebuilding.
+        // If the filter's occupancy exceeds the rebuild threshold, reset it.
+        // The next GC cycle will repopulate the bloom filter from scratch.
+        // This prevents false positive rate from degrading as items accumulate.
+        if bloom.should_rebuild() {
+            info!(
+                items = bloom.stats().items_inserted,
+                rebuild_count = bloom.stats().rebuild_count + 1,
+                "Bloom filter approaching capacity, triggering rebuild"
+            );
+            // Create a fresh bloom filter. Next GC cycle will scan and populate it.
+            bloom = BloomFilterProtectedSet::new(self.config.bloom.clone());
+            // Reset checkpoint to start scanning from the beginning
+            checkpoint.s3_cursor = None;
+            checkpoint.shards_scanned = 0;
+        }
+
         // ── Phase 4: Compute Candidates ────────────────────────────────────
         let grace = GracePeriod::new(&self.config.grace);
 
@@ -311,14 +328,16 @@ impl IncrementalGarbageCollector {
         }
     }
 
-    /// Save the bloom filter to storage.
+    /// Save the bloom filter to storage atomically.
+    ///
+    /// Uses put_atomic for crash-safe persistence on both S3 and local storage.
     async fn save_bloom_filter(&self, bloom: &BloomFilterProtectedSet) -> Result<(), String> {
         let bloom_key = ".gc/bloom.bin";
         let mut buf = Vec::new();
         bloom.save(&mut buf)
             .map_err(|e| format!("Failed to serialize bloom filter: {}", e))?;
 
-        self.storage.put(bloom_key, bytes::Bytes::from(buf))
+        self.storage.put_atomic(bloom_key, bytes::Bytes::from(buf))
             .await
             .map_err(|e| format!("Failed to save bloom filter: {}", e))?;
 
@@ -392,39 +411,108 @@ impl IncrementalGarbageCollector {
         Ok((lfs_candidates, xorb_candidates))
     }
 
-    /// Delete candidate objects in batches.
+    /// Delete candidate objects with batching and retry.
     ///
     /// C2 fix: Only deletes LFS blobs and xorbs. Shards are NOT deleted by incremental GC
     /// because we cannot verify whether they're still referenced by Hub's file_tree.
+    ///
+    /// I5 fix: Retries each failed deletion up to `delete_max_retries` times.
+    /// I6 fix: Limits total deletions per cycle to `delete_batch_size`.
+    ///         Remaining candidates will be processed in subsequent GC cycles.
     async fn delete_candidates(
         &self,
         lfs_keys: &[(String, u64)],
         xorb_keys: &[(String, u64)],
         stats: &mut IncrementalGcStats,
     ) -> Result<(), String> {
-        let batch_size = self.config.delete_batch_size;
+        let max_per_cycle = self.config.delete_batch_size;
+        let max_retries = self.config.delete_max_retries;
 
-        // Delete LFS blobs
-        for chunk in lfs_keys.chunks(batch_size) {
-            for (key, _) in chunk {
+        // I6 fix: Combine candidates and limit total per cycle.
+        // Prioritize LFS blobs first, then xorbs.
+        let mut total_deleted = 0usize;
+
+        // Delete LFS blobs (up to batch limit)
+        for (key, _) in lfs_keys {
+            if total_deleted >= max_per_cycle {
+                tracing::info!(
+                    deleted = total_deleted,
+                    limit = max_per_cycle,
+                    "Reached per-cycle delete limit, remaining candidates deferred to next cycle"
+                );
+                break;
+            }
+
+            // I5 fix: Retry failed deletions
+            let mut success = false;
+            for attempt in 0..=max_retries {
                 match self.storage.delete(key).await {
-                    Ok(_) => stats.deleted_lfs_blobs += 1,
+                    Ok(_) => {
+                        stats.deleted_lfs_blobs += 1;
+                        total_deleted += 1;
+                        success = true;
+                        break;
+                    }
                     Err(e) => {
-                        warn!("Failed to delete LFS blob {}: {}", key, e);
-                        stats.errors += 1;
+                        if attempt < max_retries {
+                            tracing::debug!(
+                                key = %key,
+                                attempt = attempt + 1,
+                                max_retries = max_retries,
+                                error = %e,
+                                "Delete failed, retrying"
+                            );
+                            // Brief backoff before retry
+                            tokio::time::sleep(std::time::Duration::from_millis(100 * (attempt as u64 + 1))).await;
+                        } else {
+                            warn!(
+                                "Failed to delete LFS blob {} after {} retries: {}",
+                                key, max_retries, e
+                            );
+                            stats.errors += 1;
+                        }
                     }
                 }
             }
+            let _ = success; // suppress unused warning
         }
 
-        // Delete xorbs
-        for chunk in xorb_keys.chunks(batch_size) {
-            for (key, _) in chunk {
+        // Delete xorbs (up to remaining batch limit)
+        for (key, _) in xorb_keys {
+            if total_deleted >= max_per_cycle {
+                tracing::info!(
+                    deleted = total_deleted,
+                    limit = max_per_cycle,
+                    "Reached per-cycle delete limit, remaining candidates deferred to next cycle"
+                );
+                break;
+            }
+
+            // I5 fix: Retry failed deletions
+            for attempt in 0..=max_retries {
                 match self.storage.delete(key).await {
-                    Ok(_) => stats.deleted_xorbs += 1,
+                    Ok(_) => {
+                        stats.deleted_xorbs += 1;
+                        total_deleted += 1;
+                        break;
+                    }
                     Err(e) => {
-                        warn!("Failed to delete xorb {}: {}", key, e);
-                        stats.errors += 1;
+                        if attempt < max_retries {
+                            tracing::debug!(
+                                key = %key,
+                                attempt = attempt + 1,
+                                max_retries = max_retries,
+                                error = %e,
+                                "Delete failed, retrying"
+                            );
+                            tokio::time::sleep(std::time::Duration::from_millis(100 * (attempt as u64 + 1))).await;
+                        } else {
+                            warn!(
+                                "Failed to delete xorb {} after {} retries: {}",
+                                key, max_retries, e
+                            );
+                            stats.errors += 1;
+                        }
                     }
                 }
             }
