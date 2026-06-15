@@ -292,7 +292,11 @@ impl Default for GraceConfig {
     fn default() -> Self {
         Self {
             absolute_seconds: 3600, // 1 hour
-            soft_cycles: 2,
+            // I4 fix: Default to 0 because soft_cycles is NOT implemented.
+            // Setting a non-zero default would silently create a false sense of safety.
+            // Operators must explicitly set GC_GRACE_SOFT_CYCLES > 0 (which is rejected
+            // at startup until the feature is implemented).
+            soft_cycles: 0,
         }
     }
 }
@@ -322,14 +326,18 @@ impl Default for LeaseConfig {
 
 /// Reference tracker configuration.
 ///
-/// The reference tracker records which chunk hashes have been observed as referenced
-/// by Hub's file_tree. Two modes:
-/// - `"sidecar"`: query Hub's /internal/referenced-hashes endpoint (original GC design).
-/// - `"local_cache_db"`: maintain a local SQLite cache of referenced hashes, updated
-///   incrementally via Hub webhooks or polling. Reduces Hub load for large deployments.
+/// The reference tracker extracts chunk hashes from shard files and stores them
+/// as sidecar JSON files for fast subsequent reads. This is a fully local operation
+/// that does NOT query Hub API.
+///
+/// Two modes are defined but only "sidecar" is currently implemented:
+/// - `"sidecar"`: Extract references from shard files and store as `.refs.json` files.
+///   Uses a three-layer defense: read sidecar → parse shard → conservative skip.
+/// - `"local_cache_db"`: (NOT IMPLEMENTED) Would maintain a local SQLite cache of
+///   referenced hashes, updated via Hub webhooks or polling.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReferenceTrackerConfig {
-    /// Tracker mode: "sidecar" or "local_cache_db".
+    /// Tracker mode: "sidecar" (implemented) or "local_cache_db" (not implemented).
     pub mode: String,
     /// Path to the local SQLite database when mode = "local_cache_db".
     pub local_cache_db_path: String,
@@ -533,6 +541,30 @@ impl ServerConfig {
         if self.gc.enabled {
             if self.gc.interval_seconds == 0 {
                 return Err("GC_INTERVAL_SECONDS must be > 0 when GC is enabled (got 0).".to_string());
+            }
+            // I1 fix: Validate reference_tracker.mode at startup instead of silently ignoring it.
+            // Only "sidecar" is implemented; other modes would silently use sidecar anyway,
+            // giving operators a false sense of configuration.
+            if self.gc.reference_tracker.mode != "sidecar" {
+                return Err(format!(
+                    "GC_REFERENCE_TRACKER_MODE '{}' is not supported. \
+                     Only 'sidecar' is currently implemented. \
+                     The 'local_cache_db' mode is planned but not yet available.",
+                    self.gc.reference_tracker.mode
+                ));
+            }
+            // I4 fix: soft_cycles is not implemented — reject non-zero values to prevent
+            // operators from relying on a protection layer that doesn't exist.
+            // The grace module logs a warning but the config default is 2, which creates
+            // a false sense of safety. Force it to 0 unless explicitly implemented.
+            if self.gc.grace.soft_cycles > 0 {
+                return Err(format!(
+                    "GC_GRACE_SOFT_CYCLES is set to {} but soft_cycles is NOT implemented. \
+                     Only grace.absolute_seconds is enforced. \
+                     Set GC_GRACE_SOFT_CYCLES=0 to acknowledge this, or increase \
+                     GC_GRACE_ABSOLUTE_SECONDS for equivalent protection.",
+                    self.gc.grace.soft_cycles
+                ));
             }
             if self.gc.grace.absolute_seconds == 0 && self.gc.grace.soft_cycles == 0 {
                 tracing::warn!(

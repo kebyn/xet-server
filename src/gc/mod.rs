@@ -238,6 +238,11 @@ impl IncrementalGarbageCollector {
         // If the filter's occupancy exceeds the rebuild threshold, reset it.
         // The next GC cycle will repopulate the bloom filter from scratch.
         // This prevents false positive rate from degrading as items accumulate.
+        //
+        // C1 fix: After rebuild, we MUST skip the deletion phase in this cycle.
+        // The fresh bloom filter is empty — running compute_candidates with it would
+        // mark ALL objects as deletion candidates (data loss). Instead, save the reset
+        // state and return early so the next cycle scans and populates the new filter.
         if bloom.should_rebuild() {
             info!(
                 items = bloom.stats().items_inserted,
@@ -249,6 +254,23 @@ impl IncrementalGarbageCollector {
             // Reset checkpoint to start scanning from the beginning
             checkpoint.s3_cursor = None;
             checkpoint.shards_scanned = 0;
+            // C1 fix: Save the empty bloom + reset checkpoint, then skip deletion.
+            if let Err(e) = self.save_bloom_filter(&bloom).await {
+                warn!("Failed to save rebuilt bloom filter: {}", e);
+            }
+            if let Err(e) = checkpoint.save(&**self.storage).await {
+                warn!("Failed to save reset checkpoint: {}", e);
+            }
+            stats.bloom_items = bloom.stats().items_inserted;
+            stats.bloom_rebuild_count = bloom.stats().rebuild_count + 1;
+            stats.duration_seconds = start.elapsed().as_secs_f64();
+            stats.last_run = Some(chrono::Utc::now());
+            info!(
+                "Bloom filter rebuild initiated. Skipping deletion phase this cycle. \
+                 Next GC cycle will scan from the beginning with fresh filter."
+            );
+            drop(lease_guard);
+            return Ok(stats);
         }
 
         // ── Phase 4: Compute Candidates ────────────────────────────────────

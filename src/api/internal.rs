@@ -82,8 +82,14 @@ pub async fn get_blob_state(
         info!("Internal state query for {}: xet_only", oid);
         GLOBAL_METRICS.record_request(200);
         GLOBAL_METRICS.record_latency(start);
-        // Get actual blob size from storage
-        let size = storage.get_size(&format!("lfs/objects/{}", oid)).await.unwrap_or(0);
+        // Get actual blob size from storage (M4 fix: log errors instead of silently returning 0)
+        let size = match storage.get_size(&format!("lfs/objects/{}", oid)).await {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("Failed to get size for xet_only blob {}: {}", oid, e);
+                0
+            }
+        };
         return HttpResponse::Ok().json(serde_json::json!({
             "state": "xet_only",
             "xet_file_id": oid,
@@ -100,8 +106,14 @@ pub async fn get_blob_state(
             info!("Internal state query for {}: raw_only", oid);
             GLOBAL_METRICS.record_request(200);
             GLOBAL_METRICS.record_latency(start);
-            // Get actual blob size from storage
-            let size = storage.get_size(&object_key).await.unwrap_or(0);
+            // Get actual blob size from storage (M4 fix: log errors instead of silently returning 0)
+            let size = match storage.get_size(&object_key).await {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!("Failed to get size for raw_only blob {}: {}", oid, e);
+                    0
+                }
+            };
             HttpResponse::Ok().json(serde_json::json!({
                 "state": "raw_only",
                 "xet_file_id": null,
@@ -118,12 +130,15 @@ pub async fn get_blob_state(
             })
         }
         Err(e) => {
-            warn!("Failed to check storage for {}: {}", oid, e);
+            // I3 fix: Log internal error details but don't leak them to the client.
+            // The error message could contain file paths, S3 bucket names, or other
+            // infrastructure details that shouldn't be exposed even on internal endpoints.
+            warn!("Storage error checking blob {}: {}", oid, e);
             GLOBAL_METRICS.record_request(500);
             GLOBAL_METRICS.record_error();
             GLOBAL_METRICS.record_latency(start);
             HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Storage error: {}", e),
+                error: "Internal storage error".to_string(),
             })
         }
     }

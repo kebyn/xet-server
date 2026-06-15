@@ -60,6 +60,10 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
     // Create sidecar reference tracker for incremental GC
     let ref_tracker: Arc<dyn crate::gc::reference_tracker::ReferenceTracker> =
         Arc::new(SidecarReferenceTracker::new(storage.clone()));
+    // I5 fix: Share ref_tracker via web::Data so conversion pipeline and shard upload
+    // can proactively generate sidecars (avoids first-GC-scan Layer 2 fallback).
+    // Use web::Data::new() (not ::from()) to match handler's `web::Data<Arc<dyn ReferenceTracker>>` type.
+    let ref_tracker_data = actix_web::web::Data::new(ref_tracker.clone());
 
     // Create incremental GC
     let gc = match IncrementalGarbageCollector::new(
@@ -157,6 +161,7 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
             .app_data(web::Data::new(config.conversion.clone()))
             .app_data(web::Data::new(gc_for_app.clone()))
             .app_data(web::Data::new(stats_for_app.clone()))
+            .app_data(ref_tracker_data.clone())
             // =============================================================
             // Internal endpoints (Hub-to-CAS communication) - NO rate limiting
             // These are registered at App level, BEFORE the public scope,
