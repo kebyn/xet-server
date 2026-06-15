@@ -323,6 +323,30 @@ fn validate_proxy_token(
 /// 1. Hard cap at MAX_BATCH_SIZE (defense-in-depth, checked before CAS forward)
 /// 2. Batch size logged for monitoring (see below)
 /// 3. actix-web `PayloadConfig` limits request body size (50 MB default)
+///
+/// ## Known security limitation: no per-repo authorization on LFS object bytes
+///
+/// This handler authorizes only on token *scope* (read/write) and signs an
+/// OID-bound proxy token for each requested object. It does NOT verify that the
+/// requested OIDs actually belong to the repo in the request URL:
+/// - The batch body's OIDs are decoupled from the URL's `{ns}/{repo}`, so a URL
+///   ownership check would be trivially bypassable (attacker uses their own public
+///   repo as the URL and puts a victim's private OID in the body).
+/// - Several routes (`/objects/batch`, `/lfs/objects/{oid}`) carry no repo context
+///   at all (standard git-lfs clients).
+///
+/// This is the content-addressed capability model inherent to LFS/Xet: knowing a
+/// 64-hex content hash grants access to the bytes. The practical exposure is bounded
+/// because the only paths that map a private repo to its content hashes (tree /
+/// resolve / repo metadata endpoints) are repo-ownership gated — without an OID,
+/// this path is not reachable.
+///
+/// A complete fix is an architectural change (out of scope here): add a
+/// `MetadataStore` reverse lookup backed by a `file_entries(repo_id, cas_hash)`
+/// index, verify every download OID against the repo, AND remove/repo-scope the
+/// context-free `/objects/batch` and `/lfs/objects/{oid}` routes (otherwise the
+/// reverse-lookup is bypassed via the bare routes). Dedup semantics (one OID may
+/// legitimately belong to both a public and a private repo) must be handled too.
 pub async fn lfs_batch(
     req: HttpRequest,
     body: web::Json<serde_json::Value>,
