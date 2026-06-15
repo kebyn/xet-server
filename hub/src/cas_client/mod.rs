@@ -221,14 +221,13 @@ impl CasClient {
         match resp.status().as_u16() {
             200 => {
                 // I7 fix: Check Content-Length before loading body into memory
-                if let Some(content_length) = resp.content_length() {
-                    if content_length > self.max_download_size {
+                if let Some(content_length) = resp.content_length()
+                    && content_length > self.max_download_size {
                         return Err(HubError::CasError(format!(
                             "Download too large: {} bytes (max: {} bytes)",
                             content_length, self.max_download_size
                         )));
                     }
-                }
 
                 let body = resp
                     .bytes()

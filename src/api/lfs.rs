@@ -131,24 +131,22 @@ pub async fn upload_lfs_object(
 
     // C6 fix: Verify proxy token is bound to this specific OID and operation
     if claims.token_type == "proxy" {
-        if let Some(ref bound_oid) = claims.oid {
-            if bound_oid != &oid {
+        if let Some(ref bound_oid) = claims.oid
+            && bound_oid != &oid {
                 GLOBAL_METRICS.record_request(403);
                 GLOBAL_METRICS.record_latency(start);
                 return HttpResponse::Forbidden().json(serde_json::json!({
                     "error": "Proxy token is bound to a different OID"
                 }));
             }
-        }
-        if let Some(ref bound_op) = claims.operation {
-            if bound_op != "upload" {
+        if let Some(ref bound_op) = claims.operation
+            && bound_op != "upload" {
                 GLOBAL_METRICS.record_request(403);
                 GLOBAL_METRICS.record_latency(start);
                 return HttpResponse::Forbidden().json(serde_json::json!({
                     "error": "Proxy token is not authorized for upload"
                 }));
             }
-        }
     }
 
     // M7 fix: Use a more reasonable pre-check threshold (see xorb.rs for rationale).
@@ -368,24 +366,22 @@ pub async fn download_lfs_object(
 
     // C6 fix: Verify proxy token is bound to this specific OID and operation
     if claims.token_type == "proxy" {
-        if let Some(ref bound_oid) = claims.oid {
-            if bound_oid != &oid {
+        if let Some(ref bound_oid) = claims.oid
+            && bound_oid != &oid {
                 GLOBAL_METRICS.record_request(403);
                 GLOBAL_METRICS.record_latency(start);
                 return HttpResponse::Forbidden().json(serde_json::json!({
                     "error": "Proxy token is bound to a different OID"
                 }));
             }
-        }
-        if let Some(ref bound_op) = claims.operation {
-            if bound_op != "download" {
+        if let Some(ref bound_op) = claims.operation
+            && bound_op != "download" {
                 GLOBAL_METRICS.record_request(403);
                 GLOBAL_METRICS.record_latency(start);
                 return HttpResponse::Forbidden().json(serde_json::json!({
                     "error": "Proxy token is not authorized for download"
                 }));
             }
-        }
     }
 
     // STATELESS: Check MetadataIndex for xet data

@@ -541,16 +541,6 @@ mod tests {
                 allow_uploads: true,
             }
         }
-
-        fn with_existing_oid(mut self, oid: &str) -> Self {
-            self.existing_oids.insert(oid.to_string());
-            self
-        }
-
-        fn with_upload_failure(mut self) -> Self {
-            self.allow_uploads = false;
-            self
-        }
     }
 
     #[async_trait::async_trait]
@@ -706,7 +696,7 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn test_commitAtomic_rejects_mismatched_parent() {
+    async fn test_commit_atomic_rejects_mismatched_parent() {
         let mock_cas = MockCasClient::new();
         let (token_store, metadata, cas_client, signer) = setup_test_env_with_mock(mock_cas).await;
         let token = token_store.create_token("testuser", "test-token", "write").await.unwrap();

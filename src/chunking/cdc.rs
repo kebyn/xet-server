@@ -64,6 +64,7 @@ impl Chunker {
 
         // Compute mask: hash & mask == 0 with probability ~1/target
         // Shift (target-1) left to the highest bits
+        assert!(target.is_power_of_two(), "chunk target size must be a power of two, got {}", target);
         let mask = ((target - 1) as u64) << ((target - 1) as u64).leading_zeros();
 
         Self {
@@ -170,6 +171,7 @@ impl StreamingChunker {
         let min_chunk = config.min_chunk_size();
         let max_chunk = config.max_chunk_size();
 
+        assert!(target.is_power_of_two(), "chunk target size must be a power of two, got {}", target);
         let mask = ((target - 1) as u64) << ((target - 1) as u64).leading_zeros();
 
         Self {
