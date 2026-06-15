@@ -328,6 +328,15 @@ pub struct AuthVerifier {
     signing_kid: Option<String>,
 }
 
+/// 私钥文件若对 group/other 可读/可写/可执行(mode & 0o077 != 0)则视为权限过宽。
+#[cfg(unix)]
+fn key_permissions_too_open(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|m| m.permissions().mode() & 0o077 != 0)
+        .unwrap_or(false)
+}
+
 impl AuthVerifier {
     /// Load verification keys from AuthConfig at server startup.
     ///
@@ -340,6 +349,13 @@ impl AuthVerifier {
 
         // I5 fix: Optionally load private key for proxy token generation
         let signing_key = if let Some(ref pk_path) = auth_config.private_key_path {
+            #[cfg(unix)]
+            if key_permissions_too_open(std::path::Path::new(pk_path)) {
+                tracing::warn!(
+                    "CAS private key {} is group/other-accessible; recommend chmod 0600",
+                    pk_path
+                );
+            }
             let pk_pem = std::fs::read_to_string(pk_path)
                 .map_err(|e| {
                     tracing::error!("Failed to read CAS private key from {}: {}", pk_path, e);
@@ -469,4 +485,22 @@ pub fn extract_token_from_request(req: &actix_web::HttpRequest) -> Option<String
             }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn test_key_permissions_detection() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("key.pem");
+        std::fs::write(&p, b"x").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(!key_permissions_too_open(&p));
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(key_permissions_too_open(&p));
+    }
 }
