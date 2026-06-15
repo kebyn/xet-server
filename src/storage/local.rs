@@ -6,6 +6,24 @@ use bytes::Bytes;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 
+/// 跨文件系统安全拷贝:先 copy 到临时文件,再原子 rename 到最终路径。
+/// 避免中断时在最终 key 留下截断文件。
+async fn copy_then_rename(source: &Path, dest: &Path) -> StorageResult<()> {
+    let temp_dest = dest.with_extension("tmp");
+    fs::copy(source, &temp_dest).await.map_err(|e| {
+        StorageError::Internal(format!(
+            "Failed to copy {} → {}: {}", source.display(), temp_dest.display(), e
+        ))
+    })?;
+    fs::rename(&temp_dest, dest).await.map_err(|e| {
+        let _ = std::fs::remove_file(&temp_dest);
+        StorageError::Internal(format!(
+            "Failed to rename {} → {}: {}", temp_dest.display(), dest.display(), e
+        ))
+    })?;
+    Ok(())
+}
+
 pub struct LocalStorage {
     base_path: PathBuf,
 }
@@ -71,19 +89,8 @@ impl LocalStorage {
 #[async_trait]
 impl StorageBackend for LocalStorage {
     async fn put(&self, key: &str, data: Bytes) -> StorageResult<()> {
-        let path = self.object_path(key)?;
-
-        // Create parent directories
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).await
-                .map_err(|e| StorageError::Internal(format!("Failed to create dirs: {}", e)))?;
-        }
-
-        // Write file
-        fs::write(&path, &data).await
-            .map_err(|e| StorageError::Internal(format!("Failed to write: {}", e)))?;
-
-        Ok(())
+        // 经由原子写(temp + rename),避免崩溃时留下截断文件。
+        self.put_atomic(key, data).await
     }
 
     /// Store an object by moving a file from disk.
@@ -101,15 +108,8 @@ impl StorageBackend for LocalStorage {
         match fs::rename(source, &dest).await {
             Ok(()) => Ok(()),
             Err(_) => {
-                // Cross-filesystem: copy then delete source
-                fs::copy(source, &dest).await.map_err(|e| {
-                    StorageError::Internal(format!(
-                        "Failed to copy {} → {}: {}",
-                        source.display(),
-                        dest.display(),
-                        e
-                    ))
-                })?;
+                // Cross-filesystem: copy to temp + rename (atomic), then delete source.
+                copy_then_rename(source, &dest).await?;
                 let _ = fs::remove_file(source).await;
                 Ok(())
             }
@@ -483,5 +483,35 @@ impl LocalStorage {
             .unwrap_or(0);
         entries_with_mtime.extend(entries.into_iter().map(|(key, mtime)| (key, mtime.unwrap_or(now))));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_copy_then_rename_atomic() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.bin");
+        let dest = dir.path().join("sub/dest.bin");
+        tokio::fs::create_dir_all(dest.parent().unwrap()).await.unwrap();
+        tokio::fs::write(&src, b"payload").await.unwrap();
+
+        copy_then_rename(&src, &dest).await.unwrap();
+
+        assert_eq!(tokio::fs::read(&dest).await.unwrap(), b"payload");
+        // 不留下 .tmp 中间文件
+        assert!(!dest.with_extension("tmp").exists());
+    }
+
+    #[tokio::test]
+    async fn test_put_is_atomic_no_temp_leftover() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalStorage::new(dir.path().to_str().unwrap()).unwrap();
+        store.put("xorbs/abc", Bytes::from_static(b"data")).await.unwrap();
+        assert_eq!(store.get("xorbs/abc").await.unwrap(), Bytes::from_static(b"data"));
+        // 原子写不应残留 .tmp
+        assert!(!dir.path().join("xorbs/abc.tmp").exists());
     }
 }
