@@ -221,7 +221,7 @@ pub async fn upload_xorb(
     let temp_path = temp_file.into_path();
     if let Err(e) = storage.put_from_path(&xorb_key, &temp_path).await {
         error!("Failed to store xorb: {}", e);
-        let _ = std::fs::remove_file(&temp_path);
+        let _ = tokio::fs::remove_file(&temp_path).await;
         GLOBAL_METRICS.record_request(500);
         GLOBAL_METRICS.record_error();
         GLOBAL_METRICS.record_latency(start);
