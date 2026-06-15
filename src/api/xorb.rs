@@ -7,7 +7,7 @@ use futures_util::StreamExt;
 use serde::Serialize;
 use tracing::{error, info};
 
-use crate::api::auth::{check_scope, extract_token_from_request, AuthVerifier};
+use crate::api::auth::{authorize_endpoint, extract_token_from_request, AuthVerifier};
 use crate::config::ServerConfig;
 use crate::storage::{StorageBackend, StorageError};
 use crate::types::MerkleHash;
@@ -78,7 +78,7 @@ pub async fn upload_xorb(
         }
     };
 
-    if !check_scope(&claims, "write") {
+    if !authorize_endpoint(&claims, "write") {  // I1 fix: Use unified auth helper
         GLOBAL_METRICS.record_request(403);
         GLOBAL_METRICS.record_latency(start);
         return HttpResponse::Forbidden().json(serde_json::json!({
@@ -294,7 +294,7 @@ pub async fn download_xorb(
         }
     };
 
-    if !check_scope(&claims, "read") {
+    if !authorize_endpoint(&claims, "read") {
         GLOBAL_METRICS.record_request(403);
         GLOBAL_METRICS.record_latency(start);
         return HttpResponse::Forbidden().json(serde_json::json!({

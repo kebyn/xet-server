@@ -8,7 +8,7 @@ use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use tracing::error;
 
-use crate::api::auth::{check_scope, extract_token_from_request, AuthVerifier};
+use crate::api::auth::{authorize_endpoint, extract_token_from_request, AuthVerifier};
 use crate::config::ServerConfig;
 use crate::index::MetadataIndex;
 use crate::metrics::GLOBAL_METRICS;
@@ -114,7 +114,7 @@ pub async fn get_reconstruction_v1(
         }
     };
 
-    if !check_scope(&claims, "read") {
+    if !authorize_endpoint(&claims, "read") {
         GLOBAL_METRICS.record_request(403);
         GLOBAL_METRICS.record_latency(start);
         return HttpResponse::Forbidden().json(serde_json::json!({
@@ -250,7 +250,7 @@ pub async fn get_reconstruction(
         }
     };
 
-    if !check_scope(&claims, "read") {
+    if !authorize_endpoint(&claims, "read") {
         GLOBAL_METRICS.record_request(403);
         GLOBAL_METRICS.record_latency(start);
         return HttpResponse::Forbidden().json(serde_json::json!({

@@ -55,7 +55,14 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
     for warning in crate::config::validate_gc_config(&config) {
         tracing::warn!("{}", warning);
     }
-    let gc = Arc::new(GarbageCollector::new(storage.clone(), config.gc.clone()));
+    // I4 fix: Handle GC creation error gracefully
+    let gc = match GarbageCollector::new(storage.clone(), config.gc.clone()) {
+        Ok(gc) => Arc::new(gc),
+        Err(e) => {
+            tracing::error!("Failed to create garbage collector: {}", e);
+            return Err(std::io::Error::other(format!("Failed to create GC: {}", e)));
+        }
+    };
     let last_gc_stats = Arc::new(RwLock::new(None::<GcStats>));
 
     // Start background GC task (if enabled)

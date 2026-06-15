@@ -152,24 +152,25 @@ pub struct HubConfig {
 
 impl HubConfig {
     /// Validate configuration parameters.
-    /// Panics on invalid values to fail fast at startup.
+    /// Validate configuration parameters.
+    /// M1 fix: Returns Result instead of panicking for better error handling.
     /// I4 fix: Prevent zero values that would cause service unavailability.
-    fn validate(&self) {
+    fn validate(&self) -> Result<(), String> {
         if self.server.rate_limit_rpm == 0 {
-            panic!("HUB_RATE_LIMIT_RPM must be > 0 (got 0). This would disable rate limiting.");
+            return Err("HUB_RATE_LIMIT_RPM must be > 0 (got 0). This would disable rate limiting.".to_string());
         }
         if self.metadata.db_pool_size == 0 {
-            panic!("HUB_DB_POOL_SIZE must be > 0 (got 0). This would prevent all database operations.");
+            return Err("HUB_DB_POOL_SIZE must be > 0 (got 0). This would prevent all database operations.".to_string());
         }
         if self.auth.token_ttl_seconds == 0 {
-            panic!("HUB_TOKEN_TTL_SECONDS must be > 0 (got 0). Tokens would expire immediately.");
+            return Err("HUB_TOKEN_TTL_SECONDS must be > 0 (got 0). Tokens would expire immediately.".to_string());
         }
         if self.auth.proxy_token_ttl_seconds == 0 {
-            panic!("HUB_PROXY_TOKEN_TTL_SECONDS must be > 0 (got 0). Proxy tokens would expire immediately.");
+            return Err("HUB_PROXY_TOKEN_TTL_SECONDS must be > 0 (got 0). Proxy tokens would expire immediately.".to_string());
         }
         // C1 fix: Validate internal token TTL (must be long enough for GC interval)
         if self.auth.internal_token_ttl_seconds == 0 {
-            panic!("HUB_INTERNAL_TOKEN_TTL_SECONDS must be > 0 (got 0). Internal tokens would expire immediately.");
+            return Err("HUB_INTERNAL_TOKEN_TTL_SECONDS must be > 0 (got 0). Internal tokens would expire immediately.".to_string());
         }
         if self.auth.internal_token_ttl_seconds < 3600 {
             tracing::warn!(
@@ -179,11 +180,12 @@ impl HubConfig {
             );
         }
         if self.storage.max_upload_size == 0 {
-            panic!("HUB_MAX_UPLOAD_SIZE must be > 0 (got 0). This would prevent all uploads.");
+            return Err("HUB_MAX_UPLOAD_SIZE must be > 0 (got 0). This would prevent all uploads.".to_string());
         }
         if self.cas.health_check_timeout_seconds == 0 {
-            panic!("HUB_CAS_HEALTH_CHECK_TIMEOUT_SECS must be > 0 (got 0). Health check would never complete.");
+            return Err("HUB_CAS_HEALTH_CHECK_TIMEOUT_SECS must be > 0 (got 0). Health check would never complete.".to_string());
         }
+        Ok(())
     }
 
     /// Load configuration from environment variables.
@@ -362,7 +364,10 @@ impl HubConfig {
             config.storage.max_upload_size = size;
         }
 
-        config.validate();
+        // M1 fix: Handle validation errors with clear error messages
+        if let Err(e) = config.validate() {
+            panic!("Configuration validation failed: {}", e);
+        }
         config
     }
 }
