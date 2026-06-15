@@ -189,7 +189,7 @@
 - 响应：`uploadMode`, `shouldIgnore`
 
 #### 新增端点文档
-- ✅ `GET /internal/referenced-hashes` - 获取引用的哈希列表（供 CAS GC 使用）
+- 🗑️ `GET /internal/referenced-hashes` - 已移除（增量 GC 不再依赖 Hub 端点）
 - ✅ `GET /health` - Hub 健康检查端点
 
 ### 任务 2.3：更新认证机制说明

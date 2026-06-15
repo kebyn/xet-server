@@ -439,13 +439,15 @@ EOF
 
 ### 列出文件树
 
-**端点**：`GET /api/models/{ns}/{repo}/tree/{rev}/{path}`
+**端点**：
+- `GET /api/models/{ns}/{repo}/tree/{rev}/{path}` - 列出指定子目录
+- `GET /api/models/{ns}/{repo}/tree/{rev}` - 列出根目录
 
 **路径参数**：
 - `ns` (string): 命名空间
 - `repo` (string): 仓库名称
 - `rev` (string): 修订版本
-- `path` (string, optional): 子目录路径，不指定则列出根目录
+- `path` (string, optional): 子目录路径（URL 路径参数，不是查询参数），不指定则列出根目录
 
 **查询参数**：
 - `recursive` (optional): 是否递归列出，默认 `false`
@@ -488,21 +490,28 @@ EOF
 curl "http://localhost:8080/api/models/my-org/my-model/tree/main" \
   -H "Authorization: Bearer hf_xxx"
 
-# 列出子目录
-curl "http://localhost:8080/api/models/my-org/my-model/tree/main?path=tokenizer" \
+# 列出子目录（path 是 URL 路径参数）
+curl "http://localhost:8080/api/models/my-org/my-model/tree/main/tokenizer" \
   -H "Authorization: Bearer hf_xxx"
 
 # 递归列出
 curl "http://localhost:8080/api/models/my-org/my-model/tree/main?recursive=true" \
   -H "Authorization: Bearer hf_xxx"
+
+# 递归列出子目录
+curl "http://localhost:8080/api/models/my-org/my-model/tree/main/tokenizer?recursive=true" \
+  -H "Authorization: Bearer hf_xxx"
 ```
 
 ### 下载文件 (Resolve API)
 
-**端点**：`GET /{type}/{ns}/{repo}/resolve/{rev}/{path}`
+**端点**：
+- `GET /{type}/{ns}/{repo}/resolve/{rev}/{path}` - 下载文件内容
+- `HEAD /{type}/{ns}/{repo}/resolve/{rev}/{path}` - 获取文件元信息（不下载内容）
+- `GET /{ns}/{repo}/resolve/{rev}/{path}` - 泛型回退路由（默认使用 models 类型）
 
 **路径参数**：
-- `type` (string): 仓库类型 - `models`, `datasets`, `spaces`
+- `type` (string, optional): 仓库类型 - `models`, `datasets`, `spaces`（泛型路由可省略）
 - `ns` (string): 命名空间
 - `repo` (string): 仓库名称
 - `rev` (string): 修订版本
@@ -513,10 +522,24 @@ curl "http://localhost:8080/api/models/my-org/my-model/tree/main?recursive=true"
 Authorization: Bearer hf_xxx
 ```
 
-**响应**：
+**GET 响应**：
 - `200 OK`: 返回文件内容
 - `302 Found`: 重定向到 CDN（大文件）
 - `404 Not Found`: 文件不存在
+
+**HEAD 响应**：
+- `200 OK`: 返回文件元信息的响应头（不返回 body）
+- `404 Not Found`: 文件不存在
+
+**HEAD 响应头**：
+- `Content-Length`: 文件大小（字节）
+- `Content-Type`: 文件 MIME 类型（如 `application/octet-stream`）
+- `X-Xet-Hash`: 文件的 BLAKE3 哈希（如果可用）
+- `ETag`: 文件版本标识
+
+**使用场景**：
+- **GET**: 下载完整文件内容
+- **HEAD**: 检查文件是否存在、获取文件大小和哈希，无需下载内容
 
 **示例**：
 ```bash
@@ -528,6 +551,21 @@ curl -o model.safetensors \
 # 下载配置文件
 curl -o config.json \
   "http://localhost:8080/models/my-org/my-model/resolve/main/config.json" \
+  -H "Authorization: Bearer hf_xxx"
+
+# 检查文件是否存在（HEAD 方法）
+curl -I \
+  "http://localhost:8080/models/my-org/my-model/resolve/main/model.safetensors" \
+  -H "Authorization: Bearer hf_xxx"
+# 返回示例：
+# HTTP/1.1 200 OK
+# Content-Length: 104857600
+# Content-Type: application/octet-stream
+# X-Xet-Hash: blake3:abc123...
+
+# 使用泛型回退路由（省略 type，默认 models）
+curl -o model.bin \
+  "http://localhost:8080/my-org/my-model/resolve/main/model.bin" \
   -H "Authorization: Bearer hf_xxx"
 ```
 
@@ -926,45 +964,10 @@ hf repo info my-org/my-model
 
 ---
 
-## 内部 API
-
-内部 API 用于 CAS Server 与 Hub Server 之间的通信，需要 `internal` 作用域。
-
-### 获取引用的哈希列表
-
-**端点**：`GET /internal/referenced-hashes`
-
-**请求头**：
-```
-Authorization: Bearer hf_xxx (需要 internal scope)
-```
-
-**响应**：
-```json
-{
-  "hashes": [
-    "abc123...",
-    "def456..."
-  ],
-  "count": 2
-}
-```
-
-**字段说明**：
-- `hashes`: 所有被仓库引用的 blob SHA-256 哈希列表
-- `count`: 哈希数量
-
-**用途**：
-- 供 CAS Server 的垃圾回收（GC）功能使用
-- GC 通过此端点获取所有被引用的 blob，然后删除未引用的孤立 blob
-
-**示例**：
-```bash
-curl "http://localhost:8080/internal/referenced-hashes" \
-  -H "Authorization: Bearer hf_xxx"
-```
-
----
+<!-- 内部 API (Internal API) 章节已移除。
+     GET /internal/referenced-hashes 端点已废弃并删除（增量 GC v2 使用 S3 sidecar 文件
+     追踪引用，不再依赖 Hub）。Hub 的 internal token 签名/验证机制仍保留，
+     用于 CAS↔Hub 代理认证（resolve、commit、lfs_proxy 等端点）。 -->
 
 ## 系统 API
 

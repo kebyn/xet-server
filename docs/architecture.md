@@ -164,8 +164,17 @@ src/
 ├── conversion/       # 转换管道
 │   ├── mod.rs        # 转换逻辑
 │   └── converting_oids.rs  # 转换中的 OID 跟踪
-├── gc/               # 垃圾回收
-│   └── mod.rs        # GC 逻辑
+├── gc/               # 增量垃圾回收（v2）
+│   ├── mod.rs        # GC 主逻辑和状态机
+│   ├── bloom.rs      # Bloom Filter 实现（O(1) 成员测试）
+│   ├── checkpoint.rs # 崩溃恢复和断点续传
+│   ├── coordinator.rs # 多节点租约协调（S3 conditional PUT）
+│   ├── scanner.rs    # 增量分页扫描器
+│   ├── grace.rs      # 两层宽限期管理
+│   ├── errors.rs     # GC 错误类型定义
+│   └── reference_tracker/  # 引用追踪
+│       ├── mod.rs    # 引用追踪接口
+│       └── s3.rs     # S3 sidecar 引用追踪实现
 ├── hash/             # 哈希算法
 │   ├── blake3_hash.rs # BLAKE3 哈希
 │   └── merkle_tree.rs # Merkle 树
@@ -384,11 +393,11 @@ export CAS_TRUSTED_KIDS=hub-key-1,backup-key-1            # 受信任的密钥 I
 
 ---
 
-## 垃圾回收系统
+## 增量垃圾回收系统（v2）
 
 ### 功能
 
-后台定期清理不再被任何文件引用的孤立 blob，释放存储空间。
+后台定期清理不再被任何文件引用的孤立 blob，释放存储空间。增量 GC v2 是下一代垃圾回收系统，专为大规模存储优化，采用 Bloom Filter、增量扫描和多节点协调。
 
 ### 工作原理
 
@@ -398,20 +407,56 @@ export CAS_TRUSTED_KIDS=hub-key-1,backup-key-1            # 受信任的密钥 I
 
 2. **清理流程**：
    ```
-   定时触发 → 查询 Hub 获取引用哈希 → 对比存储中的对象 → 删除未引用的 LFS blob、xorb 和 shard（应用宽限期）
+   定时触发 → 构建 Bloom Filter → 增量扫描存储 → 对比引用集 → 删除未引用的 blob（应用两层宽限期）
    ```
    - **LFS blob**：原始上传的大文件
    - **Xorb**：压缩后的块容器（包含多个 CDC 分块）
    - **Shard**：元数据索引文件（文件到 chunk/xorb 的映射）
 
-3. **宽限期保护**：
-   - `GC_GRACE_PERIOD_SECONDS` 防止竞态条件
-   - 新上传的 blob 在宽限期内不会被删除
-   - 防止 blob 已上传但 commit 尚未写入文件树时被误删
+3. **Bloom Filter 引用追踪**：
+   - **从本地 shard 文件提取引用**（不查询 Hub API）
+   - 三层防御机制加载引用：
+     1. 读取 sidecar 文件 (`shard_refs/{hash}.refs.json`)
+     2. 解析 shard 文件，提取 `file_hashes()` 和 `xorb_entries`
+     3. 保守策略：返回空引用集（避免误删）
+   - 将引用插入 Bloom Filter（O(1) 插入，~17MB 内存 for 10M items）
+   - 扫描存储时通过 Bloom Filter 快速判断 chunk 是否被引用
+   - 误报率 0.001：约 1/1000 未引用 chunk 会被错误保留
 
-4. **试运行模式**：
+4. **增量扫描器**：
+   - 分页扫描存储（默认 1000 对象/页）
+   - 每页完成后保存 checkpoint 到 `GC_DATA_DIR`
+   - 崩溃或重启后从最后 checkpoint 恢复，无需重新扫描
+   - 单次扫描最大时长限制（默认 30 分钟），防止长时间占用资源
+
+5. **两层宽限期保护**：
+   - **绝对宽限期**（`GC_GRACE_ABSOLUTE_SECONDS`）：blob 年龄小于此值时永不删除（默认 1 小时）
+   - **软宽限期**（`GC_GRACE_SOFT_CYCLES`）：blob 必须经过 N 个完整 GC 周期后才可删除（默认 2 周期）
+   - 防止竞态条件：blob 已上传但 commit 尚未写入文件树时不会被误删
+
+6. **多节点协调**：
+   - 多节点部署时通过 S3-based 租约协调
+   - 每个节点获取 keyspace 分区的短期租约
+   - 租约自动过期，崩溃节点的分区可被其他节点接管
+   - 避免多节点同时扫描同一分区造成冲突
+
+7. **Sidecar 引用追踪**：
+   - 每个 shard 文件写入 `.refs.json` sidecar 文件
+   - 记录该 shard 包含的所有 chunk 哈希的引用集
+   - 支持增量更新，无需重新扫描整个 shard
+
+8. **试运行模式**：
    - `GC_DRY_RUN=true` 时只报告统计信息，不实际删除
    - 适合初次部署时测试，观察将删除哪些 blob
+
+### 核心特性
+
+- **Bloom Filter**：O(1) 概率性成员测试，避免全量哈希内存存储（10M items 仅需 ~17MB）
+- **增量扫描器**：分页扫描存储，支持崩溃恢复和断点续传
+- **多节点协调**：S3-based 租约确保单节点运行，避免冲突
+- **Sidecar 文件模式**：每个 shard 写入 `.refs.json` 文件存储引用集
+- **两层宽限期**：绝对宽限期 + 软宽限期，防止过早删除
+- **Checkpoint 恢复**：扫描进度定期保存，重启后从断点继续
 
 ### 配置
 
@@ -419,41 +464,117 @@ export CAS_TRUSTED_KIDS=hub-key-1,backup-key-1            # 受信任的密钥 I
 |---------|------|--------|
 | `GC_ENABLED` | 启用/禁用 GC | `false` |
 | `GC_INTERVAL_SECONDS` | 运行间隔（秒） | `3600` (1 小时) |
-| `GC_GRACE_PERIOD_SECONDS` | 新上传 blob 的宽限期（秒） | `600` (10 分钟) |
 | `GC_DRY_RUN` | 试运行模式（只报告不删除） | `true` |
-| `GC_HUB_BASE_URL` | Hub API URL | `http://localhost:8080` |
-| `GC_HUB_INTERNAL_TOKEN` | Hub 内部认证令牌 | 空 |
-| `GC_HTTP_TIMEOUT_SECONDS` | GC 请求 Hub 的 HTTP 超时（秒） | `300` (5 分钟) |
+| `GC_DATA_DIR` | GC 工作目录（checkpoints, bloom filter, leases） | `/var/lib/cas/gc` |
+| `GC_BLOOM_EXPECTED_ITEMS` | Bloom filter 预期插入数量 | `10000000` (10M) |
+| `GC_BLOOM_FALSE_POSITIVE_RATE` | Bloom filter 误报率 | `0.001` |
+| `GC_BLOOM_REBUILD_THRESHOLD` | Bloom filter 重建阈值 | `0.8` |
+| `GC_SCANNER_PAGE_SIZE` | 扫描页大小 | `1000` |
+| `GC_SCANNER_CHECKPOINT_INTERVAL` | 强制 checkpoint 间隔 | `10000` |
+| `GC_SCANNER_MAX_DURATION_SECONDS` | 单次扫描最大时长（秒） | `1800` (30分钟) |
+| `GC_GRACE_ABSOLUTE_SECONDS` | 绝对宽限期（秒） | `3600` (1小时) |
+| `GC_GRACE_SOFT_CYCLES` | 软宽限期周期数 | `2` |
+| `GC_LEASE_TTL_SECONDS` | 租约 TTL（秒） | `3600` (1小时) |
+| `GC_LEASE_RENEW_INTERVAL_SECONDS` | 租约续期间隔（秒） | `600` (10分钟) |
+| `GC_REFERENCE_TRACKER_MODE` | 引用追踪模式（`sidecar` 或 `local_cache_db`） | `sidecar` |
+| `GC_LOCAL_CACHE_DB_PATH` | 本地缓存数据库路径 | `/var/lib/cas/gc/refs.db` |
+| `GC_DELETE_BATCH_SIZE` | 每批次删除数量上限 | `100` |
+| `GC_DELETE_MAX_RETRIES` | 删除失败最大重试次数 | `3` |
 
 ### 安全考虑
 
-- GC 需要 Hub 的 `internal` scope 令牌
 - 宽限期防止竞态条件（blob 上传但 commit 未写入）
 - 建议生产环境设置 `GC_DRY_RUN=false` 前先以试运行模式观察几天
 - GC 统计信息可通过 `/internal/gc/status` API 查询
+- Bloom Filter 误报率设置为 0.001，约 1/1000 未引用 chunk 会被错误保留（安全侧）
+- 多节点部署时必须配置 `GC_LEASE_TTL_SECONDS` 和 `GC_LEASE_RENEW_INTERVAL_SECONDS`
 
-### 增量 GC 系统 (v2)
+### 性能优化
 
-**注意**：上述 Legacy GC 适用于小型部署。生产环境推荐使用增量 GC v2。
+- **Bloom Filter 内存占用**：10M items × 14 bits/item ≈ 17MB（远小于全量哈希存储）
+- **分页扫描**：每页 1000 对象，避免一次性加载所有对象到内存
+- **Checkpoint 频率**：每 10000 对象强制保存进度，平衡恢复速度和 I/O 开销
+- **批量删除**：每批次最多删除 100 对象，限制单个 GC 周期的 I/O 影响
+- **扫描时长限制**：单次扫描最多 30 分钟，防止长时间占用事件循环
 
-增量 GC v2 是下一代垃圾回收系统，专为大规模存储优化：
-
-**核心特性**：
-- **Bloom Filter**：O(1) 概率性成员测试，避免全量哈希内存存储
-- **增量扫描器**：分页扫描存储，支持崩溃恢复和断点续传
-- **多节点协调**：S3-based 租约确保单节点运行，避免冲突
-- **Sidecar 文件模式**：每个 shard 写入 `.refs.json` 文件存储引用集
-- **两层宽限期**：绝对宽限期 + 软宽限期，防止过早删除
-
-**关键配置**：
-- `GC_BLOOM_EXPECTED_ITEMS`：期望的 chunk 数量（默认 10M）
-- `GC_BLOOM_FALSE_POSITIVE_RATE`：误报率（默认 0.001）
-- `GC_SCANNER_PAGE_SIZE`：扫描页大小（默认 1000）
-- `GC_GRACE_ABSOLUTE_SECONDS`：绝对宽限期（默认 3600）
-- `GC_GRACE_SOFT_CYCLES`：软宽限期周期数（默认 2）
-- `GC_LEASE_TTL_SECONDS`：租约 TTL（默认 3600）
+**详细配置**：完整的 GC 配置选项和调优建议，请参阅 [配置指南](configuration.md#增量垃圾回收设置v2)。
 
 **详细文档**：完整的 v2 GC 架构设计、配置参考和迁移指南，请参阅 [docs/gc/](gc/) 目录。
+
+### Sidecar 引用追踪机制
+
+#### 工作原理
+
+Sidecar 引用追踪是**完全本地化**的操作，不依赖 Hub API：
+
+1. **数据提取**：从 shard 文件中提取引用信息
+   - `file_hashes()` → LFS OID 列表（`lfs_refs`）
+   - `xorb_entries` → Xorb 哈希列表（`xorb_refs`）
+
+2. **Sidecar 文件**：存储为 JSON 格式
+   ```json
+   {
+     "version": 1,
+     "shard_hash": "abc123...",
+     "lfs_refs": ["oid1", "oid2", ...],
+     "xorb_refs": ["xorb_hash1", "xorb_hash2", ...],
+     "created_at": "2024-01-01T00:00:00Z"
+   }
+   ```
+
+3. **三层防御机制**：
+   - **Layer 1（优先）**：读取 sidecar 文件，快速返回引用集
+   - **Layer 2（回退）**：sidecar 不存在时，下载并解析 shard 文件
+   - **Layer 3（兜底）**：解析失败时，返回空引用集（保守策略，避免误删）
+
+4. **按需生成**：
+   - **不在上传时生成**：避免增加上传延迟
+   - **在 GC 扫描时生成**：首次扫描 shard 时，解析并生成 sidecar 文件
+   - **后续扫描直接读取**：避免重复解析 shard 文件
+
+#### 存储布局
+
+```
+storage/
+├── shards/{shard_hash}              # Shard 二进制文件
+├── shard_refs/{shard_hash}.refs.json # Sidecar 引用文件（JSON）
+├── xorbs/{xorb_hash}
+├── lfs/objects/{oid}
+└── .gc/
+    ├── checkpoint.json              # GC 检查点
+    ├── bloom.bin                    # Bloom Filter
+    └── lease.json                   # 多节点租约
+```
+
+#### 为什么不需要查询 Hub API？
+
+1. **Shard 文件已包含完整引用信息**：
+   - Shard 是 Merkle DB 分片，包含文件到 chunk/xorb 的映射
+   - 通过解析 shard 可以获取所有被引用的 LFS OID 和 Xorb 哈希
+
+2. **本地化操作的优势**：
+   - **无需网络调用**：避免 Hub API 延迟和可用性依赖
+   - **无认证开销**：不需要 internal token
+   - **可离线运行**：GC 可以在没有 Hub 连接的情况下运行
+   - **更好的性能**：本地文件读取比 HTTP 请求快得多
+
+3. **Hub 端点的清理**：
+   - `/internal/referenced-hashes` 端点已从 Hub 代码中移除
+   - 增量 GC 使用 S3 sidecar 文件追踪引用，完全独立于 Hub
+   - Hub 的 internal token 签名/验证机制仍保留，用于 CAS↔Hub 代理认证
+
+#### Shards 为什么不被 GC 删除？
+
+**关键决策**：GC 只删除 LFS blobs 和 xorbs，**从不删除 shards**
+
+**原因**：
+- 无法查询 Hub 的 `file_tree` 表确认 shard 是否被引用
+- Shard 文件包含元数据，删除后无法恢复
+- 保守策略：宁可保留孤儿 shard，也不误删被引用的 shard
+
+**影响**：
+- Shard 文件会持续积累，需要手动清理或未来实现 shard GC
+- 当前设计优先保证数据安全，牺牲存储空间效率
 
 ---
 

@@ -33,6 +33,9 @@ incremental, multi-node-safe garbage collector.
 | Crash recovery | Restart from scratch | Resume from checkpoint |
 | Reference tracking | Hub queries on every run | Sidecar files on every upload |
 
+> **Note:** The legacy Hub `/internal/referenced-hashes` endpoint has been
+> removed. The incremental GC is fully self-contained with no Hub dependency.
+
 ---
 
 ## System Overview

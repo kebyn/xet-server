@@ -60,8 +60,6 @@ CREATE TABLE IF NOT EXISTS file_tree (
 );
 
 CREATE INDEX IF NOT EXISTS idx_file_tree_prefix ON file_tree(repo_id, commit_id, path);
--- M5: Index for GC referenced hash queries (SELECT DISTINCT cas_hash WHERE is_lfs = 1)
-CREATE INDEX IF NOT EXISTS idx_file_tree_cas_hash ON file_tree(is_lfs, cas_hash);
 "#;
 
 /// Async SQLite-based metadata store using sqlx connection pool
@@ -637,28 +635,6 @@ impl MetadataStore for SqliteMetadataStore {
                 Err(e)
             }
         }
-    }
-
-    async fn get_all_referenced_hashes(&self) -> Result<std::collections::HashSet<String>, MetadataError> {
-        // C2 fix: Use streaming query instead of fetch_all to avoid OOM on large datasets.
-        // fetch() returns a Stream that processes rows one at a time, keeping memory
-        // usage bounded to O(1) for the query itself (though we still accumulate into HashSet).
-        use futures_util::StreamExt;
-        use sqlx::Executor;
-
-        let mut hashes = std::collections::HashSet::new();
-        let mut stream = self.pool.fetch(
-            sqlx::query("SELECT DISTINCT cas_hash FROM file_tree WHERE is_lfs = 1")
-        );
-
-        while let Some(row_result) = stream.next().await {
-            let row = row_result.map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
-            let hash: String = row.try_get(0)
-                .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
-            hashes.insert(hash);
-        }
-
-        Ok(hashes)
     }
 }
 

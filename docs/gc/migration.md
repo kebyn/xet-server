@@ -297,9 +297,8 @@ GC_DRY_RUN=false
    ```
 3. **Monitor for 1 week:** Verify that the incremental GC continues to
    function correctly without the legacy GC.
-4. **Remove legacy code:** Once confident, remove the legacy GC code path
-   and Hub `/internal/referenced-hashes` endpoint dependency. This is
-   tracked in Task 20.
+4. **Remove legacy code:** ✅ Done — the legacy GC code path and Hub
+   `/internal/referenced-hashes` endpoint have been removed.
 5. **Update documentation:** Remove references to the legacy GC from
    configuration docs and runbooks.
 

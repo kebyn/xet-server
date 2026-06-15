@@ -164,13 +164,7 @@ pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
             // =============================================================
             // Non-rate-limited endpoints (registered at App level, before scope)
             // =============================================================
-            // I4: Internal API (for CAS GC) is registered at App level to bypass rate limiting.
-            // This is intentional: CAS-to-Hub internal calls should not be rate-limited as they
-            // are part of the garbage collection process and run infrequently. If rate-limited,
-            // CAS GC could fail with 429 errors during critical cleanup operations.
-            // These endpoints still require valid internal tokens (authentication + authorization).
-            .route("/internal/referenced-hashes", web::get().to(crate::api::internal::get_referenced_hashes))
-            // Health endpoint is also non-rate-limited for monitoring purposes.
+            // Health endpoint is non-rate-limited for monitoring purposes.
             .route("/health", web::get().to(|| async { HttpResponse::Ok().json(serde_json::json!({"status": "ok"})) }))
             // =============================================================
             // Public API routes - rate limited via Governor middleware
