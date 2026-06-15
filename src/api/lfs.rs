@@ -26,7 +26,50 @@ use crate::format::xorb::XorbChunkHeader;
 use crate::index::MetadataIndex;
 use crate::metrics::GLOBAL_METRICS;
 use crate::storage::{StorageBackend, StorageError};
+use crate::types::MerkleHash;
 use crate::util::{DualHasher, TempFile};
+
+/// 从 xorb 原始字节中按偏移定位单个 chunk,校验其完整性后解压。
+///
+/// C-DATA-2: chunk_hash 覆盖 header(8B)+压缩数据。在解压前对该区域重算 hash
+/// 并与 shard 记录值比对,检出磁盘 bit-rot / 存储损坏 / 串改,并先于解压挡住污染数据。
+fn extract_chunk_verified(
+    xorb_data: &[u8],
+    chunk_offset_bytes: usize,
+    expected_hash: &MerkleHash,
+) -> std::result::Result<bytes::Bytes, String> {
+    if chunk_offset_bytes + XorbChunkHeader::SIZE > xorb_data.len() {
+        return Err("Chunk offset out of bounds".to_string());
+    }
+    let mut chunk_cursor = std::io::Cursor::new(&xorb_data[chunk_offset_bytes..]);
+    let chunk_header = XorbChunkHeader::deserialize(&mut chunk_cursor)
+        .map_err(|e| format!("Failed to parse chunk header: {}", e))?;
+
+    let data_start = chunk_offset_bytes + XorbChunkHeader::SIZE;
+    let data_end = data_start + chunk_header.compressed_length as usize;
+    if data_end > xorb_data.len() {
+        return Err("Chunk data out of bounds".to_string());
+    }
+
+    // 解压前校验 header+压缩数据 区域的完整性。
+    let chunk_region = &xorb_data[chunk_offset_bytes..data_end];
+    let actual_hash = crate::hash::compute_data_hash(chunk_region);
+    if actual_hash != *expected_hash {
+        return Err(format!(
+            "Chunk hash mismatch at offset {}: stored data is corrupted",
+            chunk_offset_bytes
+        ));
+    }
+
+    let compressed_data = &xorb_data[data_start..data_end];
+    let decompressed = decompress(
+        chunk_header.compression_scheme,
+        compressed_data,
+        chunk_header.uncompressed_length as usize,
+    )
+    .map_err(|e| format!("Failed to decompress chunk: {}", e))?;
+    Ok(bytes::Bytes::from(decompressed))
+}
 
 /// Upload an LFS object (raw file) via streaming.
 ///
@@ -1058,34 +1101,13 @@ fn create_reconstruction_stream(
                     let chunk_entry = &shard.xorb_chunk_entries[global_chunk_idx];
                     let chunk_offset_bytes = chunk_entry.chunk_byte_range_start as usize;
 
-                    // Read chunk header
-                    if chunk_offset_bytes + XorbChunkHeader::SIZE > xorb_data.len() {
-                        yield Err("Chunk offset out of bounds".to_string());
-                        return;
+                    match extract_chunk_verified(&xorb_data, chunk_offset_bytes, &chunk_entry.chunk_hash) {
+                        Ok(bytes) => yield Ok(bytes),
+                        Err(e) => {
+                            yield Err(e);
+                            return;
+                        }
                     }
-
-                    let mut chunk_cursor = std::io::Cursor::new(&xorb_data[chunk_offset_bytes..]);
-                    let chunk_header = XorbChunkHeader::deserialize(&mut chunk_cursor)
-                        .map_err(|e| format!("Failed to parse chunk header: {}", e))?;
-
-                    // Read compressed chunk data
-                    let data_start = chunk_offset_bytes + XorbChunkHeader::SIZE;
-                    let data_end = data_start + chunk_header.compressed_length as usize;
-                    if data_end > xorb_data.len() {
-                        yield Err("Chunk data out of bounds".to_string());
-                        return;
-                    }
-
-                    let compressed_data = &xorb_data[data_start..data_end];
-
-                    // Decompress chunk
-                    let decompressed = decompress(
-                        chunk_header.compression_scheme,
-                        compressed_data,
-                        chunk_header.uncompressed_length as usize,
-                    ).map_err(|e| format!("Failed to decompress chunk: {}", e))?;
-
-                    yield Ok(bytes::Bytes::from(decompressed));
                 }
             }
         }
@@ -1096,4 +1118,38 @@ fn create_reconstruction_stream(
 /// Delegates to the shared utility in crate::util::disk.
 fn check_disk_space(path: &std::path::Path, required_bytes: u64) -> Result<(), String> {
     crate::util::disk::check_disk_space(path, required_bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_chunk_verified_detects_corruption() {
+        use crate::format::compression::{compress, CompressionScheme};
+        use crate::hash::compute_data_hash;
+
+        let raw = b"some chunk payload data for verification".to_vec();
+        let compressed = compress(CompressionScheme::LZ4, &raw).unwrap();
+        let header = XorbChunkHeader {
+            version: 1,
+            compressed_length: compressed.len() as u32,
+            compression_scheme: CompressionScheme::LZ4,
+            uncompressed_length: raw.len() as u32,
+        };
+        let mut chunk_bytes = Vec::new();
+        header.serialize(&mut chunk_bytes).unwrap();
+        chunk_bytes.extend_from_slice(&compressed);
+        let hash = compute_data_hash(&chunk_bytes);
+
+        // 正常路径:解压结果等于原文
+        let ok = extract_chunk_verified(&chunk_bytes, 0, &hash).unwrap();
+        assert_eq!(&ok[..], &raw[..]);
+
+        // 翻转压缩区最后一字节 → hash 不匹配 → 报错
+        let mut corrupted = chunk_bytes.clone();
+        let last = corrupted.len() - 1;
+        corrupted[last] ^= 0xFF;
+        assert!(extract_chunk_verified(&corrupted, 0, &hash).is_err());
+    }
 }
