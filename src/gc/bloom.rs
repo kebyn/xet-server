@@ -3,7 +3,7 @@
 //! Provides O(1) probabilistic membership tests for chunk/xorb hashes.
 //! A false positive rate of 0.001 with 10M expected items uses ~17MB.
 //!
-//! # Persistence Format
+//! # Persistence Format (v2)
 //!
 //! ```text
 //! [CRC32: 4 bytes LE]
@@ -13,6 +13,7 @@
 //! [sip_key_1_0: 8 bytes LE][sip_key_1_1: 8 bytes LE]
 //! [bitmap_len: 8 bytes LE]
 //! [bitmap: bitmap_len bytes]
+//! [items_inserted: 8 bytes LE]  -- v2 extension, optional on load
 //! ```
 
 use bloomfilter::Bloom;
@@ -138,7 +139,7 @@ impl BloomFilterProtectedSet {
 
     /// Save the bloom filter to a writer with CRC32 integrity check.
     ///
-    /// Format: [CRC32:4][num_bits:8][num_hashes:4][sip_keys:32][bitmap_len:8][bitmap:N]
+    /// Format v2: [CRC32:4][num_bits:8][num_hashes:4][sip_keys:32][bitmap_len:8][bitmap:N][items_inserted:8]
     pub fn save<W: Write>(&self, writer: &mut W) -> GcResult<()> {
         let bitmap = self.active.bitmap();
         let num_bits = self.active.number_of_bits();
@@ -146,7 +147,7 @@ impl BloomFilterProtectedSet {
         let sip_keys = self.active.sip_keys();
 
         // Build the data payload (everything after CRC32)
-        let mut payload = Vec::with_capacity(8 + 4 + 32 + 8 + bitmap.len());
+        let mut payload = Vec::with_capacity(8 + 4 + 32 + 8 + bitmap.len() + 8);
         payload.extend_from_slice(&num_bits.to_le_bytes());
         payload.extend_from_slice(&num_hashes.to_le_bytes());
         payload.extend_from_slice(&sip_keys[0].0.to_le_bytes());
@@ -155,6 +156,8 @@ impl BloomFilterProtectedSet {
         payload.extend_from_slice(&sip_keys[1].1.to_le_bytes());
         payload.extend_from_slice(&(bitmap.len() as u64).to_le_bytes());
         payload.extend_from_slice(&bitmap);
+        // v2: persist items_inserted for accurate should_rebuild() after load
+        payload.extend_from_slice(&self.stats.items_inserted.to_le_bytes());
 
         // Compute CRC32
         let crc = crc32fast::hash(&payload);
@@ -227,6 +230,23 @@ impl BloomFilterProtectedSet {
 
         let bitmap = payload[offset..offset+bitmap_len].to_vec();
         let sip_keys = [(sip_k0_0, sip_k0_1), (sip_k1_0, sip_k1_1)];
+        offset += bitmap_len;
+
+        // v2: Read items_inserted if present (backward-compatible with v1 format)
+        let items_inserted = if payload.len() >= offset + 8 {
+            u64::from_le_bytes(payload[offset..offset+8].try_into().unwrap())
+        } else {
+            // v1 format: estimate from popcount (fallback)
+            let ones = bitmap.iter().map(|b| b.count_ones() as u64).sum::<u64>();
+            let total_bits = num_bits;
+            if total_bits > 0 && ones > 0 && ones < total_bits {
+                let ratio = ones as f64 / total_bits as f64;
+                let estimated = -(total_bits as f64) * (1.0 - ratio).ln() / num_hashes as f64;
+                estimated as u64
+            } else {
+                ones
+            }
+        };
 
         // Reconstruct the bloom filter from serialized data.
         // from_existing expects: (bytes, bitmap_bits, num_hashes, sip_keys)
@@ -241,22 +261,8 @@ impl BloomFilterProtectedSet {
             active,
             refreshing: None,
             config,
-            // I4 fix: Estimate items_inserted from bitmap popcount after loading.
-            // Without this, should_rebuild() never triggers because it thinks the
-            // filter is empty. We estimate using: items ≈ -n * ln(1 - popcount/n)
-            // where n = num_bits. This is the inverse of the bloom false-positive formula.
             stats: BloomStats {
-                items_inserted: {
-                    let ones = bitmap.iter().map(|b| b.count_ones() as u64).sum::<u64>();
-                    let total_bits = num_bits;
-                    if total_bits > 0 && ones > 0 && ones < total_bits {
-                        let ratio = ones as f64 / total_bits as f64;
-                        let estimated = -(total_bits as f64) * (1.0 - ratio).ln() / num_hashes as f64;
-                        estimated as u64
-                    } else {
-                        ones // fallback: use raw bit count as rough lower bound
-                    }
-                },
+                items_inserted,
                 rebuild_count: 0,
             },
         })

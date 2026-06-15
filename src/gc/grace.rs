@@ -49,7 +49,7 @@ impl GracePeriod {
     ///
     /// Returns `true` if the blob's age exceeds the absolute grace period.
     /// Returns `false` if the blob should be protected.
-    pub async fn can_delete(&self, _key: &str, mtime: u64) -> bool {
+    pub fn can_delete(&self, _key: &str, mtime: u64) -> bool {
         // I1 fix: Use unwrap_or_default instead of unwrap to avoid panic on clock issues.
         // If clock is broken, we conservatively return false (don't delete).
         let now = match SystemTime::now().duration_since(UNIX_EPOCH) {
@@ -91,7 +91,7 @@ mod tests {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
 
         // Blob created 30 seconds ago (within 60s absolute grace)
-        assert!(!grace.can_delete("key1", now - 30).await);
+        assert!(!grace.can_delete("key1", now - 30));
     }
 
     #[tokio::test]
@@ -100,7 +100,7 @@ mod tests {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
 
         // Blob created 2 hours ago (past 60s absolute grace)
-        assert!(grace.can_delete("key1", now - 7200).await);
+        assert!(grace.can_delete("key1", now - 7200));
     }
 
     #[tokio::test]

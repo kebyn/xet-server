@@ -498,7 +498,14 @@ pub async fn lfs_upload(
 
     // I4 fix: Detach NamedTempFile ownership — we manage cleanup explicitly on all exit paths.
     // This prevents Drop from racing with our tokio::fs::remove_file calls.
-    let _ = temp_file.keep();
+    // M6 fix: Check return value instead of ignoring potential errors.
+    if let Err(e) = temp_file.keep() {
+        tracing::error!("Failed to detach temp file ownership: {}", e);
+        return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": "Failed to prepare upload storage",
+            "error_type": "InternalError"
+        }));
+    }
 
     // Stream payload to temp file while computing hash
     use sha2::{Sha256, Digest};

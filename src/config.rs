@@ -577,6 +577,13 @@ impl ServerConfig {
                     self.gc.bloom.false_positive_rate
                 ));
             }
+            // M3 fix: Validate rebuild_threshold range
+            if self.gc.bloom.rebuild_threshold <= 0.0 || self.gc.bloom.rebuild_threshold >= 1.0 {
+                return Err(format!(
+                    "GC_BLOOM_REBUILD_THRESHOLD must be in (0.0, 1.0) (got {}).",
+                    self.gc.bloom.rebuild_threshold
+                ));
+            }
             if self.gc.bloom.expected_items == 0 {
                 return Err("GC_BLOOM_EXPECTED_ITEMS must be > 0 (got 0).".to_string());
             }
@@ -782,6 +789,15 @@ pub fn validate_gc_config(config: &ServerConfig) -> Vec<String> {
             warnings.push(
                 "GC is enabled in dry-run mode. No blobs will actually be deleted. \
                 Set GC_DRY_RUN=false to enable actual deletion.".to_string(),
+            );
+        }
+        // C2 fix: Warn about local storage lease precision limitations
+        if config.storage.backend == "local" {
+            warnings.push(
+                "GC is enabled with local storage backend. Local storage lease coordination \
+                uses filesystem mtime for conditional operations, which is only safe for \
+                single-node deployments. For multi-node GC, use S3 storage backend which \
+                provides true atomic conditional operations via ETags.".to_string(),
             );
         }
     }
