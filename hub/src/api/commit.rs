@@ -164,12 +164,17 @@ async fn handle_commit(
 
     let (namespace, repo_name, _revision) = path.into_inner();
 
-    // C4 fix: Verify the authenticated user owns the target namespace
+    // C4 fix: Verify the authenticated user has write access to the target namespace.
+    // Users can write to their own namespace. Organization/team namespace support
+    // can be added via metadata.is_namespace_member() when multi-user collaboration is needed.
     if namespace != auth.info.username {
-        return HttpResponse::Forbidden().json(serde_json::json!({
-            "error": format!("User '{}' cannot commit to namespace '{}'", auth.info.username, namespace),
-            "error_type": "ForbiddenError"
-        }));
+        let has_access = metadata.is_namespace_member(&auth.info.username, &namespace).await.unwrap_or(false);
+        if !has_access {
+            return HttpResponse::Forbidden().json(serde_json::json!({
+                "error": format!("User '{}' cannot commit to namespace '{}'", auth.info.username, namespace),
+                "error_type": "ForbiddenError"
+            }));
+        }
     }
 
     // I6 fix: Limit number of operations per commit to prevent resource exhaustion

@@ -11,20 +11,32 @@ pub struct ServerSettings {
     /// Configure via `HUB_RATE_LIMIT_RPM` environment variable.
     /// Default: 120 RPM.
     pub rate_limit_rpm: u32,
+    /// M5 fix: Cached base URL computed at config load time, avoiding repeated clone+trim.
+    #[serde(skip)]
+    cached_base_url: Option<String>,
 }
 
 impl ServerSettings {
     /// Get the base URL for the server.
-    /// Returns `public_base_url` if configured, otherwise constructs from host:port.
-    /// Trailing slashes are stripped to prevent malformed URLs when callers append paths.
-    ///
-    /// URL validation happens at config load time (see `from_file_or_env()`).
-    /// This method performs no validation — it trusts that the URL was validated on load.
+    /// M5 fix: Returns cached value if available, otherwise computes it.
     pub fn base_url(&self) -> String {
+        if let Some(ref cached) = self.cached_base_url {
+            return cached.clone();
+        }
         self.public_base_url.clone()
             .unwrap_or_else(|| format!("http://{}:{}", self.host, self.port))
             .trim_end_matches('/')
             .to_string()
+    }
+
+    /// Compute and cache the base URL. Called after config is fully loaded.
+    pub fn cache_base_url(&mut self) {
+        self.cached_base_url = Some(
+            self.public_base_url.clone()
+                .unwrap_or_else(|| format!("http://{}:{}", self.host, self.port))
+                .trim_end_matches('/')
+                .to_string()
+        );
     }
 }
 
@@ -35,6 +47,7 @@ impl Default for ServerSettings {
             port: 8080,
             public_base_url: None,
             rate_limit_rpm: 120,
+            cached_base_url: None,
         }
     }
 }
@@ -203,6 +216,7 @@ impl HubConfig {
                     .ok()
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(120),
+                cached_base_url: None,
             },
             auth: AuthSettings {
                 private_key_path: env::var("HUB_PRIVATE_KEY_PATH")
@@ -296,10 +310,17 @@ impl HubConfig {
     /// Priority: environment variables > file > defaults
     pub fn from_file_or_env() -> Self {
         // Start with file-based config if HUB_CONFIG_FILE is set
-        let mut config = env::var("HUB_CONFIG_FILE")
-            .ok()
-            .and_then(|path| Self::from_file(&path).ok())
-            .unwrap_or_else(Self::from_env);
+        let mut config = match env::var("HUB_CONFIG_FILE") {
+            Ok(path) => {
+                match Self::from_file(&path) {
+                    Ok(cfg) => cfg,
+                    Err(e) => {
+                        panic!("HUB_CONFIG_FILE '{}' is set but config could not be loaded: {}", path, e);
+                    }
+                }
+            }
+            Err(_) => Self::from_env(),
+        };
 
         // Override with environment variables (env takes precedence)
         if let Ok(host) = env::var("HUB_HOST") {
@@ -355,6 +376,9 @@ impl HubConfig {
             config.metadata.db_pool_size = size;
         }
         if let Ok(url) = env::var("CAS_BASE_URL") {
+            if url::Url::parse(&url).is_err() {
+                panic!("CAS_BASE_URL '{}' is not a valid URL", url);
+            }
             config.cas.base_url = url;
         }
         if let Some(timeout) = env::var("HUB_CAS_TIMEOUT_SECS").ok().and_then(|t| t.parse().ok()) {
@@ -380,6 +404,8 @@ impl HubConfig {
         if let Err(e) = config.validate() {
             panic!("Configuration validation failed: {}", e);
         }
+        // M5 fix: Cache computed base URL to avoid repeated allocation
+        config.server.cache_base_url();
         config
     }
 }

@@ -179,9 +179,30 @@ pub async fn batch_operation(
         }
 
         // I5 fix: Generate proxy token if signing key is available, otherwise fall back to user token
+        // I6 fix: If proxy signing is available but fails, return per-object error instead of
+        // silently falling back to user's long-lived token (which could leak to client logs)
         let auth_token_for_action = if can_sign_proxy {
-            auth.sign_proxy_token(&claims.sub, &obj.oid, &body.operation)
-                .unwrap_or_else(|| token.clone()) // Fallback to user token if signing fails
+            match auth.sign_proxy_token(&claims.sub, &obj.oid, &body.operation) {
+                Some(proxy_token) => proxy_token,
+                None => {
+                    tracing::error!(
+                        oid = %obj.oid,
+                        operation = %body.operation,
+                        "Proxy token signing failed - refusing to fall back to user token"
+                    );
+                    response_objects.push(BatchResponseObject {
+                        oid: obj.oid.clone(),
+                        size: obj.size,
+                        authenticated: false,
+                        actions: None,
+                        error: Some(BatchError {
+                            code: 500,
+                            message: "Internal error: failed to generate action token".to_string(),
+                        }),
+                    });
+                    continue;
+                }
+            }
         } else {
             token.clone()
         };

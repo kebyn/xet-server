@@ -20,6 +20,7 @@ ed25519-dalek = { version = "2", features = ["pem", "rand_core", "pkcs8"] }
 pkcs8 = { version = "0.10", features = ["pem"] }
 base64 = "0.22"
 sha2 = "0.10"
+hmac = "0.12"
 hex = "0.4"
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], default-features = false }
 tokio-util = { version = "0.7", features = ["io"] }

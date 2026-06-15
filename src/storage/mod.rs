@@ -177,6 +177,38 @@ pub trait StorageBackend: Send + Sync {
         Ok((page, next_cursor, has_more))
     }
 
+    /// List objects with mtime in pages, supporting incremental scanning.
+    /// Returns `(items, next_cursor, has_more)` where items are (key, mtime) pairs.
+    ///
+    /// I4 fix: Used by GC compute_candidates to avoid loading all objects into memory.
+    /// Default implementation loads all objects and paginates in-memory.
+    /// Storage backends should override for efficient server-side pagination.
+    async fn list_objects_with_mtime_paged(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+        page_size: usize,
+    ) -> StorageResult<(Vec<(String, u64)>, Option<String>, bool)> {
+        let mut all_objects = self.list_objects_with_mtime(prefix).await?;
+        all_objects.sort_by(|(a, _), (b, _)| a.cmp(b));
+
+        let filtered: Vec<(String, u64)> = if let Some(cursor) = start_after {
+            all_objects.into_iter().filter(|(k, _)| k.as_str() > cursor).collect()
+        } else {
+            all_objects
+        };
+
+        let has_more = filtered.len() > page_size;
+        let page: Vec<(String, u64)> = filtered.into_iter().take(page_size).collect();
+        let next_cursor = if has_more {
+            page.last().map(|(k, _)| k.clone())
+        } else {
+            None
+        };
+
+        Ok((page, next_cursor, has_more))
+    }
+
     /// Conditionally put an object only if it doesn't exist or the existing etag matches.
     ///
     /// This implements optimistic locking for concurrent operations:

@@ -371,6 +371,9 @@ impl IncrementalGarbageCollector {
     /// C2 fix: Shards are NOT deleted by incremental GC because we have no way to verify
     /// whether they're still referenced by Hub's file_tree. Shard lifecycle requires
     /// a separate mechanism (e.g., Hub webhook, manual cleanup, or future reference tracking).
+    ///
+    /// I4 fix: Uses paged listing to avoid loading all objects into memory at once.
+    /// Each page is processed and filtered before fetching the next, bounding memory to O(page_size).
     async fn compute_candidates(
         &self,
         bloom: &BloomFilterProtectedSet,
@@ -379,46 +382,67 @@ impl IncrementalGarbageCollector {
     ) -> Result<(Vec<(String, u64)>, Vec<(String, u64)>), String> {
         let mut lfs_candidates = Vec::new();
         let mut xorb_candidates = Vec::new();
+        let page_size = 10_000;
 
-        // Scan LFS blobs
-        let lfs_blobs = self.storage.list_objects_with_mtime("lfs/objects").await
-            .map_err(|e| format!("Failed to list LFS blobs: {}", e))?;
+        // Scan LFS blobs in pages
+        let mut cursor: Option<String> = None;
+        loop {
+            let (page, next_cursor, has_more) = self.storage
+                .list_objects_with_mtime_paged("lfs/objects", cursor.as_deref(), page_size)
+                .await
+                .map_err(|e| format!("Failed to list LFS blobs: {}", e))?;
 
-        for (key, mtime) in lfs_blobs {
-            let oid = key.strip_prefix("lfs/objects/").unwrap_or(&key)
-                .split('/').next_back().unwrap_or(&key);
+            for (key, mtime) in page {
+                let oid = key.strip_prefix("lfs/objects/").unwrap_or(&key)
+                    .split('/').next_back().unwrap_or(&key);
 
-            if bloom.contains(oid.as_bytes()) {
-                stats.bloom_protected += 1;
-                continue;
+                if bloom.contains(oid.as_bytes()) {
+                    stats.bloom_protected += 1;
+                    continue;
+                }
+
+                if !grace.can_delete(&key, mtime).await {
+                    stats.grace_period_skipped += 1;
+                    continue;
+                }
+
+                lfs_candidates.push((key, mtime));
             }
 
-            if !grace.can_delete(&key, mtime).await {
-                stats.grace_period_skipped += 1;
-                continue;
+            if !has_more {
+                break;
             }
-
-            lfs_candidates.push((key, mtime));
+            cursor = next_cursor;
         }
 
-        // Scan xorbs
-        let xorbs = self.storage.list_objects_with_mtime("xorbs").await
-            .map_err(|e| format!("Failed to list xorbs: {}", e))?;
+        // Scan xorbs in pages
+        cursor = None;
+        loop {
+            let (page, next_cursor, has_more) = self.storage
+                .list_objects_with_mtime_paged("xorbs", cursor.as_deref(), page_size)
+                .await
+                .map_err(|e| format!("Failed to list xorbs: {}", e))?;
 
-        for (key, mtime) in xorbs {
-            let xorb_hash = key.strip_prefix("xorbs/").unwrap_or(&key);
+            for (key, mtime) in page {
+                let xorb_hash = key.strip_prefix("xorbs/").unwrap_or(&key);
 
-            if bloom.contains(xorb_hash.as_bytes()) {
-                stats.bloom_protected += 1;
-                continue;
+                if bloom.contains(xorb_hash.as_bytes()) {
+                    stats.bloom_protected += 1;
+                    continue;
+                }
+
+                if !grace.can_delete(&key, mtime).await {
+                    stats.grace_period_skipped += 1;
+                    continue;
+                }
+
+                xorb_candidates.push((key, mtime));
             }
 
-            if !grace.can_delete(&key, mtime).await {
-                stats.grace_period_skipped += 1;
-                continue;
+            if !has_more {
+                break;
             }
-
-            xorb_candidates.push((key, mtime));
+            cursor = next_cursor;
         }
 
         // C2 fix: Shards are scanned for reference extraction (in Phase 3) but NEVER deleted.
@@ -466,13 +490,11 @@ impl IncrementalGarbageCollector {
             }
 
             // I5 fix: Retry failed deletions
-            let mut success = false;
             for attempt in 0..=max_retries {
                 match self.storage.delete(key).await {
                     Ok(_) => {
                         stats.deleted_lfs_blobs += 1;
                         total_deleted += 1;
-                        success = true;
                         break;
                     }
                     Err(e) => {
@@ -496,7 +518,6 @@ impl IncrementalGarbageCollector {
                     }
                 }
             }
-            let _ = success; // suppress unused warning
         }
 
         // Delete xorbs (up to remaining batch limit)
