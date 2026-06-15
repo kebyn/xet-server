@@ -162,7 +162,12 @@ fn rewrite_batch_urls(
                     // I2 fix: Handle signing errors gracefully - skip objects that fail to sign
                     if let Some(upload_action) = actions.get_mut("upload") {
                         match signer.sign_proxy(username, &oid, "upload", "", "") {
-                            Ok((proxy_token, _)) => rewrite_action_url(upload_action, &hub_url, &proxy_token),
+                            Ok((proxy_token, _)) => {
+                                if !rewrite_action_url(upload_action, &hub_url, &proxy_token)
+                                    && let Some(actions_obj) = actions.as_object_mut() {
+                                        actions_obj.remove("upload");
+                                    }
+                            }
                             Err(e) => {
                                 tracing::error!("Failed to sign proxy token for upload {}: {}", oid, e);
                                 // Remove the action if we can't sign a token for it
@@ -174,7 +179,12 @@ fn rewrite_batch_urls(
                     }
                     if let Some(download_action) = actions.get_mut("download") {
                         match signer.sign_proxy(username, &oid, "download", "", "") {
-                            Ok((proxy_token, _)) => rewrite_action_url(download_action, &hub_url, &proxy_token),
+                            Ok((proxy_token, _)) => {
+                                if !rewrite_action_url(download_action, &hub_url, &proxy_token)
+                                    && let Some(actions_obj) = actions.as_object_mut() {
+                                        actions_obj.remove("download");
+                                    }
+                            }
                             Err(e) => {
                                 tracing::error!("Failed to sign proxy token for download {}: {}", oid, e);
                                 if let Some(actions_obj) = actions.as_object_mut() {
@@ -188,9 +198,10 @@ fn rewrite_batch_urls(
         }
 }
 
-/// Rewrite a single action's URL and auth header with proxy token
-fn rewrite_action_url(action: &mut serde_json::Value, hub_url: &url::Url, proxy_token: &str) {
-    // Rewrite URL from CAS to Hub using proper URL parsing
+/// Rewrite a single action's URL and auth header with proxy token.
+/// 返回 true 表示成功重写;false 表示 href 无法解析,调用方应丢弃该 action
+/// 以免把内部 CAS URL 泄露给客户端。
+fn rewrite_action_url(action: &mut serde_json::Value, hub_url: &url::Url, proxy_token: &str) -> bool {
     let new_href = action.get("href")
         .and_then(|h| h.as_str())
         .and_then(|h| url::Url::parse(h).ok())
@@ -210,10 +221,13 @@ fn rewrite_action_url(action: &mut serde_json::Value, hub_url: &url::Url, proxy_
             url.to_string()
         });
 
-    if let Some(href) = new_href
-        && let Some(action_obj) = action.as_object_mut() {
-            action_obj.insert("href".to_string(), serde_json::Value::String(href));
-        }
+    let Some(href) = new_href else {
+        // 无法解析 href:不透传原始(内部 CAS)URL,交由调用方丢弃 action。
+        return false;
+    };
+    if let Some(action_obj) = action.as_object_mut() {
+        action_obj.insert("href".to_string(), serde_json::Value::String(href));
+    }
 
     // Always replace Authorization header with proxy token if present
     // This ensures internal CAS tokens are never leaked to clients
@@ -224,6 +238,7 @@ fn rewrite_action_url(action: &mut serde_json::Value, hub_url: &url::Url, proxy_
                 serde_json::Value::String(format!("Bearer {}", proxy_token)),
             );
         }
+    true
 }
 
 /// Validate OID format (64 hex characters)
@@ -718,6 +733,26 @@ pub async fn lfs_download(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_rewrite_action_url_drops_on_parse_failure() {
+        let hub = url::Url::parse("https://hub.example.com").unwrap();
+        let mut action = serde_json::json!({"href": "not a valid url at all"});
+        let ok = rewrite_action_url(&mut action, &hub, "proxy_tok");
+        assert!(!ok, "无法解析的 href 应返回 false 以便调用方丢弃 action");
+    }
+
+    #[test]
+    fn test_rewrite_action_url_rewrites_valid() {
+        let hub = url::Url::parse("https://hub.example.com:9000").unwrap();
+        let mut action = serde_json::json!({"href": "http://cas-internal:5000/lfs/objects/abc"});
+        let ok = rewrite_action_url(&mut action, &hub, "proxy_tok");
+        assert!(ok);
+        let href = action.get("href").unwrap().as_str().unwrap();
+        assert!(href.contains("hub.example.com"));
+        assert!(href.contains("token=proxy_tok"));
+        assert!(!href.contains("cas-internal"));
+    }
     use serde_json::json;
 
     #[test]
