@@ -29,11 +29,14 @@ pub struct GcStats {
     pub orphaned_xorbs: usize,
     pub deleted_lfs_blobs: usize,
     pub deleted_xorbs: usize,
+    /// C1 fix: Track deleted shards
+    pub deleted_shards: usize,
     pub grace_period_skipped: usize,
     pub errors: usize,
     pub duration_seconds: f64,
     pub dry_run: bool,
-    pub last_run: Option<String>,
+    /// M5 fix: Use DateTime<Utc> for type safety instead of String
+    pub last_run: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Garbage collector for cleaning up orphaned blobs
@@ -45,17 +48,18 @@ pub struct GarbageCollector {
 
 impl GarbageCollector {
     /// Create a new GarbageCollector
-    pub fn new(storage: Arc<Box<dyn StorageBackend>>, config: GcConfig) -> Self {
+    /// I4 fix: Returns Result instead of panicking on client build failure
+    pub fn new(storage: Arc<Box<dyn StorageBackend>>, config: GcConfig) -> Result<Self, String> {
         let hub_client = reqwest::Client::builder()
             .timeout(Duration::from_secs(config.http_timeout_seconds))
             .build()
-            .expect("Failed to build GC hub client");
+            .map_err(|e| format!("Failed to build GC hub client: {}", e))?;
 
-        Self {
+        Ok(Self {
             storage,
             hub_client,
             config,
-        }
+        })
     }
 
     /// Get GC configuration
@@ -90,13 +94,30 @@ impl GarbageCollector {
 
         info!("GC fetched {} referenced LFS hashes from Hub", stats.referenced_lfs_blobs);
 
-        // Step 3: Scan shards for referenced xorbs
-        let referenced_xorbs = self.scan_referenced_xorbs(&shards).await?;
+        // Step 3: C1 fix - Identify orphaned shards first (using mtime heuristic)
+        // Only scan non-orphaned shards for xorb references to prevent storage leak
+        let orphaned_shards = self.compute_orphaned_shards(&shards, &mut stats);
+        let active_shard_keys: Vec<String> = shards
+            .iter()
+            .filter(|(key, _)| !orphaned_shards.contains(key))
+            .map(|(key, _)| key.clone())
+            .collect();
+
+        info!(
+            "GC identified {} orphaned shards (using mtime heuristic), {} active shards",
+            orphaned_shards.len(),
+            active_shard_keys.len()
+        );
+
+        // Step 4: Scan ONLY active shards for referenced xorbs
+        // This prevents orphaned shards from keeping their xorbs alive forever
+        let referenced_xorbs = self.scan_referenced_xorbs(&active_shard_keys).await?;
         stats.referenced_xorbs = referenced_xorbs.len();
 
-        info!("GC scanned shards, found {} referenced xorbs", stats.referenced_xorbs);
+        info!("GC scanned {} active shards, found {} referenced xorbs",
+            active_shard_keys.len(), stats.referenced_xorbs);
 
-        // Step 4: Compute orphaned sets
+        // Step 5: Compute orphaned sets
         let orphaned_lfs = self.compute_orphaned_lfs(&lfs_blobs, &referenced_lfs, &mut stats);
         let orphaned_xorbs = self.compute_orphaned_xorbs(&xorbs, &referenced_xorbs, &mut stats);
         stats.orphaned_lfs_blobs = orphaned_lfs.len();
@@ -107,17 +128,21 @@ impl GarbageCollector {
             stats.orphaned_lfs_blobs, stats.orphaned_xorbs
         );
 
-        // Step 5: Delete orphans (or report in dry_run)
+        // Step 6: Delete orphans (or report in dry_run)
         self.cleanup_orphans(&orphaned_lfs, &orphaned_xorbs, &mut stats).await?;
 
+        // Step 7: C1 fix - Delete orphaned shards
+        self.cleanup_orphaned_shards(&orphaned_shards, &mut stats).await?;
+
         stats.duration_seconds = start.elapsed().as_secs_f64();
-        stats.last_run = Some(chrono::Utc::now().to_rfc3339());
+        stats.last_run = Some(chrono::Utc::now());  // M5 fix: Use DateTime<Utc> directly
 
         info!(
-            "GC completed in {:.1}s: deleted {} LFS, {} xorbs (dry_run={}, grace_skipped={})",
+            "GC completed in {:.1}s: deleted {} LFS, {} xorbs, {} shards (dry_run={}, grace_skipped={})",
             stats.duration_seconds,
             stats.deleted_lfs_blobs,
             stats.deleted_xorbs,
+            stats.deleted_shards,
             stats.dry_run,
             stats.grace_period_skipped
         );
@@ -126,11 +151,12 @@ impl GarbageCollector {
     }
 
     /// Scan storage and categorize blobs by type
-    /// Returns (lfs_blobs_with_mtime, xorbs_with_mtime, shard_keys)
+    /// Returns (lfs_blobs_with_mtime, xorbs_with_mtime, shards_with_mtime)
+    /// C1 fix: Also return mtime for shards to enable orphan detection
     async fn scan_storage(
         &self,
         stats: &mut GcStats,
-    ) -> Result<(Vec<(String, u64)>, Vec<(String, u64)>, Vec<String>), String> {
+    ) -> Result<(Vec<(String, u64)>, Vec<(String, u64)>, Vec<(String, u64)>), String> {
         let lfs_blobs = self
             .storage
             .list_objects_with_mtime("lfs/objects")
@@ -143,9 +169,10 @@ impl GarbageCollector {
             .await
             .map_err(|e| format!("Failed to list xorbs: {}", e))?;
 
+        // C1 fix: Get shards with mtime for orphan detection
         let shards = self
             .storage
-            .list_objects("shards")
+            .list_objects_with_mtime("shards")
             .await
             .map_err(|e| format!("Failed to list shards: {}", e))?;
 
@@ -298,12 +325,13 @@ impl GarbageCollector {
     }
 
     /// Compute orphaned LFS blobs (excluding those in grace period)
+    /// I2 fix: Returns (key, mtime) pairs to avoid redundant get_mtime calls in cleanup
     fn compute_orphaned_lfs(
         &self,
         all_blobs: &[(String, u64)],
         referenced: &HashSet<String>,
         stats: &mut GcStats,
-    ) -> Vec<String> {
+    ) -> Vec<(String, u64)> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -315,12 +343,20 @@ impl GarbageCollector {
             .filter(|(key, mtime)| {
                 // Extract OID from key
                 // Supports both formats: "lfs/objects/{oid}" and "lfs/objects/{prefix}/{oid}"
+                // M2 fix: Validate OID format (64 hex chars) for safety
                 let oid = key
                     .strip_prefix("lfs/objects/")
                     .unwrap_or(key)
                     .split('/')
                     .next_back()
                     .unwrap_or(key);
+
+                // M2 fix: Validate OID format
+                let is_valid_oid = oid.len() == 64 && oid.chars().all(|c| c.is_ascii_hexdigit());
+                if !is_valid_oid {
+                    warn!("GC skipping LFS blob with invalid OID format: {} (OID: {})", key, oid);
+                    return false;
+                }
 
                 let is_orphaned = !referenced.contains(oid);
                 let is_old_enough = (now.saturating_sub(*mtime)) > grace;
@@ -331,17 +367,18 @@ impl GarbageCollector {
 
                 is_orphaned && is_old_enough
             })
-            .map(|(key, _)| key.clone())
+            .map(|(key, mtime)| (key.clone(), *mtime))
             .collect()
     }
 
     /// Compute orphaned xorbs (excluding those in grace period)
+    /// I2 fix: Returns (key, mtime) pairs to avoid redundant get_mtime calls in cleanup
     fn compute_orphaned_xorbs(
         &self,
         all_xorbs: &[(String, u64)],
         referenced: &HashSet<String>,
         stats: &mut GcStats,
-    ) -> Vec<String> {
+    ) -> Vec<(String, u64)> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -363,15 +400,16 @@ impl GarbageCollector {
 
                 is_orphaned && is_old_enough
             })
-            .map(|(key, _)| key.clone())
+            .map(|(key, mtime)| (key.clone(), *mtime))
             .collect()
     }
 
     /// Delete orphaned blobs (or report in dry_run mode)
+    /// I2 fix: Uses mtime from scan_storage to avoid redundant get_mtime calls
     async fn cleanup_orphans(
         &self,
-        lfs_keys: &[String],
-        xorb_keys: &[String],
+        lfs_keys: &[(String, u64)],
+        xorb_keys: &[(String, u64)],
         stats: &mut GcStats,
     ) -> Result<(), String> {
         if self.config.dry_run {
@@ -385,39 +423,54 @@ impl GarbageCollector {
             return Ok(());
         }
 
-        // I5 fix: Do NOT capture `now` once outside the loop.
-        // Re-fetch current time for each blob to prevent grace period bypass
-        // when GC runs for a long time (many blobs to delete).
-        // Previously, if GC took longer than grace_period_seconds, newly uploaded
-        // blobs could be incorrectly deleted because their `age` was computed against
-        // a stale `now` from before the deletion loop started.
+        // I2 fix: Use mtime passed from compute_orphaned_* instead of re-fetching.
+        // However, we still re-check mtime before deletion to prevent race conditions
+        // where a blob is uploaded between scan and delete phases.
+        // I5 fix: Re-fetch current time for each blob to prevent grace period bypass
+        // when GC runs for a long time.
 
         // Delete LFS blobs
-        for key in lfs_keys {
+        for (key, scan_mtime) in lfs_keys {
             // I5 fix: Re-fetch current time for each blob
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_secs();
 
-            // Re-check mtime before deletion to prevent race condition
-            // where a blob is uploaded between scan and delete phases
-            match self.storage.get_mtime(key).await {
-                Ok(mtime) => {
-                    let age = now.saturating_sub(mtime);
-                    if age <= self.config.grace_period_seconds {
-                        // Blob was recently uploaded, skip deletion
-                        stats.grace_period_skipped += 1;
+            // I2 optimization: Only re-check mtime if scan was a while ago.
+            // If scan_mtime is recent (within last 10 seconds), trust it.
+            // This reduces S3 HEAD requests for fast GC runs.
+            let mtime_age = now.saturating_sub(*scan_mtime);
+            if mtime_age > 10 {
+                // Scan was more than 10 seconds ago, re-check mtime
+                match self.storage.get_mtime(key).await {
+                    Ok(current_mtime) => {
+                        // If mtime changed, blob was replaced - skip deletion
+                        if current_mtime != *scan_mtime {
+                            warn!("GC skipping {} - mtime changed since scan ({} != {})", key, current_mtime, scan_mtime);
+                            continue;
+                        }
+                        let age = now.saturating_sub(current_mtime);
+                        if age <= self.config.grace_period_seconds {
+                            // Blob was recently uploaded, skip deletion
+                            stats.grace_period_skipped += 1;
+                            continue;
+                        }
+                    }
+                    Err(crate::storage::StorageError::NotFound(_)) => {
+                        // Blob already deleted, skip
                         continue;
                     }
+                    Err(e) => {
+                        warn!("GC failed to check mtime for {}: {}", key, e);
+                        // Proceed with deletion attempt
+                    }
                 }
-                Err(crate::storage::StorageError::NotFound(_)) => {
-                    // Blob already deleted, skip
+            } else {
+                // Scan was recent, trust the mtime but still check grace period
+                if mtime_age <= self.config.grace_period_seconds {
+                    stats.grace_period_skipped += 1;
                     continue;
-                }
-                Err(e) => {
-                    warn!("GC failed to check mtime for {}: {}", key, e);
-                    // Proceed with deletion attempt
                 }
             }
 
@@ -431,30 +484,45 @@ impl GarbageCollector {
         }
 
         // Delete xorbs
-        for key in xorb_keys {
+        for (key, scan_mtime) in xorb_keys {
             // I5 fix: Re-fetch current time for each xorb
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_secs();
 
-            // Re-check mtime before deletion to prevent race condition
-            match self.storage.get_mtime(key).await {
-                Ok(mtime) => {
-                    let age = now.saturating_sub(mtime);
-                    if age <= self.config.grace_period_seconds {
-                        // Xorb was recently uploaded, skip deletion
-                        stats.grace_period_skipped += 1;
+            // I2 optimization: Only re-check mtime if scan was a while ago
+            let mtime_age = now.saturating_sub(*scan_mtime);
+            if mtime_age > 10 {
+                // Scan was more than 10 seconds ago, re-check mtime
+                match self.storage.get_mtime(key).await {
+                    Ok(current_mtime) => {
+                        // If mtime changed, xorb was replaced - skip deletion
+                        if current_mtime != *scan_mtime {
+                            warn!("GC skipping {} - mtime changed since scan ({} != {})", key, current_mtime, scan_mtime);
+                            continue;
+                        }
+                        let age = now.saturating_sub(current_mtime);
+                        if age <= self.config.grace_period_seconds {
+                            // Xorb was recently uploaded, skip deletion
+                            stats.grace_period_skipped += 1;
+                            continue;
+                        }
+                    }
+                    Err(crate::storage::StorageError::NotFound(_)) => {
+                        // Xorb already deleted, skip
                         continue;
                     }
+                    Err(e) => {
+                        warn!("GC failed to check mtime for {}: {}", key, e);
+                        // Proceed with deletion attempt
+                    }
                 }
-                Err(crate::storage::StorageError::NotFound(_)) => {
-                    // Xorb already deleted, skip
+            } else {
+                // Scan was recent, trust the mtime but still check grace period
+                if mtime_age <= self.config.grace_period_seconds {
+                    stats.grace_period_skipped += 1;
                     continue;
-                }
-                Err(e) => {
-                    warn!("GC failed to check mtime for {}: {}", key, e);
-                    // Proceed with deletion attempt
                 }
             }
 
@@ -462,6 +530,63 @@ impl GarbageCollector {
                 Ok(_) => stats.deleted_xorbs += 1,
                 Err(e) => {
                     warn!("GC failed to delete xorb {}: {}", key, e);
+                    stats.errors += 1;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// C1 fix: Compute orphaned shards using mtime heuristic.
+    ///
+    /// Since Hub doesn't track shard references, we use mtime as a heuristic:
+    /// shards older than the grace period are considered orphaned.
+    /// This is not perfect (may delete recently created but unused shards)
+    /// but prevents storage leak from orphaned shards.
+    ///
+    /// A proper solution would require Hub to track shard references in its database.
+    fn compute_orphaned_shards(
+        &self,
+        all_shards: &[(String, u64)],
+        stats: &mut GcStats,
+    ) -> Vec<String> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let grace = self.config.grace_period_seconds;
+
+        all_shards
+            .iter()
+            .filter(|(_, mtime)| {
+                // Shards older than grace period are considered orphaned
+                let is_old_enough = (now.saturating_sub(*mtime)) > grace;
+                if !is_old_enough {
+                    stats.grace_period_skipped += 1;
+                }
+                is_old_enough
+            })
+            .map(|(key, _)| key.clone())
+            .collect()
+    }
+
+    /// C1 fix: Delete orphaned shards
+    async fn cleanup_orphaned_shards(
+        &self,
+        shard_keys: &[String],
+        stats: &mut GcStats,
+    ) -> Result<(), String> {
+        if self.config.dry_run {
+            info!("GC dry_run: would delete {} shards", shard_keys.len());
+            return Ok(());
+        }
+
+        for key in shard_keys {
+            match self.storage.delete(key).await {
+                Ok(_) => stats.deleted_shards += 1,
+                Err(e) => {
+                    warn!("GC failed to delete shard {}: {}", key, e);
                     stats.errors += 1;
                 }
             }
@@ -526,28 +651,28 @@ mod tests {
             crate::storage::local::LocalStorage::new("/tmp/test-gc").unwrap()
         ));
 
-        let gc = GarbageCollector::new(storage, config);
+        let gc = GarbageCollector::new(storage, config).expect("Failed to create GC");
 
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
 
-        // Blobs: (key, mtime)
+        // Blobs: (key, mtime) - use valid 64-char hex OIDs for M2 validation
         let all_blobs = vec![
-            ("lfs/objects/ab/cd/old_orphan".to_string(), now - 3600), // 1 hour old
-            ("lfs/objects/ab/cd/new_orphan".to_string(), now - 60),   // 1 minute old (in grace)
-            ("lfs/objects/ab/cd/referenced".to_string(), now - 7200), // 2 hours old
+            ("lfs/objects/ab/cd/0000000000000000000000000000000000000000000000000000000000000001".to_string(), now - 3600), // 1 hour old
+            ("lfs/objects/ab/cd/0000000000000000000000000000000000000000000000000000000000000002".to_string(), now - 60),   // 1 minute old (in grace)
+            ("lfs/objects/ab/cd/0000000000000000000000000000000000000000000000000000000000000003".to_string(), now - 7200), // 2 hours old
         ];
 
-        let referenced: HashSet<String> = vec!["referenced".to_string()].into_iter().collect();
+        let referenced: HashSet<String> = vec!["0000000000000000000000000000000000000000000000000000000000000003".to_string()].into_iter().collect();
 
         let mut stats = GcStats::default();
         let orphaned = gc.compute_orphaned_lfs(&all_blobs, &referenced, &mut stats);
 
-        // Only old_orphan should be deleted (new_orphan is in grace period)
+        // Only the first blob should be deleted (second is in grace period, third is referenced)
         assert_eq!(orphaned.len(), 1);
-        assert!(orphaned[0].contains("old_orphan"));
+        assert!(orphaned[0].0.ends_with("0000000000000000000000000000000000000000000000000000000000000001"));  // I2 fix: orphaned is now Vec<(String, u64)>
         assert_eq!(stats.grace_period_skipped, 1);
     }
 

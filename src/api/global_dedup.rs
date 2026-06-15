@@ -5,7 +5,7 @@
 use actix_web::{web, HttpResponse};
 use serde::{Serialize, Deserialize};
 
-use crate::api::auth::{check_scope, extract_token_from_request, AuthVerifier};
+use crate::api::auth::{authorize_endpoint, extract_token_from_request, AuthVerifier};
 use crate::index::MetadataIndex;
 use crate::metrics::GLOBAL_METRICS;
 use crate::storage::StorageBackend;
@@ -51,7 +51,7 @@ pub async fn query_chunk_dedup(
         }
     };
 
-    if !check_scope(&claims, "read") {
+    if !authorize_endpoint(&claims, "read") {
         GLOBAL_METRICS.record_request(403);
         GLOBAL_METRICS.record_latency(start);
         return HttpResponse::Forbidden().json(serde_json::json!({

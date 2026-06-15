@@ -349,6 +349,34 @@ pub async fn lfs_batch(
         }
     };
 
+    // I3 fix: Validate token scope based on operation type
+    // LFS batch operation requires appropriate scope (upload -> write, download -> read)
+    let operation = body.get("operation")
+        .and_then(|o| o.as_str())
+        .unwrap_or("download");  // Default to download if not specified
+    let required_scope = match operation {
+        "upload" => "write",
+        "download" => "read",
+        _ => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Invalid operation: {}", operation),
+                "error_type": "ValidationError"
+            }));
+        }
+    };
+
+    // Check if token has required scope
+    let has_scope = token_info.scope == required_scope
+        || token_info.scope == "read write"  // Combined scope
+        || token_info.scope.contains(required_scope);
+    if !has_scope {
+        return HttpResponse::Forbidden().json(serde_json::json!({
+            "error": format!("Token scope '{}' insufficient for {} operation (requires '{}')",
+                token_info.scope, operation, required_scope),
+            "error_type": "AuthorizationError"
+        }));
+    }
+
     // Validate batch size before forwarding to CAS (defense-in-depth)
     let object_count = body.get("objects")
         .and_then(|o| o.as_array())

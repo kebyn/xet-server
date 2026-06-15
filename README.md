@@ -281,6 +281,7 @@ hf download my-org/my-repo model.bin --local-dir ./downloaded
 | `XET_S3_REGION` | S3 区域 | - |
 | `XET_S3_ENDPOINT` | S3 端点 URL | - |
 | `XET_UPLOAD_TEMP_DIR` | 上传临时文件目录 | 自动 |
+| `XET_RECONSTRUCTION_TEMP_DIR` | 文件重构时 xorb 下载的临时目录 | 自动 |
 | `XET_VERIFY_DOWNLOAD_INTEGRITY` | 启用下载完整性校验 | `false` |
 
 > **⚠️ 重要：S3 Lifecycle Rules 配置**
@@ -311,8 +312,13 @@ hf download my-org/my-repo model.bin --local-dir ./downloaded
 > ```
 >
 > 如果不配置此规则，进程崩溃或网络中断会导致孤立的 multipart 上传，持续产生存储费用。
-| `CAS_PUBLIC_KEY_PATH` | Ed25519 公钥路径 | `/tmp/xet-public-key.pem` |
+
+| 变量名 | 描述 | 默认值 |
+|--------|------|--------|
+| `CAS_PUBLIC_KEY_PATH` | Ed25519 公钥路径 | `/etc/xet/public-key.pem` |
 | `CAS_TRUSTED_KIDS` | 受信任的密钥 ID 列表 | `hub-key-1` |
+| `CAS_PRIVATE_KEY_PATH` | Ed25519 私钥路径（生成 proxy token） | 空（可选，生产环境建议配置） |
+| `CAS_SIGNING_KID` | Proxy token 签名使用的 Key ID | 空（默认用 `CAS_TRUSTED_KIDS` 第一个） |
 
 ### Hub API 环境变量
 
@@ -324,12 +330,22 @@ hf download my-org/my-repo model.bin --local-dir ./downloaded
 | `HUB_PRIVATE_KEY_PATH` | Ed25519 私钥路径 | `private_key.pem` |
 | `HUB_KID` | 密钥标识符 | `hub-key-1` |
 | `HUB_TOKEN_TTL_SECONDS` | 令牌有效期（秒） | `3600` |
+| `HUB_PROXY_TOKEN_TTL_SECONDS` | Proxy Token 有效期（秒） | `300` (5分钟) |
+| `HUB_INTERNAL_TOKEN_TTL_SECONDS` | 内部令牌有效期（秒，GC用） | `86400` (24小时) |
 | `HUB_SQLITE_PATH` | 元数据数据库路径 | `hub.db` |
+| `HUB_DB_POOL_SIZE` | SQLite 连接池大小 | `5` |
 | `CAS_BASE_URL` | CAS 服务器 URL | `http://localhost:8081` |
 | `HUB_CAS_TIMEOUT_SECS` | CAS 请求超时（秒） | `30` |
+| `HUB_CAS_HEALTH_CHECK_TIMEOUT_SECS` | 启动时CAS健康检查超时（秒） | `10` |
 | `HUB_INLINE_THRESHOLD` | 内联文件阈值（字节） | `1048576` (1MB) |
-| `HUB_UPLOAD_TEMP_DIR` | 上传临时文件目录 | `/tmp/hub-uploads` |
+| `HUB_UPLOAD_TEMP_DIR` | 上传临时文件目录 | `./data/hub-uploads` |
 | `HUB_MAX_UPLOAD_SIZE` | 最大上传文件大小（字节） | `536870912` (512MB) |
+| `HUB_MAX_DOWNLOAD_SIZE` | CAS 下载大小限制（字节） | `536870912` (512MB) |
+
+**安全相关**：
+| 变量名 | 描述 | 默认值 |
+|--------|------|--------|
+| `HUB_TOKEN_HASH_SALT` | Token 哈希盐（多实例部署必须一致） | 自动生成 |
 
 详细文档：[Configuration Guide](docs/configuration.md)
 

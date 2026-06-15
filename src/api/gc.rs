@@ -124,7 +124,7 @@ pub async fn gc_status(
                 "errors": s.errors,
                 "duration_seconds": s.duration_seconds,
                 "dry_run": s.dry_run,
-                "last_run": s.last_run,
+                "last_run": s.last_run.map(|dt| dt.to_rfc3339()),  // M5 fix: Convert DateTime to string for JSON
             }
         })),
         None => HttpResponse::Ok().json(serde_json::json!({

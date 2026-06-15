@@ -430,7 +430,7 @@ curl -X POST "http://localhost:8081/objects/batch" \
 
 **请求头**：
 ```
-Authorization: Bearer xet_xxx (需要 internal scope)
+Authorization: Bearer xet_xxx (需要 internal token (sub=hub-service, scope=internal, token_type=internal))
 ```
 
 **响应**：
@@ -481,7 +481,7 @@ Authorization: Bearer xet_xxx (需要 internal scope)
 
 **请求头**：
 ```
-Authorization: Bearer xet_xxx (需要 internal scope)
+Authorization: Bearer xet_xxx (需要 internal token (sub=hub-service, scope=internal, token_type=internal))
 ```
 
 **响应**：
@@ -504,7 +504,7 @@ curl -I "http://localhost:8081/internal/state/abc123..." \
 
 **请求头**：
 ```
-Authorization: Bearer xet_xxx (需要 internal scope)
+Authorization: Bearer xet_xxx (需要 internal token (sub=hub-service, scope=internal, token_type=internal))
 ```
 
 **响应**：
@@ -533,7 +533,7 @@ curl -X POST "http://localhost:8081/internal/gc/run" \
 
 **请求头**：
 ```
-Authorization: Bearer xet_xxx (需要 internal scope)
+Authorization: Bearer xet_xxx (需要 internal token (sub=hub-service, scope=internal, token_type=internal))
 ```
 
 **响应**：
@@ -617,25 +617,45 @@ curl "http://localhost:8081/health"
 
 **响应** (Prometheus 格式)：
 ```
-# HELP http_requests_total Total HTTP requests
+# HELP http_requests_total Total number of HTTP requests
 # TYPE http_requests_total counter
-http_requests_total{method="GET",path="/v1/xorbs",status="200"} 1234
+http_requests_total 1234
 
-# HELP http_request_duration_seconds HTTP request duration
-# TYPE http_request_duration_seconds histogram
-http_request_duration_seconds_bucket{le="0.1"} 500
-http_request_duration_seconds_bucket{le="0.5"} 800
-http_request_duration_seconds_bucket{le="1.0"} 900
+# HELP http_requests_by_status HTTP requests by status code range
+# TYPE http_requests_by_status counter
+http_requests_by_status{status="2xx"} 1100
+http_requests_by_status{status="3xx"} 50
+http_requests_by_status{status="4xx"} 80
+http_requests_by_status{status="5xx"} 4
+http_requests_by_status{status="other"} 0
 
-# HELP storage_operations_total Storage operations count
+# HELP storage_operations_total Total number of storage operations
 # TYPE storage_operations_total counter
-storage_operations_total{operation="upload",status="success"} 100
-storage_operations_total{operation="download",status="success"} 200
+storage_operations_total 300
 
-# HELP storage_bytes_total Storage bytes transferred
-# TYPE storage_bytes_total counter
-storage_bytes_total{direction="upload"} 1073741824
-storage_bytes_total{direction="download"} 2147483648
+# HELP upload_bytes_total Total bytes uploaded
+# TYPE upload_bytes_total counter
+upload_bytes_total 1073741824
+
+# HELP download_bytes_total Total bytes downloaded
+# TYPE download_bytes_total counter
+download_bytes_total 2147483648
+
+# HELP errors_total Total number of errors
+# TYPE errors_total counter
+errors_total 42
+
+# HELP active_connections Current number of active connections
+# TYPE active_connections gauge
+active_connections 15
+
+# HELP request_latency_us_total Total request latency in microseconds
+# TYPE request_latency_us_total counter
+request_latency_us_total 5000000
+
+# HELP request_latency_count Total number of latency measurements
+# TYPE request_latency_count counter
+request_latency_count 1234
 ```
 
 **示例**：

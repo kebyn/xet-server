@@ -241,8 +241,13 @@ pub fn verify_xet_token(
 /// The "internal" scope is ONLY valid for /internal/* endpoints.
 /// Non-internal endpoints must explicitly reject internal tokens.
 pub fn check_scope(claims: &XetClaims, required_scope: &str) -> bool {
+    // I5 fix: Use consistent check for internal scope
+    // Previously, this used split_whitespace().any() but is_internal_token used exact match.
+    // Now both use the same logic to prevent "dead zone" tokens.
+    let has_internal_scope = claims.scope.split_whitespace().any(|s| s == "internal");
+
     // "internal" scope is NOT a wildcard - it only grants access to internal endpoints
-    if required_scope != "internal" && claims.scope.split_whitespace().any(|s| s == "internal") {
+    if required_scope != "internal" && has_internal_scope {
         // Reject internal tokens for non-internal endpoints
         return false;
     }
@@ -250,7 +255,7 @@ pub fn check_scope(claims: &XetClaims, required_scope: &str) -> bool {
     claims.scope.split_whitespace().any(|s| s == required_scope)
 }
 
-/// I1: Check if claims represent an internal service token from Hub.
+/// I1 fix: Check if claims represent an internal service token from Hub.
 ///
 /// Internal tokens are issued by the Hub for Hub-to-CAS communication.
 /// They have: sub="hub-service", scope="internal", token_type="internal".
@@ -259,9 +264,28 @@ pub fn check_scope(claims: &XetClaims, required_scope: &str) -> bool {
 /// a buggy/misconfigured TokenStore from accidentally creating a user token
 /// with sub="hub-service" that could bypass scope checks.
 pub fn is_internal_token(claims: &XetClaims) -> bool {
+    // I5 fix: Use consistent internal scope check (split_whitespace)
+    let has_internal_scope = claims.scope.split_whitespace().any(|s| s == "internal");
     claims.sub == "hub-service"
-        && claims.scope == "internal"
+        && has_internal_scope
         && claims.token_type == "internal"
+}
+
+/// I1 fix: Unified authorization helper for public endpoints.
+///
+/// This function handles both regular user tokens and internal service tokens:
+/// - Internal tokens (from Hub) are allowed to access all public endpoints
+/// - User tokens must have the required scope
+///
+/// This eliminates the inconsistency where some endpoints checked is_internal_token
+/// first while others only checked check_scope, causing internal tokens to be rejected.
+pub fn authorize_endpoint(claims: &XetClaims, required_scope: &str) -> bool {
+    // Internal tokens bypass scope checks (they're trusted service-to-service tokens)
+    if is_internal_token(claims) {
+        return true;
+    }
+    // Regular tokens must have the required scope
+    check_scope(claims, required_scope)
 }
 
 /// Pre-loaded verification keys for authentication.

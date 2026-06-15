@@ -488,6 +488,29 @@ impl GcConfig {
             config.http_timeout_seconds = val.parse().unwrap_or(config.http_timeout_seconds);
         }
 
+        // Incremental GC v2 environment variables
+        if let Ok(val) = std::env::var("GC_BLOOM_REBUILD_THRESHOLD") {
+            config.bloom.rebuild_threshold = val.parse().unwrap_or(config.bloom.rebuild_threshold);
+        }
+        if let Ok(val) = std::env::var("GC_SCANNER_CHECKPOINT_INTERVAL") {
+            config.scanner.checkpoint_interval = val.parse().unwrap_or(config.scanner.checkpoint_interval);
+        }
+        if let Ok(val) = std::env::var("GC_SCANNER_MAX_DURATION_SECONDS") {
+            config.scanner.max_duration_seconds = val.parse().unwrap_or(config.scanner.max_duration_seconds);
+        }
+        if let Ok(val) = std::env::var("GC_LEASE_RENEW_INTERVAL_SECONDS") {
+            config.lease.renew_interval_seconds = val.parse().unwrap_or(config.lease.renew_interval_seconds);
+        }
+        if let Ok(val) = std::env::var("GC_REFERENCE_TRACKER_MODE") {
+            config.reference_tracker.mode = val;
+        }
+        if let Ok(val) = std::env::var("GC_LOCAL_CACHE_DB_PATH") {
+            config.reference_tracker.local_cache_db_path = val;
+        }
+        if let Ok(val) = std::env::var("GC_DELETE_MAX_RETRIES") {
+            config.delete_max_retries = val.parse().unwrap_or(config.delete_max_retries);
+        }
+
         config
     }
 }
@@ -528,21 +551,21 @@ impl Default for ServerConfig {
 
 impl ServerConfig {
     /// Validate configuration parameters.
-    /// Panics on invalid values to fail fast at startup.
+    /// M1 fix: Returns Result instead of panicking for better error handling.
     /// I4 fix: Prevent zero values that would cause service unavailability.
-    fn validate(&self) {
+    fn validate(&self) -> Result<(), String> {
         // I4 fix: Validate base URL once at config load time
         self.server.validate_base_url();
 
         if self.server.rate_limit_rpm == 0 {
-            panic!("XET_RATE_LIMIT_RPM must be > 0 (got 0). This would disable rate limiting.");
+            return Err("XET_RATE_LIMIT_RPM must be > 0 (got 0). This would disable rate limiting.".to_string());
         }
         if self.server.max_body_size_mb == 0 {
-            panic!("XET_MAX_BODY_SIZE_MB must be > 0 (got 0). This would prevent all uploads.");
+            return Err("XET_MAX_BODY_SIZE_MB must be > 0 (got 0). This would prevent all uploads.".to_string());
         }
         if self.gc.enabled {
             if self.gc.interval_seconds == 0 {
-                panic!("GC_INTERVAL_SECONDS must be > 0 when GC is enabled (got 0).");
+                return Err("GC_INTERVAL_SECONDS must be > 0 when GC is enabled (got 0).".to_string());
             }
             if self.gc.grace_period_seconds == 0 {
                 tracing::warn!("GC_GRACE_PERIOD_SECONDS is 0. This disables the grace period and may cause race conditions with concurrent uploads.");
@@ -555,16 +578,16 @@ impl ServerConfig {
                 );
             }
             if self.gc.bloom.false_positive_rate <= 0.0 || self.gc.bloom.false_positive_rate >= 1.0 {
-                panic!(
+                return Err(format!(
                     "GC_BLOOM_FALSE_POSITIVE_RATE must be in (0.0, 1.0) (got {}).",
                     self.gc.bloom.false_positive_rate
-                );
+                ));
             }
             if self.gc.bloom.expected_items == 0 {
-                panic!("GC_BLOOM_EXPECTED_ITEMS must be > 0 (got 0).");
+                return Err("GC_BLOOM_EXPECTED_ITEMS must be > 0 (got 0).".to_string());
             }
             if self.gc.delete_batch_size == 0 {
-                panic!("GC_DELETE_BATCH_SIZE must be > 0 (got 0).");
+                return Err("GC_DELETE_BATCH_SIZE must be > 0 (got 0).".to_string());
             }
         }
         // M6 fix: Warn on invalid compression_scheme instead of silently falling back to LZ4.
@@ -578,6 +601,7 @@ impl ServerConfig {
                 );
             }
         }
+        Ok(())
     }
 
     /// Load configuration from environment variables with defaults
@@ -690,7 +714,10 @@ impl ServerConfig {
             },
             gc: gc_config,
         };
-        config.validate();
+        // M1 fix: Handle validation errors with clear error messages
+        if let Err(e) = config.validate() {
+            panic!("Configuration validation failed: {}", e);
+        }
         config
     }
 }

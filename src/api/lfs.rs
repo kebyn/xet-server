@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use tracing::{debug, error, info};
 
-use crate::api::auth::{check_scope, extract_token_from_request, AuthVerifier};
+use crate::api::auth::{extract_token_from_request, AuthVerifier};
 use crate::api::reconstruction::fetch_and_parse_shard;
 use crate::config::{ConversionConfig, ServerConfig};
 use crate::conversion::ConvertingOids;
@@ -78,7 +78,7 @@ pub async fn upload_lfs_object(
     };
 
     // I1: Use shared helper for internal token check (defense-in-depth)
-    if !crate::api::auth::is_internal_token(&claims) && !check_scope(&claims, "write") {
+    if !crate::api::auth::authorize_endpoint(&claims, "write") {
         GLOBAL_METRICS.record_request(403);
         GLOBAL_METRICS.record_latency(start);
         return HttpResponse::Forbidden().json(serde_json::json!({
@@ -292,7 +292,7 @@ pub async fn download_lfs_object(
     };
 
     // I1: Use shared helper for internal token check (defense-in-depth)
-    if !crate::api::auth::is_internal_token(&claims) && !check_scope(&claims, "read") {
+    if !crate::api::auth::authorize_endpoint(&claims, "read") {
         GLOBAL_METRICS.record_request(403);
         GLOBAL_METRICS.record_latency(start);
         return HttpResponse::Forbidden().json(serde_json::json!({

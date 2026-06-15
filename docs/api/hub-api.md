@@ -439,15 +439,15 @@ EOF
 
 ### 列出文件树
 
-**端点**：`GET /api/models/{ns}/{repo}/tree/{rev}`
+**端点**：`GET /api/models/{ns}/{repo}/tree/{rev}/{path}`
 
 **路径参数**：
 - `ns` (string): 命名空间
 - `repo` (string): 仓库名称
 - `rev` (string): 修订版本
+- `path` (string, optional): 子目录路径，不指定则列出根目录
 
 **查询参数**：
-- `path` (optional): 子目录路径
 - `recursive` (optional): 是否递归列出，默认 `false`
 
 **响应**：

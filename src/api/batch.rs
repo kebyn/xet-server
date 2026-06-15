@@ -140,7 +140,7 @@ pub async fn batch_operation(
     // Check scope based on operation
     // I1: Use shared helper for internal token check (defense-in-depth)
     let required_scope = if body.operation == "upload" { "write" } else { "read" };
-    if !crate::api::auth::is_internal_token(&claims) && !crate::api::auth::check_scope(&claims, required_scope) {
+    if !crate::api::auth::authorize_endpoint(&claims, required_scope) {
         GLOBAL_METRICS.record_request(403);
         GLOBAL_METRICS.record_latency(start);
         return HttpResponse::Forbidden().json(serde_json::json!({

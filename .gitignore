@@ -19,6 +19,11 @@ test-data/hub-data/
 test-data/jwt-token.txt
 test-data/keys/
 
+# SQLite runtime files (WAL, SHM, journal)
+test-data/*.db-shm
+test-data/*.db-wal
+test-data/*.db-journal
+
 # Generated test reports
 *TEST*REPORT*.md
 *TEST*SUMMARY*.md
