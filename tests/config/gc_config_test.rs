@@ -4,8 +4,8 @@ use serial_test::serial;
 #[test]
 fn test_gc_config_defaults() {
     let config = GcConfig::default();
-    assert_eq!(config.enabled, false);
-    assert_eq!(config.dry_run, true);
+    assert!(!config.enabled);
+    assert!(config.dry_run);
     assert_eq!(config.bloom.expected_items, 10_000_000);
     assert_eq!(config.bloom.false_positive_rate, 0.001);
     assert_eq!(config.scanner.page_size, 1000);
@@ -23,7 +23,7 @@ fn test_gc_config_from_env() {
     }
 
     let config = GcConfig::from_env();
-    assert_eq!(config.enabled, true);
+    assert!(config.enabled);
     assert_eq!(config.bloom.expected_items, 5_000_000);
 
     unsafe {

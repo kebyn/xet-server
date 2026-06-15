@@ -423,18 +423,16 @@ impl GcConfig {
             }
         };
 
-        if let Ok(val) = std::env::var("GC_ENABLED") {
-            if let Some(b) = parse_bool(&val) { config.enabled = b; }
-        }
+        if let Ok(val) = std::env::var("GC_ENABLED")
+            && let Some(b) = parse_bool(&val) { config.enabled = b; }
         if let Ok(val) = std::env::var("GC_INTERVAL_SECONDS") {
             config.interval_seconds = val.parse().unwrap_or(config.interval_seconds);
         }
         if let Ok(val) = std::env::var("GC_DATA_DIR") {
             config.data_dir = val;
         }
-        if let Ok(val) = std::env::var("GC_DRY_RUN") {
-            if let Some(b) = parse_bool(&val) { config.dry_run = b; }
-        }
+        if let Ok(val) = std::env::var("GC_DRY_RUN")
+            && let Some(b) = parse_bool(&val) { config.dry_run = b; }
         if let Ok(val) = std::env::var("GC_BLOOM_EXPECTED_ITEMS") {
             config.bloom.expected_items = val.parse().unwrap_or(config.bloom.expected_items);
         }

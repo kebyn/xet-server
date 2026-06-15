@@ -159,9 +159,9 @@ impl BloomFilterProtectedSet {
         // Compute CRC32
         let crc = crc32fast::hash(&payload);
         writer.write_all(&crc.to_le_bytes())
-            .map_err(|e| GcError::Io(e))?;
+            .map_err(GcError::Io)?;
         writer.write_all(&payload)
-            .map_err(|e| GcError::Io(e))?;
+            .map_err(GcError::Io)?;
 
         Ok(())
     }
@@ -173,13 +173,13 @@ impl BloomFilterProtectedSet {
         // Read CRC32
         let mut crc_bytes = [0u8; 4];
         reader.read_exact(&mut crc_bytes)
-            .map_err(|e| GcError::Io(e))?;
+            .map_err(GcError::Io)?;
         let expected_crc = u32::from_le_bytes(crc_bytes);
 
         // Read the rest of the data
         let mut payload = Vec::new();
         reader.read_to_end(&mut payload)
-            .map_err(|e| GcError::Io(e))?;
+            .map_err(GcError::Io)?;
 
         // Verify CRC32
         let actual_crc = crc32fast::hash(&payload);

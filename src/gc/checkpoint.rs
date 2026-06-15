@@ -136,20 +136,22 @@ impl GcCheckpoint {
         // If previous cycle was InProgress or Failed, keep the cursor for resume
     }
 
-    /// Save the checkpoint to storage.
+    /// Save the checkpoint to storage atomically.
     ///
     /// The checkpoint is serialized as JSON and written to `.gc/checkpoint.json`.
-    /// This is NOT atomic — if the process crashes during save, the checkpoint
-    /// may be corrupted. The load() method handles this by returning a fresh
-    /// checkpoint on parse failure.
+    ///
+    /// # Atomicity
+    ///
+    /// Uses `put_atomic` which is crash-safe on both backends:
+    /// - **S3**: PUT is already atomic.
+    /// - **Local**: Uses write-to-temp + rename pattern.
     pub async fn save(&self, storage: &dyn StorageBackend) -> GcResult<()> {
         let json = serde_json::to_vec_pretty(self)
-            .map_err(|e| GcError::Json(e))?;
+            .map_err(GcError::Json)?;
 
-        storage.put(CHECKPOINT_KEY, bytes::Bytes::from(json))
+        storage.put_atomic(CHECKPOINT_KEY, bytes::Bytes::from(json))
             .await
-            .map_err(|e| GcError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            .map_err(|e| GcError::Io(std::io::Error::other(
                 format!("Storage error: {}", e)
             )))?;
 
@@ -167,8 +169,7 @@ impl GcCheckpoint {
                 // No checkpoint yet — return fresh
                 return Ok(Self::new());
             }
-            Err(e) => return Err(GcError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            Err(e) => return Err(GcError::Io(std::io::Error::other(
                 format!("Storage error: {}", e)
             ))),
         };

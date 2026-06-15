@@ -76,17 +76,49 @@ impl GcLeaseGuard {
 }
 
 impl Drop for GcLeaseGuard {
+    /// Release the lease on drop.
+    ///
+    /// # M5 fix: Runtime Shutdown Consideration
+    ///
+    /// Since `Drop` is synchronous and cannot perform async work directly,
+    /// we spawn a task to release the lease. This has limitations:
+    ///
+    /// - **Normal drop**: The spawned task runs and releases the lease promptly.
+    /// - **Runtime shutdown**: `tokio::spawn` may not execute if the runtime is
+    ///   shutting down. In this case, the lease will expire naturally after
+    ///   `ttl_seconds` (default: 1 hour).
+    ///
+    /// This is acceptable because:
+    /// 1. Lease TTL is relatively short (1 hour default)
+    /// 2. Other nodes will retry after the TTL expires
+    /// 3. Graceful shutdown can call `release_lease()` explicitly before dropping
+    ///
+    /// For stronger guarantees, callers should explicitly release the lease
+    /// before dropping the guard during shutdown sequences.
     fn drop(&mut self) {
         self.cancel_renewal();
 
-        // Best-effort lease release
+        // Best-effort lease release via spawned task.
+        // If runtime is shutting down, lease will expire via TTL.
         let coordinator = self.coordinator.clone();
         let node_id = self.lease.holder_node_id.clone();
-        tokio::spawn(async move {
-            if let Err(e) = coordinator.release_lease(&node_id).await {
-                tracing::warn!("Failed to release GC lease on drop: {}", e);
-            }
-        });
+        let etag = self.lease.etag.clone();
+
+        // Use spawn_blocking as a fallback indication that we're in drop context
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                // I1 fix: Pass etag for conditional delete to prevent race condition
+                if let Err(e) = coordinator.release_lease(&node_id, etag.as_deref()).await {
+                    tracing::warn!("Failed to release GC lease on drop: {}", e);
+                }
+            });
+        } else {
+            // Runtime is gone — lease will expire via TTL
+            tracing::debug!(
+                node_id = %node_id,
+                "Tokio runtime unavailable during drop; lease will expire via TTL"
+            );
+        }
     }
 }
 
@@ -128,14 +160,13 @@ impl GcCoordinator {
         // 1. Read existing lease (if any)
         let existing_lease = self.read_lease().await?;
         let existing_etag = self.storage.get_etag(LEASE_KEY).await
-            .map_err(|e| GcError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            .map_err(|e| GcError::Io(std::io::Error::other(
                 format!("Failed to get lease etag: {}", e),
             )))?;
 
         // 2. Check if lease is still valid and held by another node
-        if let Some(ref lease) = existing_lease {
-            if !lease.is_expired() && !lease.is_held_by(&self.node_id) {
+        if let Some(ref lease) = existing_lease
+            && !lease.is_expired() && !lease.is_held_by(&self.node_id) {
                 tracing::info!(
                     holder = %lease.holder_node_id,
                     expires_at = %lease.expires_at,
@@ -143,7 +174,6 @@ impl GcCoordinator {
                 );
                 return Ok(None);
             }
-        }
 
         // 3. Create new lease
         let now = Utc::now();
@@ -155,7 +185,7 @@ impl GcCoordinator {
         };
 
         let lease_json = serde_json::to_vec_pretty(&new_lease)
-            .map_err(|e| GcError::Json(e))?;
+            .map_err(GcError::Json)?;
 
         // 4. Conditional PUT: write only if absent or expired (etag matches)
         let result = self.storage.put_if_absent_or_expired(
@@ -199,8 +229,7 @@ impl GcCoordinator {
                 Ok(None)
             }
             Err(e) => {
-                Err(GcError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
+                Err(GcError::Io(std::io::Error::other(
                     format!("Failed to acquire lease: {}", e),
                 )))
             }
@@ -213,7 +242,7 @@ impl GcCoordinator {
         lease.expires_at = now + Duration::seconds(self.config.ttl_seconds as i64);
 
         let lease_json = serde_json::to_vec_pretty(&lease)
-            .map_err(|e| GcError::Json(e))?;
+            .map_err(GcError::Json)?;
 
         let result = self.storage.put_if_absent_or_expired(
             LEASE_KEY,
@@ -235,8 +264,7 @@ impl GcCoordinator {
                 Err(GcError::LeaseExpired)
             }
             Err(e) => {
-                Err(GcError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
+                Err(GcError::Io(std::io::Error::other(
                     format!("Failed to renew lease: {}", e),
                 )))
             }
@@ -244,7 +272,10 @@ impl GcCoordinator {
     }
 
     /// Release the GC lease (only if we still hold it).
-    async fn release_lease(&self, node_id: &str) -> GcResult<()> {
+    ///
+    /// I1 fix: Uses conditional delete with etag to prevent race condition
+    /// where one node deletes another node's lease.
+    async fn release_lease(&self, node_id: &str, expected_etag: Option<&str>) -> GcResult<()> {
         // Read current lease
         let current = match self.read_lease().await? {
             Some(lease) => lease,
@@ -256,10 +287,39 @@ impl GcCoordinator {
             return Ok(());
         }
 
-        // Delete the lease file
+        // I1 fix: Use conditional delete with etag to prevent race condition.
+        // If etag is provided and doesn't match, another node has acquired the lease.
+        if let Some(etag) = expected_etag {
+            match self.storage.delete_if_match(LEASE_KEY, etag).await {
+                Ok(()) => {
+                    tracing::info!(node_id = %node_id, "Released GC lease (conditional)");
+                    return Ok(());
+                }
+                Err(crate::storage::StorageError::ConditionFailed) => {
+                    // Another node has the lease — don't delete
+                    tracing::debug!(
+                        node_id = %node_id,
+                        "Lease release skipped: etag mismatch (another node holds lease)"
+                    );
+                    return Ok(());
+                }
+                Err(crate::storage::StorageError::Internal(_)) => {
+                    // Backend doesn't support conditional delete — fall through to regular delete
+                    tracing::debug!(
+                        "Backend doesn't support conditional delete, falling back to regular delete"
+                    );
+                }
+                Err(e) => {
+                    return Err(GcError::Io(std::io::Error::other(
+                        format!("Failed to delete lease: {}", e),
+                    )));
+                }
+            }
+        }
+
+        // Fallback: regular delete (has race condition but better than nothing)
         self.storage.delete(LEASE_KEY).await
-            .map_err(|e| GcError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            .map_err(|e| GcError::Io(std::io::Error::other(
                 format!("Failed to delete lease: {}", e),
             )))?;
 
@@ -272,12 +332,11 @@ impl GcCoordinator {
         match self.storage.get(LEASE_KEY).await {
             Ok(data) => {
                 let lease: GcLease = serde_json::from_slice(&data)
-                    .map_err(|e| GcError::Json(e))?;
+                    .map_err(GcError::Json)?;
                 Ok(Some(lease))
             }
             Err(crate::storage::StorageError::NotFound(_)) => Ok(None),
-            Err(e) => Err(GcError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            Err(e) => Err(GcError::Io(std::io::Error::other(
                 format!("Failed to read lease: {}", e),
             ))),
         }

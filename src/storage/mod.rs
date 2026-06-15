@@ -74,11 +74,18 @@ pub trait StorageBackend: Send + Sync {
     /// List objects matching a prefix with their modification times.
     /// Returns (key, unix_timestamp_seconds) pairs.
     /// Used by GC to determine which blobs are older than the grace period.
-    async fn list_objects_with_mtime(&self, prefix: &str) -> StorageResult<Vec<(String, u64)>> {
-        // Default implementation: call list_objects and return mtime=0
-        // Storage backends should override this for proper grace period support
-        let keys = self.list_objects(prefix).await?;
-        Ok(keys.into_iter().map(|k| (k, 0)).collect())
+    ///
+    /// # Safety
+    ///
+    /// Backends MUST override this method. The default implementation returns an error
+    /// because returning `mtime=0` would cause all objects to appear extremely old
+    /// and be deleted by GC's grace period check.
+    async fn list_objects_with_mtime(&self, _prefix: &str) -> StorageResult<Vec<(String, u64)>> {
+        Err(StorageError::Internal(
+            "list_objects_with_mtime is not implemented for this storage backend. \
+             Backends must override this method to provide modification times for GC."
+                .to_string(),
+        ))
     }
 
     /// Get the modification time of a single object.
@@ -137,15 +144,20 @@ pub trait StorageBackend: Send + Sync {
     /// Used by incremental GC to resume scanning from a checkpoint without
     /// listing all objects at once.
     ///
-    /// Default implementation: calls list_objects() and slices by page.
-    /// Storage backends should override for efficient server-side pagination.
+    /// Default implementation: calls list_objects(), sorts for deterministic pagination,
+    /// then slices by page. Storage backends should override for efficient server-side
+    /// pagination (e.g., S3 uses continuation tokens).
     async fn list_objects_paged(
         &self,
         prefix: &str,
         start_after: Option<&str>,
         page_size: usize,
     ) -> StorageResult<(Vec<String>, Option<String>, bool)> {
-        let all_keys = self.list_objects(prefix).await?;
+        let mut all_keys = self.list_objects(prefix).await?;
+
+        // I4 fix: Sort for deterministic pagination. Without sorting, the order from
+        // list_objects is unspecified and pagination could miss or duplicate keys.
+        all_keys.sort();
 
         // Filter keys after the cursor (if provided)
         let filtered: Vec<String> = if let Some(cursor) = start_after {
@@ -176,25 +188,29 @@ pub trait StorageBackend: Send + Sync {
     ///
     /// Used by GC coordinator for S3-based lease management.
     ///
-    /// Default implementation: uses exists() + put() (NOT atomic — backends should override).
+    /// # Safety
+    ///
+    /// **Backends MUST override this method for production use.** The default implementation:
+    /// - For `expected_etag = None`: uses non-atomic check-then-put (race condition possible)
+    /// - For `expected_etag = Some(...)`: returns an error (cannot safely check etag)
+    ///
+    /// Using the default implementation with `Some(etag)` will cause lease management to fail.
     async fn put_if_absent_or_expired(
         &self,
         key: &str,
         data: Bytes,
         expected_etag: Option<&str>,
     ) -> StorageResult<String> {
-        // Default: non-atomic check-then-put. Backends MUST override for atomicity.
-        tracing::warn!(
-            "put_if_absent_or_expired using default (non-atomic) implementation for key={}; \
-             this is a race condition. Override in your StorageBackend implementation.",
-            key
-        );
-
-        let exists = self.exists(key).await?;
-
         match expected_etag {
             None => {
-                // Write only if absent
+                // I2 fix: Non-atomic check-then-put for "write if absent" case.
+                // This has a race condition but is safer than silently overwriting.
+                tracing::warn!(
+                    "put_if_absent_or_expired using default (non-atomic) implementation for key={}; \
+                     this has a race condition. Override in your StorageBackend implementation.",
+                    key
+                );
+                let exists = self.exists(key).await?;
                 if exists {
                     return Err(StorageError::ConditionFailed);
                 }
@@ -203,10 +219,13 @@ pub trait StorageBackend: Send + Sync {
                 Ok("\"default\"".to_string())
             }
             Some(_expected) => {
-                // Write if expired (etag match) — default impl can't check etag
-                // Just overwrite; backends should override for proper etag checking
-                self.put(key, data).await?;
-                Ok("\"default\"".to_string())
+                // I2 fix: Cannot safely check etag without backend support.
+                // Return error instead of silently overwriting.
+                Err(StorageError::Internal(
+                    "put_if_absent_or_expired with expected_etag is not supported by this \
+                     storage backend. Backends must override this method for etag-based \
+                     conditional writes (required for lease management).".to_string(),
+                ))
             }
         }
     }
@@ -218,6 +237,37 @@ pub trait StorageBackend: Send + Sync {
     /// Storage backends should override for etag support.
     async fn get_etag(&self, _key: &str) -> StorageResult<Option<String>> {
         Ok(None)
+    }
+
+    /// Atomically put an object using write-to-temp + rename pattern.
+    ///
+    /// This prevents partial writes from corrupting files during crashes.
+    /// - S3: PUT is already atomic, so this delegates to `put()`.
+    /// - Local: Writes to `{key}.tmp` then renames to `{key}`.
+    ///
+    /// M4 fix: Used for crash-safe checkpoint and bloom filter persistence.
+    ///
+    /// Default implementation: delegates to `put()` (not atomic for local fs).
+    /// LocalStorage overrides this with proper atomic write.
+    async fn put_atomic(&self, key: &str, data: Bytes) -> StorageResult<()> {
+        // Default: delegate to put (not atomic for local fs, but S3 PUT is atomic)
+        self.put(key, data).await
+    }
+
+    /// Conditionally delete an object only if its etag matches.
+    ///
+    /// Used for atomic lease release: only delete if we still hold the lease.
+    /// Returns `StorageError::ConditionFailed` if etag doesn't match.
+    ///
+    /// I1 fix: Prevents race condition where one node deletes another node's lease.
+    ///
+    /// Default implementation: returns error (not supported).
+    /// S3 and LocalStorage override with proper conditional delete.
+    async fn delete_if_match(&self, _key: &str, _expected_etag: &str) -> StorageResult<()> {
+        Err(StorageError::Internal(
+            "delete_if_match is not supported by this storage backend. \
+             Backends must override for conditional delete operations.".to_string(),
+        ))
     }
 }
 

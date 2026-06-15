@@ -34,10 +34,12 @@ fn setup_test_env(
         Box::new(LocalStorage::new(tempdir.path().to_str().unwrap()).unwrap());
     let storage = Arc::new(storage);
     let index = Arc::new(MetadataIndex::new());
-    let mut config = ConversionConfig::default();
     // Override min_conversion_size for tests — test files are smaller than the
     // production default (64KB). Tests here verify conversion mechanics, not thresholds.
-    config.min_conversion_size = 0;
+    let config = ConversionConfig {
+        min_conversion_size: 0,
+        ..Default::default()
+    };
     (storage, index, config, tempdir)
 }
 

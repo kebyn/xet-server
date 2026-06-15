@@ -130,7 +130,7 @@ fn test_gc_incremental_validation() {
 #[test]
 fn test_gc_incremental_defaults() {
     let config = ServerConfig::default();
-    assert_eq!(config.gc.dry_run, true);
+    assert!(config.gc.dry_run);
     assert_eq!(config.gc.bloom.expected_items, 10_000_000);
     assert_eq!(config.gc.grace.absolute_seconds, 3600);
 }

@@ -757,4 +757,34 @@ impl StorageBackend for S3Storage {
 
         Ok(result.e_tag().map(|s| s.to_string()))
     }
+
+    /// I1 fix: Conditional delete using If-Match header.
+    ///
+    /// Only deletes the object if its current ETag matches the expected value.
+    /// Returns StorageError::ConditionFailed if the ETag doesn't match.
+    async fn delete_if_match(&self, key: &str, expected_etag: &str) -> StorageResult<()> {
+        let result = self
+            .client
+            .delete_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .if_match(expected_etag)
+            .send()
+            .await;
+
+        match result {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                let err_str = e.to_string();
+                if err_str.contains("PreconditionFailed") || err_str.contains("precondition") {
+                    Err(StorageError::ConditionFailed)
+                } else if err_str.contains("NoSuchKey") || err_str.contains("NotFound") {
+                    // Object already gone — treat as success (idempotent)
+                    Ok(())
+                } else {
+                    Err(StorageError::Internal(format!("S3 conditional delete failed: {}", e)))
+                }
+            }
+        }
+    }
 }
