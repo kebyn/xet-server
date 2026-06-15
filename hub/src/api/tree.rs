@@ -108,7 +108,11 @@ async fn handle_tree(
             let rel_path = if tree_path.is_empty() {
                 entry.path.clone()
             } else {
-                entry.path.strip_prefix(&tree_path).unwrap_or(&entry.path).to_string()
+                // M2 fix: Strip prefix with trailing slash to avoid leading '/' in result
+                let prefix_with_slash = format!("{}/", tree_path);
+                entry.path.strip_prefix(&prefix_with_slash)
+                    .unwrap_or(entry.path.strip_prefix(&tree_path).unwrap_or(&entry.path))
+                    .to_string()
             };
             tree_entries.push(TreeEntry {
                 entry_type: "file".to_string(),

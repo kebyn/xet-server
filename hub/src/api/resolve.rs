@@ -87,8 +87,12 @@ async fn handle_resolve(
                 format!("?token={}", proxy_token)
             }
             Err(e) => {
+                // M3 fix: Return 500 instead of silently generating an invalid URL
                 tracing::error!("Failed to sign proxy token for resolve: {}", e);
-                String::new()
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": "Failed to generate download token",
+                    "error_type": "InternalError"
+                }));
             }
         }
     } else {

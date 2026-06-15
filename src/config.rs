@@ -431,60 +431,58 @@ impl GcConfig {
             }
         };
 
-        if let Ok(val) = std::env::var("GC_ENABLED")
-            && let Some(b) = parse_bool(&val) { config.enabled = b; }
-        if let Ok(val) = std::env::var("GC_INTERVAL_SECONDS") {
-            config.interval_seconds = val.parse().unwrap_or(config.interval_seconds);
+        // C7 fix: Helper macro to parse env vars with warning on failure
+        macro_rules! parse_env {
+            ($var:expr, $field:expr, $type:ty) => {
+                if let Ok(val) = std::env::var($var) {
+                    match val.parse::<$type>() {
+                        Ok(parsed) => $field = parsed,
+                        Err(_) => tracing::warn!(
+                            var = $var,
+                            value = %val,
+                            "Invalid value for GC config, using default"
+                        ),
+                    }
+                }
+            };
         }
+
+        if let Ok(val) = std::env::var("GC_ENABLED") {
+            match parse_bool(&val) {
+                Some(b) => config.enabled = b,
+                None => tracing::warn!(var = "GC_ENABLED", value = %val, "Invalid bool value, using default"),
+            }
+        }
+        parse_env!("GC_INTERVAL_SECONDS", config.interval_seconds, u64);
         if let Ok(val) = std::env::var("GC_DATA_DIR") {
             config.data_dir = val;
         }
-        if let Ok(val) = std::env::var("GC_DRY_RUN")
-            && let Some(b) = parse_bool(&val) { config.dry_run = b; }
-        if let Ok(val) = std::env::var("GC_BLOOM_EXPECTED_ITEMS") {
-            config.bloom.expected_items = val.parse().unwrap_or(config.bloom.expected_items);
+        if let Ok(val) = std::env::var("GC_DRY_RUN") {
+            match parse_bool(&val) {
+                Some(b) => config.dry_run = b,
+                None => tracing::warn!(var = "GC_DRY_RUN", value = %val, "Invalid bool value, using default"),
+            }
         }
-        if let Ok(val) = std::env::var("GC_BLOOM_FALSE_POSITIVE_RATE") {
-            config.bloom.false_positive_rate = val.parse().unwrap_or(config.bloom.false_positive_rate);
-        }
-        if let Ok(val) = std::env::var("GC_SCANNER_PAGE_SIZE") {
-            config.scanner.page_size = val.parse().unwrap_or(config.scanner.page_size);
-        }
-        if let Ok(val) = std::env::var("GC_GRACE_ABSOLUTE_SECONDS") {
-            config.grace.absolute_seconds = val.parse().unwrap_or(config.grace.absolute_seconds);
-        }
-        if let Ok(val) = std::env::var("GC_GRACE_SOFT_CYCLES") {
-            config.grace.soft_cycles = val.parse().unwrap_or(config.grace.soft_cycles);
-        }
-        if let Ok(val) = std::env::var("GC_LEASE_TTL_SECONDS") {
-            config.lease.ttl_seconds = val.parse().unwrap_or(config.lease.ttl_seconds);
-        }
-        if let Ok(val) = std::env::var("GC_DELETE_BATCH_SIZE") {
-            config.delete_batch_size = val.parse().unwrap_or(config.delete_batch_size);
-        }
+        parse_env!("GC_BLOOM_EXPECTED_ITEMS", config.bloom.expected_items, u64);
+        parse_env!("GC_BLOOM_FALSE_POSITIVE_RATE", config.bloom.false_positive_rate, f64);
+        parse_env!("GC_SCANNER_PAGE_SIZE", config.scanner.page_size, usize);
+        parse_env!("GC_GRACE_ABSOLUTE_SECONDS", config.grace.absolute_seconds, u64);
+        parse_env!("GC_GRACE_SOFT_CYCLES", config.grace.soft_cycles, u32);
+        parse_env!("GC_LEASE_TTL_SECONDS", config.lease.ttl_seconds, u64);
+        parse_env!("GC_DELETE_BATCH_SIZE", config.delete_batch_size, usize);
 
         // Incremental GC v2 environment variables
-        if let Ok(val) = std::env::var("GC_BLOOM_REBUILD_THRESHOLD") {
-            config.bloom.rebuild_threshold = val.parse().unwrap_or(config.bloom.rebuild_threshold);
-        }
-        if let Ok(val) = std::env::var("GC_SCANNER_CHECKPOINT_INTERVAL") {
-            config.scanner.checkpoint_interval = val.parse().unwrap_or(config.scanner.checkpoint_interval);
-        }
-        if let Ok(val) = std::env::var("GC_SCANNER_MAX_DURATION_SECONDS") {
-            config.scanner.max_duration_seconds = val.parse().unwrap_or(config.scanner.max_duration_seconds);
-        }
-        if let Ok(val) = std::env::var("GC_LEASE_RENEW_INTERVAL_SECONDS") {
-            config.lease.renew_interval_seconds = val.parse().unwrap_or(config.lease.renew_interval_seconds);
-        }
+        parse_env!("GC_BLOOM_REBUILD_THRESHOLD", config.bloom.rebuild_threshold, f64);
+        parse_env!("GC_SCANNER_CHECKPOINT_INTERVAL", config.scanner.checkpoint_interval, u64);
+        parse_env!("GC_SCANNER_MAX_DURATION_SECONDS", config.scanner.max_duration_seconds, u64);
+        parse_env!("GC_LEASE_RENEW_INTERVAL_SECONDS", config.lease.renew_interval_seconds, u64);
         if let Ok(val) = std::env::var("GC_REFERENCE_TRACKER_MODE") {
             config.reference_tracker.mode = val;
         }
         if let Ok(val) = std::env::var("GC_LOCAL_CACHE_DB_PATH") {
             config.reference_tracker.local_cache_db_path = val;
         }
-        if let Ok(val) = std::env::var("GC_DELETE_MAX_RETRIES") {
-            config.delete_max_retries = val.parse().unwrap_or(config.delete_max_retries);
-        }
+        parse_env!("GC_DELETE_MAX_RETRIES", config.delete_max_retries, u32);
 
         config
     }
@@ -596,6 +594,14 @@ impl ServerConfig {
                     invalid
                 );
             }
+        }
+        // I13 fix: Validate min_conversion_size <= max_conversion_size
+        if self.conversion.min_conversion_size > self.conversion.max_conversion_size {
+            return Err(format!(
+                "XET_MIN_CONVERSION_SIZE ({}) must be <= XET_MAX_CONVERSION_SIZE ({}). \
+                 Current values would prevent all conversions from triggering.",
+                self.conversion.min_conversion_size, self.conversion.max_conversion_size
+            ));
         }
         Ok(())
     }

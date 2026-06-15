@@ -12,6 +12,29 @@ pub struct CreateRepoRequest {
     pub private: bool,
 }
 
+// I5 fix: Validate repository name to prevent injection, path traversal, and abuse
+fn validate_repo_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("Repository name cannot be empty".to_string());
+    }
+    if name.len() > 96 {
+        return Err(format!("Repository name too long ({} chars, max 96)", name.len()));
+    }
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-') {
+        return Err(format!("Repository name '{}' contains invalid characters. Only alphanumeric, '.', '_', '-' are allowed", name));
+    }
+    if name.starts_with('.') || name.starts_with('-') {
+        return Err(format!("Repository name '{}' cannot start with '.' or '-'", name));
+    }
+    if name.ends_with('.') {
+        return Err(format!("Repository name '{}' cannot end with '.'", name));
+    }
+    if name.contains("..") {
+        return Err(format!("Repository name '{}' cannot contain '..'", name));
+    }
+    Ok(())
+}
+
 /// Convert Repo to HF-compatible JSON response
 fn repo_to_json(repo: &Repo) -> serde_json::Value {
     serde_json::json!({
@@ -50,6 +73,14 @@ async fn create_repo(
     let namespace = auth.info.username.clone();
     let name = body.name.clone();
     let private = body.private;
+
+    // I5 fix: Validate repo name
+    if let Err(msg) = validate_repo_name(&name) {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": msg,
+            "error_type": "ValidationError"
+        }));
+    }
 
     // Create the repo
     let repo = match metadata.create_repo(&namespace, &name, repo_type, private).await {
@@ -103,6 +134,14 @@ pub async fn create_repo_unified(
 
     let name = body.name.clone();
     let private = body.private;
+
+    // I5 fix: Validate repo name
+    if let Err(msg) = validate_repo_name(&name) {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": msg,
+            "error_type": "ValidationError"
+        }));
+    }
 
     let repo_type = match body.repo_type.as_deref() {
         Some("dataset") => RepoType::Dataset,

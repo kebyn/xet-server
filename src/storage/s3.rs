@@ -458,8 +458,9 @@ impl StorageBackend for S3Storage {
     /// the object directly to disk without loading the entire object into memory.
     /// Memory usage is bounded to the internal buffer size of the ByteStream.
     ///
-    /// For large files (>500MB), this prevents memory pressure that would occur
-    /// with the default implementation (get() + write()).
+    /// C1 fix: Writes to a temp file first, then renames to dest on success.
+    /// If download fails mid-stream, the partial temp file is cleaned up and
+    /// dest is never left in a corrupted state.
     async fn download_to_path(&self, key: &str, dest: &Path) -> StorageResult<()> {
         let result = self
             .client
@@ -476,25 +477,44 @@ impl StorageBackend for S3Storage {
                 }
             })?;
 
-        // Open the destination file
-        let mut file = File::create(dest).await.map_err(|e| {
-            StorageError::Internal(format!("Failed to create file {}: {}", dest.display(), e))
+        // C1 fix: Write to a temp file in the same directory, then rename on success.
+        // This ensures dest is never left as a partial/corrupted file.
+        let temp_dest = dest.with_extension("part");
+
+        let mut file = File::create(&temp_dest).await.map_err(|e| {
+            StorageError::Internal(format!("Failed to create file {}: {}", temp_dest.display(), e))
         })?;
 
         // Stream the body directly to file without collecting into memory
         let mut body = result.body;
-        while let Some(chunk) = body.next().await {
-            let chunk = chunk.map_err(|e| {
-                StorageError::Internal(format!("Failed to read S3 stream: {}", e))
+        let download_result: Result<(), StorageError> = async {
+            while let Some(chunk) = body.next().await {
+                let chunk = chunk.map_err(|e| {
+                    StorageError::Internal(format!("Failed to read S3 stream: {}", e))
+                })?;
+                file.write_all(&chunk).await.map_err(|e| {
+                    StorageError::Internal(format!("Failed to write to {}: {}", temp_dest.display(), e))
+                })?;
+            }
+
+            // Flush to ensure all data is written
+            file.flush().await.map_err(|e| {
+                StorageError::Internal(format!("Failed to flush {}: {}", temp_dest.display(), e))
             })?;
-            file.write_all(&chunk).await.map_err(|e| {
-                StorageError::Internal(format!("Failed to write to {}: {}", dest.display(), e))
-            })?;
+
+            Ok(())
+        }.await;
+
+        // If download failed, clean up the partial temp file
+        if let Err(e) = download_result {
+            let _ = tokio::fs::remove_file(&temp_dest).await;
+            return Err(e);
         }
 
-        // Flush to ensure all data is written
-        file.flush().await.map_err(|e| {
-            StorageError::Internal(format!("Failed to flush {}: {}", dest.display(), e))
+        // Atomic rename from temp to final destination
+        tokio::fs::rename(&temp_dest, dest).await.map_err(|e| {
+            let _ = std::fs::remove_file(&temp_dest);
+            StorageError::Internal(format!("Failed to rename temp file to {}: {}", dest.display(), e))
         })?;
 
         Ok(())
@@ -583,9 +603,15 @@ impl StorageBackend for S3Storage {
             for obj in resp.contents() {
                 if let Some(key) = obj.key() {
                     // Convert S3 DateTime to Unix timestamp seconds
-                    let mtime = obj.last_modified()
-                        .map(|dt| dt.secs() as u64)
-                        .unwrap_or(0);
+                    // M8 fix: Skip objects with missing mtime rather than treating them
+                    // as epoch-0 (which makes them look extremely old to GC)
+                    let mtime = match obj.last_modified() {
+                        Some(dt) => dt.secs() as u64,
+                        None => {
+                            tracing::warn!(key = %key, "S3 object missing last_modified, skipping from GC candidates");
+                            continue;
+                        }
+                    };
                     entries.push((key.to_string(), mtime));
                 }
             }

@@ -21,6 +21,9 @@ use crate::storage::{StorageError, StorageResult};
 pub struct TempFile {
     path: PathBuf,
     file: Option<fs::File>,
+    /// M1 fix: Flag to prevent Drop cleanup when ownership is transferred via into_path().
+    /// Safer than mem::forget which would skip all Drop logic for any future fields.
+    consumed: bool,
 }
 
 impl TempFile {
@@ -52,6 +55,7 @@ impl TempFile {
         Ok(Self {
             path,
             file: Some(file),
+            consumed: false,
         })
     }
 
@@ -86,21 +90,21 @@ impl TempFile {
 
     /// Consume the TempFile and return its path, without cleanup.
     /// The caller takes responsibility for the file.
-    /// M3 fix: Use Option::take() for cleaner semantics
+    /// M1 fix: Use `consumed` flag instead of mem::forget for safer ownership transfer.
     pub fn into_path(mut self) -> PathBuf {
-        // Clone the path before we consume self
         let path = self.path.clone();
-        // Close the file handle by taking it from the Option
-        // This also prevents Drop from trying to clean up the file
         self.file.take();
-        // Use mem::forget to prevent Drop from running (which would delete the file)
-        std::mem::forget(self);
+        self.consumed = true;
         path
     }
 }
 
 impl Drop for TempFile {
     fn drop(&mut self) {
+        if self.consumed {
+            return;
+        }
+
         // Close file handle if still open
         self.file.take();
 

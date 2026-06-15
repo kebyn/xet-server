@@ -365,10 +365,10 @@ pub async fn lfs_batch(
         }
     };
 
-    // Check if token has required scope
+    // C5 fix: Check scope using exact match or split-based matching instead of contains()
     let has_scope = token_info.scope == required_scope
-        || token_info.scope == "read write"  // Combined scope
-        || token_info.scope.contains(required_scope);
+        || token_info.scope == "read write"
+        || token_info.scope.split_whitespace().any(|s| s == required_scope);
     if !has_scope {
         return HttpResponse::Forbidden().json(serde_json::json!({
             "error": format!("Token scope '{}' insufficient for {} operation (requires '{}')",
