@@ -8,6 +8,7 @@ name = "hub-api"
 path = "src/main.rs"
 
 [dependencies]
+xet-auth-types = { path = "../xet-auth-types" }
 actix-web = "4.5"
 actix-governor = "0.5"
 tokio = { version = "1.36", features = ["full"] }

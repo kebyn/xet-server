@@ -45,45 +45,12 @@ struct JwtHeader {
     kid: String,
 }
 
-/// Claims embedded in a xet JWT token
+/// Claims embedded in a xet JWT token.
 ///
-/// **IMPORTANT:** This struct must stay in sync with `hub/src/auth/xet_signer.rs::XetClaims`.
-/// Any field changes here must be mirrored there (and vice versa) to maintain
-/// wire compatibility between CAS and Hub token verification.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
-pub struct XetClaims {
-    /// Subject (user identity)
-    pub sub: String,
-    /// Scope(s) granted (space-separated, e.g., "read write")
-    pub scope: String,
-    /// Repository ID (HuggingFace-style repo identifier)
-    pub repo_id: String,
-    /// Repository type (e.g., "model", "dataset", "space")
-    pub repo_type: String,
-    /// Git revision being accessed
-    pub revision: String,
-    /// Expiration timestamp (Unix seconds)
-    pub exp: u64,
-    /// Issued-at timestamp (Unix seconds)
-    pub iat: u64,
-    /// Key ID identifying the signing key
-    pub kid: String,
-    /// Token type: "user" (default), "proxy", or "internal"
-    /// I1: Added for defense-in-depth to distinguish internal service tokens
-    #[serde(default = "default_token_type")]
-    pub token_type: String,
-    /// I5 fix: LFS object ID (for proxy tokens, binds token to specific object)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub oid: Option<String>,
-    /// I5 fix: LFS operation: "upload" or "download" (for proxy tokens)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub operation: Option<String>,
-}
-
-/// Default token type for backward compatibility with older tokens
-fn default_token_type() -> String {
-    "user".to_string()
-}
+/// Defined once in the `xet-auth-types` crate and shared by both CAS and Hub so
+/// the token wire format cannot drift between signer and verifier. Re-exported
+/// here so existing `crate::api::auth::XetClaims` paths keep resolving.
+pub use xet_auth_types::XetClaims;
 
 /// Ed25519 key pair for signing and verification
 pub struct KeyPair {

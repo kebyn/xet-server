@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "hub"]
+members = [".", "hub", "xet-auth-types"]
 resolver = "2"
 
 [package]
@@ -8,6 +8,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+xet-auth-types = { path = "xet-auth-types" }
 blake3 = "1.8"
 sha2 = "0.10"
 gearhash = "0.1"
