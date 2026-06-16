@@ -2083,6 +2083,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "xet-auth-types",
 ]
 
 [[package]]
@@ -4809,6 +4810,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 
 [[package]]
+name = "xet-auth-types"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "xet-server"
 version = "0.1.0"
 dependencies = [
@@ -4848,6 +4856,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "xet-auth-types",
 ]
 
 [[package]]

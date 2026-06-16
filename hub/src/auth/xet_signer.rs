@@ -1,6 +1,6 @@
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use ed25519_dalek::{Signer, SigningKey};
-use serde::{Serialize, Deserialize};
+use serde::Serialize;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// JWT header for Xet tokens
@@ -11,38 +11,12 @@ struct JwtHeader {
     kid: String,
 }
 
-/// Claims for Xet access tokens
+/// Claims for Xet access tokens.
 ///
-/// I6 fix: Added Clone, PartialEq, Eq derives to match CAS's XetClaims definition.
-/// Both Hub and CAS define XetClaims with identical fields and serde annotations,
-/// ensuring wire compatibility. The extra derives enable test assertions and cloning.
-///
-/// **IMPORTANT:** This struct must stay in sync with `src/api/auth.rs::XetClaims` in
-/// the CAS crate. Any field changes here must be mirrored there (and vice versa).
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
-pub struct XetClaims {
-    pub sub: String,
-    pub scope: String,
-    pub repo_id: String,
-    pub repo_type: String,
-    pub revision: String,
-    pub exp: u64,
-    pub iat: u64,
-    pub kid: String,
-    /// Token type: "user" (default) or "proxy" (short-lived LFS token)
-    #[serde(default = "default_token_type")]
-    pub token_type: String,
-    /// LFS object ID (for proxy tokens, binds token to specific object)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub oid: Option<String>,
-    /// LFS operation: "upload" or "download" (for proxy tokens)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub operation: Option<String>,
-}
-
-fn default_token_type() -> String {
-    "user".to_string()
-}
+/// Defined once in the `xet-auth-types` crate and shared by both Hub and CAS so
+/// the token wire format cannot drift between signer and verifier. Re-exported
+/// here so existing `xet_signer::XetClaims` paths keep resolving.
+pub use xet_auth_types::XetClaims;
 
 /// Xet token signer for creating access tokens for CAS
 pub struct XetSigner {
