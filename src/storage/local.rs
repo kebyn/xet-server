@@ -34,19 +34,6 @@ impl LocalStorage {
         Ok(Self { base_path: path })
     }
 
-    /// C2 fix: Compute etag from file metadata using nanosecond-precision mtime.
-    /// Nanosecond precision dramatically reduces the race window for lease coordination
-    /// compared to second-level precision. Most Linux filesystems (ext4, xfs, btrfs)
-    /// support nanosecond timestamps.
-    fn file_etag_from_metadata(meta: &Option<std::fs::Metadata>) -> String {
-        let nanos = meta.as_ref()
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        format!("\"{}\"", nanos)
-    }
-
     /// Validate key and construct object path, preventing path traversal attacks.
     fn object_path(&self, key: &str) -> StorageResult<PathBuf> {
         // Reject absolute paths
@@ -89,8 +76,29 @@ impl LocalStorage {
 #[async_trait]
 impl StorageBackend for LocalStorage {
     async fn put(&self, key: &str, data: Bytes) -> StorageResult<()> {
-        // 经由原子写(temp + rename),避免崩溃时留下截断文件。
-        self.put_atomic(key, data).await
+        // 原子写:先写入临时文件,再 rename 到最终路径,避免崩溃时留下截断文件。
+        let path = self.object_path(key)?;
+        let temp_path = path.with_extension("tmp");
+
+        // Create parent directories
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).await
+                .map_err(|e| StorageError::Internal(format!("Failed to create dirs: {}", e)))?;
+        }
+
+        // Write to temp file
+        fs::write(&temp_path, &data).await
+            .map_err(|e| StorageError::Internal(format!("Failed to write temp file: {}", e)))?;
+
+        // Atomic rename
+        fs::rename(&temp_path, &path).await
+            .map_err(|e| {
+                // Best-effort cleanup of temp file
+                let _ = std::fs::remove_file(&temp_path);
+                StorageError::Internal(format!("Failed to rename temp to final: {}", e))
+            })?;
+
+        Ok(())
     }
 
     /// Store an object by moving a file from disk.
@@ -164,37 +172,6 @@ impl StorageBackend for LocalStorage {
         Ok(keys)
     }
 
-    async fn list_objects_with_mtime(&self, prefix: &str) -> StorageResult<Vec<(String, u64)>> {
-        let dir = self.base_path.join(prefix);
-        if !dir.exists() {
-            return Ok(Vec::new());
-        }
-
-        let mut entries_with_mtime = Vec::new();
-        Self::walk_dir_with_mtime(&self.base_path, &dir, &mut entries_with_mtime).await?;
-        Ok(entries_with_mtime)
-    }
-
-    async fn get_mtime(&self, key: &str) -> StorageResult<u64> {
-        let path = self.object_path(key)?;
-
-        match fs::metadata(&path).await {
-            Ok(meta) => {
-                let mtime = meta
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                Ok(mtime)
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                Err(StorageError::NotFound(key.to_string()))
-            }
-            Err(e) => Err(StorageError::Internal(format!("Failed to get metadata: {}", e))),
-        }
-    }
-
     async fn get_size(&self, key: &str) -> StorageResult<u64> {
         let path = self.object_path(key)?;
 
@@ -204,192 +181,6 @@ impl StorageBackend for LocalStorage {
                 Err(StorageError::NotFound(key.to_string()))
             }
             Err(e) => Err(StorageError::Internal(format!("Failed to get metadata: {}", e))),
-        }
-    }
-
-    /// Paged listing for local storage: sort all keys, skip after cursor, take page_size.
-    ///
-    /// For local filesystem, all keys are read upfront (walk_dir), then sliced.
-    /// This is less efficient than server-side pagination but correct for checkpoint resumption.
-    async fn list_objects_paged(
-        &self,
-        prefix: &str,
-        start_after: Option<&str>,
-        page_size: usize,
-    ) -> StorageResult<(Vec<String>, Option<String>, bool)> {
-        let all_keys = self.list_objects(prefix).await?;
-
-        // Sort for deterministic pagination
-        let mut sorted_keys = all_keys;
-        sorted_keys.sort();
-
-        // Filter keys after the cursor
-        let filtered: Vec<String> = if let Some(cursor) = start_after {
-            sorted_keys.into_iter().filter(|k| k.as_str() > cursor).collect()
-        } else {
-            sorted_keys
-        };
-
-        let has_more = filtered.len() > page_size;
-        let page: Vec<String> = filtered.into_iter().take(page_size).collect();
-        let next_cursor = if has_more {
-            page.last().cloned()
-        } else {
-            None
-        };
-
-        Ok((page, next_cursor, has_more))
-    }
-
-    /// Conditional PUT for local storage using filesystem atomic operations.
-    ///
-    /// - expected_etag = None: write only if key absent (create-exclusive)
-    /// - expected_etag = Some(mtime_str): write only if current mtime matches
-    ///
-    /// Uses a lock file for atomicity on the local filesystem.
-    /// The "etag" for local storage is the mtime in nanoseconds as a quoted string.
-    ///
-    /// NOTE: Local storage lease coordination is only safe for single-node deployments.
-    /// For multi-node GC, use S3 storage which provides true conditional operations via ETags.
-    async fn put_if_absent_or_expired(
-        &self,
-        key: &str,
-        data: Bytes,
-        expected_etag: Option<&str>,
-    ) -> StorageResult<String> {
-        let path = self.object_path(key)?;
-
-        // Create parent directories
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).await
-                .map_err(|e| StorageError::Internal(format!("Failed to create dirs: {}", e)))?;
-        }
-
-        match expected_etag {
-            None => {
-                // Write only if absent
-                // Use OpenOptions with create_new(true) for atomic create-exclusive
-                let file = tokio::fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&path)
-                    .await;
-
-                match file {
-                    Ok(mut f) => {
-                        use tokio::io::AsyncWriteExt;
-                        f.write_all(&data).await
-                            .map_err(|e| StorageError::Internal(format!("Failed to write: {}", e)))?;
-                        let etag = Self::file_etag_from_metadata(&f.metadata().await.ok());
-                        Ok(etag)
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                        Err(StorageError::ConditionFailed)
-                    }
-                    Err(e) => {
-                        Err(StorageError::Internal(format!("Failed to create file: {}", e)))
-                    }
-                }
-            }
-            Some(expected) => {
-                // Write only if current mtime matches expected etag
-                let current_etag = match fs::metadata(&path).await {
-                    Ok(meta) => Self::file_etag_from_metadata(&Some(meta)),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                        return Err(StorageError::NotFound(key.to_string()));
-                    }
-                    Err(e) => {
-                        return Err(StorageError::Internal(format!("Failed to get metadata: {}", e)));
-                    }
-                };
-
-                if current_etag != expected {
-                    return Err(StorageError::ConditionFailed);
-                }
-
-                // Etag matches — overwrite
-                fs::write(&path, &data).await
-                    .map_err(|e| StorageError::Internal(format!("Failed to write: {}", e)))?;
-
-                // Get the new etag
-                let new_etag = match fs::metadata(&path).await {
-                    Ok(meta) => Self::file_etag_from_metadata(&Some(meta)),
-                    _ => "\"0\"".to_string(),
-                };
-                Ok(new_etag)
-            }
-        }
-    }
-
-    /// ETag for local storage: mtime in nanoseconds as a quoted string.
-    /// C2 fix: Uses nanosecond precision to minimize race window in lease coordination.
-    async fn get_etag(&self, key: &str) -> StorageResult<Option<String>> {
-        let path = self.object_path(key)?;
-
-        match fs::metadata(&path).await {
-            Ok(meta) => {
-                Ok(Some(Self::file_etag_from_metadata(&Some(meta))))
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                Err(StorageError::NotFound(key.to_string()))
-            }
-            Err(e) => Err(StorageError::Internal(format!("Failed to get metadata: {}", e))),
-        }
-    }
-
-    /// M4 fix: Atomic write using write-to-temp + rename pattern.
-    ///
-    /// Writes data to `{key}.tmp` first, then atomically renames to `{key}`.
-    /// This prevents partial writes from corrupting files during crashes.
-    /// The rename operation is atomic on POSIX filesystems.
-    async fn put_atomic(&self, key: &str, data: Bytes) -> StorageResult<()> {
-        let path = self.object_path(key)?;
-        let temp_path = path.with_extension("tmp");
-
-        // Create parent directories
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).await
-                .map_err(|e| StorageError::Internal(format!("Failed to create dirs: {}", e)))?;
-        }
-
-        // Write to temp file
-        fs::write(&temp_path, &data).await
-            .map_err(|e| StorageError::Internal(format!("Failed to write temp file: {}", e)))?;
-
-        // Atomic rename
-        fs::rename(&temp_path, &path).await
-            .map_err(|e| {
-                // Best-effort cleanup of temp file
-                let _ = std::fs::remove_file(&temp_path);
-                StorageError::Internal(format!("Failed to rename temp to final: {}", e))
-            })?;
-
-        Ok(())
-    }
-
-    /// I1 fix: Conditional delete using etag (mtime) check.
-    ///
-    /// Only deletes the file if its current mtime matches the expected etag.
-    /// Uses a two-step check-then-delete pattern (not truly atomic on local fs,
-    /// but minimizes the race window compared to unconditional delete).
-    async fn delete_if_match(&self, key: &str, expected_etag: &str) -> StorageResult<()> {
-        let path = self.object_path(key)?;
-
-        // Get current mtime
-        let current_etag = match self.get_etag(key).await? {
-            Some(etag) => etag,
-            None => return Ok(()), // File already gone
-        };
-
-        if current_etag != expected_etag {
-            return Err(StorageError::ConditionFailed);
-        }
-
-        // Delete (small race window between check and delete)
-        match fs::remove_file(&path).await {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()), // Idempotent
-            Err(e) => Err(StorageError::Internal(format!("Failed to delete: {}", e))),
         }
     }
 }
@@ -464,24 +255,6 @@ impl LocalStorage {
     ) -> StorageResult<()> {
         let entries = Self::walk_dir_impl(base_path, dir, false).await?;
         keys.extend(entries.into_iter().map(|(key, _)| key));
-        Ok(())
-    }
-
-    /// Recursively walk a directory, collecting (key, mtime_unix_seconds) pairs.
-    async fn walk_dir_with_mtime(
-        base_path: &Path,
-        dir: &Path,
-        entries_with_mtime: &mut Vec<(String, u64)>,
-    ) -> StorageResult<()> {
-        let entries = Self::walk_dir_impl(base_path, dir, true).await?;
-        // M6 fix: Use current time instead of 0 for missing mtime to prevent GC from
-        // incorrectly deleting files. If mtime is 0, grace period check would think
-        // the file is extremely old and delete it.
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        entries_with_mtime.extend(entries.into_iter().map(|(key, mtime)| (key, mtime.unwrap_or(now))));
         Ok(())
     }
 }
