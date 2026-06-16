@@ -22,8 +22,6 @@ CAS (Content Addressable Storage) Server 是 Xet Server 的核心存储引擎，
 | `/lfs/objects/batch` | POST | Git LFS 批量 API (别名) | 需要 read/write |
 | `/internal/state/{oid}` | GET | 查询 blob 状态 | 需要 internal |
 | `/internal/blob/{oid}` | HEAD | 检查 blob 存在 | 需要 internal |
-| `/internal/gc/run` | POST | 手动触发垃圾回收 | 需要 internal |
-| `/internal/gc/status` | GET | 查询 GC 运行状态 | 需要 internal |
 | `/health` | GET | 健康检查 | 无需认证 |
 | `/metrics` | GET | Prometheus 指标 | 需要 internal |
 
@@ -491,103 +489,6 @@ Authorization: Bearer xet_xxx (需要 internal token (sub=hub-service, scope=int
 **示例**：
 ```bash
 curl -I "http://localhost:8081/internal/state/abc123..." \
-  -H "Authorization: Bearer xet_xxx"
-```
-
-### 垃圾回收 API
-
-垃圾回收 API 用于手动触发 GC 运行和查询 GC 状态。
-
-#### 手动触发 GC
-
-**端点**：`POST /internal/gc/run`
-
-**请求头**：
-```
-Authorization: Bearer xet_xxx (需要 internal token (sub=hub-service, scope=internal, token_type=internal))
-```
-
-**响应**：
-- `202 Accepted`: GC 已触发，在后台运行
-  ```json
-  {
-    "message": "GC triggered, running in background",
-    "dry_run": false
-  }
-  ```
-
-**说明**：
-- GC 在后台异步运行，此端点立即返回
-- 使用 `/internal/gc/status` 查询 GC 运行结果
-- `dry_run` 字段反映配置的 GC 运行模式
-
-**示例**：
-```bash
-curl -X POST "http://localhost:8081/internal/gc/run" \
-  -H "Authorization: Bearer xet_xxx"
-```
-
-#### 查询 GC 状态
-
-**端点**：`GET /internal/gc/status`
-
-**请求头**：
-```
-Authorization: Bearer xet_xxx (需要 internal token (sub=hub-service, scope=internal, token_type=internal))
-```
-
-**响应**：
-
-当有 GC 运行记录时：
-```json
-{
-  "status": "ok",
-  "stats": {
-    "total_lfs_blobs": 1000,
-    "total_xorbs": 500,
-    "total_shards": 200,
-    "referenced_lfs_blobs": 800,
-    "referenced_xorbs": 450,
-    "orphaned_lfs_blobs": 200,
-    "orphaned_xorbs": 50,
-    "deleted_lfs_blobs": 200,
-    "deleted_xorbs": 50,
-    "grace_period_skipped": 10,
-    "errors": 0,
-    "duration_seconds": 15,
-    "dry_run": false,
-    "last_run": "2026-06-12T10:00:00Z"
-  }
-}
-```
-
-当没有 GC 运行记录时：
-```json
-{
-  "status": "no_gc_run_yet",
-  "message": "No GC run has been completed yet"
-}
-```
-
-**字段说明**：
-- `total_lfs_blobs`: 存储中的总 LFS blob 数
-- `total_xorbs`: 存储中的总 Xorb 数
-- `total_shards`: 存储中的总 Shard 数
-- `referenced_lfs_blobs`: 被引用的 LFS blob 数
-- `referenced_xorbs`: 被引用的 Xorb 数
-- `orphaned_lfs_blobs`: 孤立的 LFS blob 数
-- `orphaned_xorbs`: 孤立的 Xorb 数
-- `deleted_lfs_blobs`: 删除的 LFS blob 数
-- `deleted_xorbs`: 删除的 Xorb 数
-- `grace_period_skipped`: 因宽限期跳过的 blob 数
-- `errors`: 遇到的错误数
-- `duration_seconds`: GC 运行时长（秒）
-- `dry_run`: 是否为试运行模式
-- `last_run`: 上次运行时间戳
-
-**示例**：
-```bash
-curl "http://localhost:8081/internal/gc/status" \
   -H "Authorization: Bearer xet_xxx"
 ```
 

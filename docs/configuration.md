@@ -131,97 +131,6 @@ export XET_MIN_CONVERSION_SIZE=131072       # 128KB
 export XET_MAX_CONVERSION_SIZE=1073741824  # 1GB
 ```
 
-### 增量垃圾回收设置（v2）
-
-> **注意**：Xet Server 使用增量 GC v2 系统，采用 Bloom Filter 和 sidecar 引用追踪模式。旧版 Legacy GC 配置（`GC_GRACE_PERIOD_SECONDS`、`GC_HUB_BASE_URL` 等）已废弃。
-
-#### 基本设置
-
-| 环境变量 | 描述 | 默认值 | 必需 |
-|---------|------|--------|------|
-| `GC_ENABLED` | 启用后台垃圾回收任务 | `false` | 否 |
-| `GC_INTERVAL_SECONDS` | GC 运行间隔（秒） | `3600` (1 小时) | 否 |
-| `GC_DRY_RUN` | 试运行模式，只报告统计信息但不实际删除 | `true` | 否 |
-| `GC_DATA_DIR` | GC 工作目录（存储 checkpoints、bloom filter、leases） | `/var/lib/cas/gc` | 否 |
-
-#### Bloom Filter 设置
-
-| 环境变量 | 描述 | 默认值 | 必需 |
-|---------|------|--------|------|
-| `GC_BLOOM_EXPECTED_ITEMS` | Bloom filter 预期插入数量（建议设置为实际 chunk 数量的 1.5 倍） | `10000000` (10M) | 否 |
-| `GC_BLOOM_FALSE_POSITIVE_RATE` | Bloom filter 误报率（0.0-1.0，越低占用内存越多） | `0.001` | 否 |
-| `GC_BLOOM_REBUILD_THRESHOLD` | Bloom filter 占用率达到此阈值时自动重建（0.0-1.0） | `0.8` | 否 |
-
-#### 扫描器设置
-
-| 环境变量 | 描述 | 默认值 | 必需 |
-|---------|------|--------|------|
-| `GC_SCANNER_PAGE_SIZE` | 每页扫描对象数（分页扫描，支持崩溃恢复） | `1000` | 否 |
-| `GC_SCANNER_CHECKPOINT_INTERVAL` | 强制 checkpoint 间隔（每 N 个对象强制保存进度） | `10000` | 否 |
-| `GC_SCANNER_MAX_DURATION_SECONDS` | 单次扫描最大时长（秒），防止扫描器长时间占用资源 | `1800` (30分钟) | 否 |
-
-#### 宽限期设置
-
-| 环境变量 | 描述 | 默认值 | 必需 |
-|---------|------|--------|------|
-| `GC_GRACE_ABSOLUTE_SECONDS` | 绝对宽限期（秒），新上传的 blob 在此期间不会被删除 | `3600` (1小时) | 否 |
-| `GC_GRACE_SOFT_CYCLES` | 软宽限期（周期数）。**⚠️ 未实现：当前必须设为 `0`**，设为非零值会导致启动失败。仅 `GC_GRACE_ABSOLUTE_SECONDS` 生效 | `0` | 否 |
-
-#### 多节点协调设置
-
-| 环境变量 | 描述 | 默认值 | 必需 |
-|---------|------|--------|------|
-| `GC_LEASE_TTL_SECONDS` | 多节点 GC lease TTL（秒），防止多节点同时扫描同一分区 | `3600` (1小时) | 否 |
-| `GC_LEASE_RENEW_INTERVAL_SECONDS` | lease 续期间隔（秒），应远小于 TTL | `600` (10分钟) | 否 |
-
-#### 引用追踪设置
-
-| 环境变量 | 描述 | 默认值 | 必需 |
-|---------|------|--------|------|
-| `GC_REFERENCE_TRACKER_MODE` | 引用追踪模式。**仅 `sidecar` 已实现**；其他值导致启动失败 | `sidecar` | 否 |
-| `GC_LOCAL_CACHE_DB_PATH` | **未使用**（`local_cache_db` 模式未实现，此配置无效） | `/var/lib/cas/gc/refs.db` | 否 |
-
-#### 删除操作设置
-
-| 环境变量 | 描述 | 默认值 | 必需 |
-|---------|------|--------|------|
-| `GC_DELETE_BATCH_SIZE` | 每批次删除数量上限，限制单个 GC 周期的 I/O 影响 | `100` | 否 |
-| `GC_DELETE_MAX_RETRIES` | 删除失败最大重试次数 | `3` | 否 |
-
-**说明**：
-- **增量 GC v2** 使用 Bloom Filter 进行 O(1) 概率性成员测试，大幅降低内存和 I/O 成本
-- **宽限期** 防止过早删除：`GC_GRACE_ABSOLUTE_SECONDS`（绝对年龄）。`GC_GRACE_SOFT_CYCLES`（周期数）**未实现，必须为 0**
-- **增量扫描** 支持崩溃恢复，扫描进度定期保存到 checkpoint，重启后从断点继续
-- **多节点协调** 通过 S3-based 租约确保单节点运行，避免冲突
-- **Sidecar 引用追踪**：每个 shard 写入 `.refs.json` 文件存储引用集
-- `GC_DRY_RUN=true` 时，GC 只会记录将删除哪些 blob，但不会实际删除，适合初次部署时测试
-- 建议生产环境设置 `GC_DRY_RUN=false` 前先以试运行模式观察几天
-
-**示例**：
-```bash
-# 基本配置（生产环境）
-export GC_ENABLED=true
-export GC_INTERVAL_SECONDS=3600
-export GC_DRY_RUN=false
-export GC_DATA_DIR=/data/gc
-
-# Bloom Filter 调优（根据实际 chunk 数量调整）
-export GC_BLOOM_EXPECTED_ITEMS=15000000  # 15M chunks
-export GC_BLOOM_FALSE_POSITIVE_RATE=0.001
-
-# 宽限期配置（防止误删）
-export GC_GRACE_ABSOLUTE_SECONDS=3600    # 1 小时
-# 注意：GC_GRACE_SOFT_CYCLES 未实现，必须保持为 0（默认值）
-
-# 试运行模式（初次部署测试）
-export GC_ENABLED=true
-export GC_DRY_RUN=true
-
-# 多节点部署
-export GC_LEASE_TTL_SECONDS=3600
-export GC_LEASE_RENEW_INTERVAL_SECONDS=600
-```
-
 ### 完整性验证设置
 
 | 环境变量 | 描述 | 默认值 | 必需 |
@@ -278,14 +187,14 @@ export HUB_PUBLIC_BASE_URL=https://hub.example.com
 | `HUB_KID` | 密钥标识符 | `hub-key-1` | 否 |
 | `HUB_TOKEN_TTL_SECONDS` | CAS 令牌有效期（秒），用于签发 xet_xxx JWT | `3600` | 否 |
 | `HUB_PROXY_TOKEN_TTL_SECONDS` | LFS Proxy Token 有效期（秒） | `300` (5 分钟) | 否 |
-| `HUB_INTERNAL_TOKEN_TTL_SECONDS` | Hub→CAS 内部令牌有效期（秒），用于 GC 等服务间通信 | `86400` (24 小时) | 否 |
+| `HUB_INTERNAL_TOKEN_TTL_SECONDS` | Hub→CAS 内部令牌有效期（秒），用于服务间通信 | `86400` (24 小时) | 否 |
 
 **说明**：
 - `HUB_PRIVATE_KEY_PATH` 指向 Hub 的私钥文件（PEM 格式）
 - `HUB_KID` 用于标识签名密钥，支持密钥轮换
 - `HUB_TOKEN_TTL_SECONDS` 控制 CAS 令牌（xet_xxx）的有效期（默认 3600 秒 = 1 小时）
 - Proxy 令牌（proxy_xxx）默认 5 分钟，可通过 `HUB_PROXY_TOKEN_TTL_SECONDS` 配置
-- **`HUB_INTERNAL_TOKEN_TTL_SECONDS`**：内部令牌（internal_xxx）用于 Hub→CAS 通信（如 GC 查询引用哈希）。默认 24 小时，应大于 GC 运行间隔。设置小于 3600 秒会触发警告
+- **`HUB_INTERNAL_TOKEN_TTL_SECONDS`**：内部令牌（internal_xxx）用于 Hub→CAS 通信。默认 24 小时。设置小于 3600 秒会触发警告
 
 ### 安全设置
 
