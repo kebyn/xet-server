@@ -281,8 +281,6 @@ pub trait StorageBackend: Send + Sync {
     /// - S3: PUT is already atomic, so this delegates to `put()`.
     /// - Local: Writes to `{key}.tmp` then renames to `{key}`.
     ///
-    /// M4 fix: Used for crash-safe checkpoint and bloom filter persistence.
-    ///
     /// Default implementation: delegates to `put()` (not atomic for local fs).
     /// LocalStorage overrides this with proper atomic write.
     async fn put_atomic(&self, key: &str, data: Bytes) -> StorageResult<()> {
