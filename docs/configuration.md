@@ -165,7 +165,7 @@ export XET_MAX_CONVERSION_SIZE=1073741824  # 1GB
 | 环境变量 | 描述 | 默认值 | 必需 |
 |---------|------|--------|------|
 | `GC_GRACE_ABSOLUTE_SECONDS` | 绝对宽限期（秒），新上传的 blob 在此期间不会被删除 | `3600` (1小时) | 否 |
-| `GC_GRACE_SOFT_CYCLES` | 软宽限期（周期数），blob 需经过 N 个完整 GC 周期后才可删除 | `2` | 否 |
+| `GC_GRACE_SOFT_CYCLES` | 软宽限期（周期数）。**⚠️ 未实现：当前必须设为 `0`**，设为非零值会导致启动失败。仅 `GC_GRACE_ABSOLUTE_SECONDS` 生效 | `0` | 否 |
 
 #### 多节点协调设置
 
@@ -178,8 +178,8 @@ export XET_MAX_CONVERSION_SIZE=1073741824  # 1GB
 
 | 环境变量 | 描述 | 默认值 | 必需 |
 |---------|------|--------|------|
-| `GC_REFERENCE_TRACKER_MODE` | 引用追踪模式：`sidecar`（查询 Hub）或 `local_cache_db`（本地缓存） | `sidecar` | 否 |
-| `GC_LOCAL_CACHE_DB_PATH` | 本地缓存数据库路径（仅 `local_cache_db` 模式使用） | `/var/lib/cas/gc/refs.db` | 否 |
+| `GC_REFERENCE_TRACKER_MODE` | 引用追踪模式。**仅 `sidecar` 已实现**；其他值导致启动失败 | `sidecar` | 否 |
+| `GC_LOCAL_CACHE_DB_PATH` | **未使用**（`local_cache_db` 模式未实现，此配置无效） | `/var/lib/cas/gc/refs.db` | 否 |
 
 #### 删除操作设置
 
@@ -190,7 +190,7 @@ export XET_MAX_CONVERSION_SIZE=1073741824  # 1GB
 
 **说明**：
 - **增量 GC v2** 使用 Bloom Filter 进行 O(1) 概率性成员测试，大幅降低内存和 I/O 成本
-- **两层宽限期** 防止过早删除：`GC_GRACE_ABSOLUTE_SECONDS`（绝对年龄）+ `GC_GRACE_SOFT_CYCLES`（观测周期数）
+- **宽限期** 防止过早删除：`GC_GRACE_ABSOLUTE_SECONDS`（绝对年龄）。`GC_GRACE_SOFT_CYCLES`（周期数）**未实现，必须为 0**
 - **增量扫描** 支持崩溃恢复，扫描进度定期保存到 checkpoint，重启后从断点继续
 - **多节点协调** 通过 S3-based 租约确保单节点运行，避免冲突
 - **Sidecar 引用追踪**：每个 shard 写入 `.refs.json` 文件存储引用集
@@ -211,7 +211,7 @@ export GC_BLOOM_FALSE_POSITIVE_RATE=0.001
 
 # 宽限期配置（防止误删）
 export GC_GRACE_ABSOLUTE_SECONDS=3600    # 1 小时
-export GC_GRACE_SOFT_CYCLES=2            # 2 个 GC 周期
+# 注意：GC_GRACE_SOFT_CYCLES 未实现，必须保持为 0（默认值）
 
 # 试运行模式（初次部署测试）
 export GC_ENABLED=true
