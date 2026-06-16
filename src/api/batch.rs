@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use crate::api::auth::{extract_token_from_request, AuthVerifier};
+use crate::api::guard::{require_auth, AuthNeed};
 use crate::config::ServerConfig;
 use crate::metrics::GLOBAL_METRICS;
 
@@ -114,39 +115,16 @@ pub async fn batch_operation(
             }));
         }
 
-    // Extract and validate auth token
-    let token = match extract_token_from_request(&req) {
-        Some(t) => t,
-        None => {
-            GLOBAL_METRICS.record_request(401);
-            GLOBAL_METRICS.record_latency(start);
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "message": "Missing or invalid authorization"
-            }));
-        }
-    };
-
-    let claims = match auth.verify_token(&token) {
-        Ok(c) => c,
-        Err(_) => {
-            GLOBAL_METRICS.record_request(401);
-            GLOBAL_METRICS.record_latency(start);
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "message": "Invalid token"
-            }));
-        }
-    };
-
-    // Check scope based on operation
-    // I1: Use shared helper for internal token check (defense-in-depth)
+    // Extract, verify, and authorize the caller in one step.
+    // Scope depends on the LFS operation; batch uses the Git-LFS {"message"} body shape.
     let required_scope = if body.operation == "upload" { "write" } else { "read" };
-    if !crate::api::auth::authorize_endpoint(&claims, required_scope) {
-        GLOBAL_METRICS.record_request(403);
-        GLOBAL_METRICS.record_latency(start);
-        return HttpResponse::Forbidden().json(serde_json::json!({
-            "message": "Insufficient scope"
-        }));
-    }
+    let claims = match require_auth(&req, &auth, AuthNeed::Scope(required_scope)) {
+        Ok(c) => c,
+        Err(rej) => return rej.respond_message(start),
+    };
+    // require_auth verified a token is present; re-extract it for the proxy-signing
+    // fallback path below (passes the caller's token through when CAS cannot sign proxies).
+    let token = extract_token_from_request(&req).unwrap_or_default();
 
     // Calculate action URL expiry from JWT exp claim.
     // Actions become invalid when the JWT expires, so we surface that to the client.

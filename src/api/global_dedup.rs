@@ -5,7 +5,8 @@
 use actix_web::{web, HttpResponse};
 use serde::{Serialize, Deserialize};
 
-use crate::api::auth::{authorize_endpoint, extract_token_from_request, AuthVerifier};
+use crate::api::auth::AuthVerifier;
+use crate::api::guard::{require_auth, AuthNeed};
 use crate::index::MetadataIndex;
 use crate::metrics::GLOBAL_METRICS;
 use crate::storage::StorageBackend;
@@ -28,35 +29,13 @@ pub async fn query_chunk_dedup(
 ) -> HttpResponse {
     let start = std::time::Instant::now();
 
-    // Extract and validate auth token
-    let token = match extract_token_from_request(&req) {
-        Some(t) => t,
-        None => {
-            GLOBAL_METRICS.record_request(401);
-            GLOBAL_METRICS.record_latency(start);
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Missing or invalid authorization token"
-            }));
-        }
-    };
-
-    let claims = match auth.verify_token(&token) {
-        Ok(c) => c,
-        Err(_) => {
-            GLOBAL_METRICS.record_request(401);
-            GLOBAL_METRICS.record_latency(start);
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Invalid token"
-            }));
-        }
-    };
-
-    if !authorize_endpoint(&claims, "read") {
-        GLOBAL_METRICS.record_request(403);
-        GLOBAL_METRICS.record_latency(start);
-        return HttpResponse::Forbidden().json(serde_json::json!({
-            "error": "Insufficient scope, 'read' required"
-        }));
+    // Extract, verify, and authorize the caller in one step.
+    if let Err(rej) = require_auth(
+        &req,
+        &auth,
+        AuthNeed::ScopeMsg("read", "Insufficient scope, 'read' required"),
+    ) {
+        return rej.respond(start);
     }
 
     let (prefix, hash) = path.into_inner();

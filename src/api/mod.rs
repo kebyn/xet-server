@@ -1,6 +1,7 @@
 //! API modules for Xet Storage server
 
 pub mod auth;
+pub mod guard;
 pub mod xorb;
 pub mod shard;
 pub mod reconstruction;
