@@ -144,7 +144,7 @@ impl XorbObjectInfoV1 {
         // I7 fix: Reduce MAX_CHUNKS_PER_XORB from 1M to 100K to limit per-parse allocation.
         // A 16MB xorb with 8KB min chunks gives max ~2048 chunks (realistic).
         // At 100K limit: max allocation is ~4MB per parse (vs 40MB at 1M).
-        // GC concurrent parse of 10 shards: ~40MB total (vs 400MB at 1M).
+        // Concurrent parse of 10 shards: ~40MB total (vs 400MB at 1M).
         const MAX_CHUNKS_PER_XORB: u32 = 100_000;
         if num_chunks > MAX_CHUNKS_PER_XORB {
             return Err(XetError::ParseError(format!(

@@ -18,9 +18,6 @@ pub enum StorageError {
 
     #[error("Invalid argument: {0}")]
     InvalidArgument(String),
-
-    #[error("Condition failed (optimistic locking)")]
-    ConditionFailed,
 }
 
 pub type StorageResult<T> = Result<T, StorageError>;
