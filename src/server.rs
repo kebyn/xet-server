@@ -6,6 +6,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::api::auth::AuthVerifier;
+use crate::api::guard::{require_auth, AuthNeed};
 use crate::config::ServerConfig;
 use crate::conversion::ConvertingOids;
 use crate::gc::{IncrementalGarbageCollector, IncrementalGcStats, start_incremental_gc_background_task};
@@ -223,36 +224,15 @@ pub async fn metrics_endpoint(
 ) -> HttpResponse {
     let start = std::time::Instant::now();
 
-    // Extract and validate auth token
-    let token = match crate::api::auth::extract_token_from_request(&req) {
-        Some(t) => t,
-        None => {
-            crate::metrics::GLOBAL_METRICS.record_request(401);
-            crate::metrics::GLOBAL_METRICS.record_latency(start);
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Missing or invalid authorization token"
-            }));
-        }
-    };
-
-    let claims = match auth.verify_token(&token) {
-        Ok(c) => c,
-        Err(_) => {
-            crate::metrics::GLOBAL_METRICS.record_request(401);
-            crate::metrics::GLOBAL_METRICS.record_latency(start);
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Invalid token"
-            }));
-        }
-    };
-
-    // Check for "internal" scope (monitoring systems should use internal tokens)
-    if !crate::api::auth::check_scope(&claims, "internal") {
-        crate::metrics::GLOBAL_METRICS.record_request(403);
-        crate::metrics::GLOBAL_METRICS.record_latency(start);
-        return HttpResponse::Forbidden().json(serde_json::json!({
-            "error": "Insufficient scope: requires 'internal'"
-        }));
+    // Extract, verify, and authorize the caller in one step.
+    // authorize_endpoint(c, "internal") is equivalent to check_scope(c, "internal")
+    // here: the is_internal_token disjunct already implies the "internal" scope.
+    if let Err(rej) = require_auth(
+        &req,
+        &auth,
+        AuthNeed::ScopeMsg("internal", "Insufficient scope: requires 'internal'"),
+    ) {
+        return rej.respond(start);
     }
 
     let metrics = crate::metrics::GLOBAL_METRICS.export_metrics();

@@ -7,7 +7,8 @@ use actix_web::{web, HttpResponse};
 use serde::Serialize;
 use tracing::{info, warn};
 
-use crate::api::auth::{extract_token_from_request, is_internal_token, AuthVerifier};
+use crate::api::auth::AuthVerifier;
+use crate::api::guard::{require_auth, AuthNeed};
 use crate::index::MetadataIndex;
 use crate::metrics::GLOBAL_METRICS;
 use crate::storage::StorageBackend;
@@ -45,36 +46,13 @@ pub async fn get_blob_state(
         });
     }
 
-    // Extract and validate auth token
-    let token = match extract_token_from_request(&req) {
-        Some(t) => t,
-        None => {
-            GLOBAL_METRICS.record_request(401);
-            GLOBAL_METRICS.record_latency(start);
-            return HttpResponse::Unauthorized().json(ErrorResponse {
-                error: "Missing or invalid authorization token".to_string(),
-            });
-        }
-    };
-
-    let claims = match auth.verify_token(&token) {
-        Ok(c) => c,
-        Err(_) => {
-            GLOBAL_METRICS.record_request(401);
-            GLOBAL_METRICS.record_latency(start);
-            return HttpResponse::Unauthorized().json(ErrorResponse {
-                error: "Invalid token".to_string(),
-            });
-        }
-    };
-
-    // I2 fix: Use is_internal_token() for defense-in-depth (checks sub + scope + token_type)
-    if !is_internal_token(&claims) {
-        GLOBAL_METRICS.record_request(403);
-        GLOBAL_METRICS.record_latency(start);
-        return HttpResponse::Forbidden().json(ErrorResponse {
-            error: "Internal endpoint requires internal token type and scope".to_string(),
-        });
+    // Extract, verify, and authorize the caller in one step.
+    if let Err(rej) = require_auth(
+        &req,
+        &auth,
+        AuthNeed::Internal("Internal endpoint requires internal token type and scope"),
+    ) {
+        return rej.respond(start);
     }
 
     // Check MetadataIndex first
@@ -171,36 +149,13 @@ pub async fn head_blob(
         });
     }
 
-    // Extract and validate auth token
-    let token = match extract_token_from_request(&req) {
-        Some(t) => t,
-        None => {
-            GLOBAL_METRICS.record_request(401);
-            GLOBAL_METRICS.record_latency(start);
-            return HttpResponse::Unauthorized().json(ErrorResponse {
-                error: "Missing or invalid authorization token".to_string(),
-            });
-        }
-    };
-
-    let claims = match auth.verify_token(&token) {
-        Ok(c) => c,
-        Err(_) => {
-            GLOBAL_METRICS.record_request(401);
-            GLOBAL_METRICS.record_latency(start);
-            return HttpResponse::Unauthorized().json(ErrorResponse {
-                error: "Invalid token".to_string(),
-            });
-        }
-    };
-
-    // I2 fix: Use is_internal_token() for defense-in-depth (checks sub + scope + token_type)
-    if !is_internal_token(&claims) {
-        GLOBAL_METRICS.record_request(403);
-        GLOBAL_METRICS.record_latency(start);
-        return HttpResponse::Forbidden().json(ErrorResponse {
-            error: "Internal endpoint requires internal token type and scope".to_string(),
-        });
+    // Extract, verify, and authorize the caller in one step.
+    if let Err(rej) = require_auth(
+        &req,
+        &auth,
+        AuthNeed::Internal("Internal endpoint requires internal token type and scope"),
+    ) {
+        return rej.respond(start);
     }
 
     // Check MetadataIndex first

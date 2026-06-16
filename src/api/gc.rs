@@ -1,10 +1,34 @@
 //! GC API endpoints for manual trigger and status queries
 
-use crate::api::auth::{extract_token_from_request, is_internal_token, AuthVerifier};
+use crate::api::auth::AuthVerifier;
+use crate::api::guard::{require_auth, AuthNeed, AuthReject};
 use crate::gc::{IncrementalGarbageCollector, IncrementalGcStats};
 use actix_web::{web, HttpRequest, HttpResponse};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+/// Render an auth rejection in the GC endpoints' body shape (carries `error_type`
+/// and records no request metrics, matching these internal-only endpoints).
+fn gc_auth_reject(rej: AuthReject) -> HttpResponse {
+    match rej {
+        AuthReject::MissingToken => HttpResponse::Unauthorized().json(serde_json::json!({
+            "error": "Missing or invalid authorization",
+            "error_type": "AuthenticationError"
+        })),
+        AuthReject::InvalidToken => HttpResponse::Unauthorized().json(serde_json::json!({
+            "error": "Invalid token",
+            "error_type": "AuthenticationError"
+        })),
+        AuthReject::Forbidden(msg) => HttpResponse::Forbidden().json(serde_json::json!({
+            "error": msg,
+            "error_type": "AuthorizationError"
+        })),
+    }
+}
+
+/// Authorization message shared by both GC endpoints.
+const GC_INTERNAL_MSG: &str =
+    "Internal endpoint requires internal token type (sub=hub-service, scope=internal, token_type=internal)";
 
 /// POST /internal/gc/run
 ///
@@ -15,33 +39,9 @@ pub async fn trigger_gc(
     gc: web::Data<Arc<IncrementalGarbageCollector>>,
     auth: web::Data<Arc<AuthVerifier>>,
 ) -> HttpResponse {
-    // I6: Use standard auth extraction for consistency with other internal endpoints
-    let token = match extract_token_from_request(&req) {
-        Some(t) => t,
-        None => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Missing or invalid authorization",
-                "error_type": "AuthenticationError"
-            }));
-        }
-    };
-
-    let claims = match auth.verify_token(&token) {
-        Ok(c) => c,
-        Err(_) => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Invalid token",
-                "error_type": "AuthenticationError"
-            }));
-        }
-    };
-
-    // I2 fix: Use defense-in-depth check consistent with other internal endpoints.
-    if !is_internal_token(&claims) {
-        return HttpResponse::Forbidden().json(serde_json::json!({
-            "error": "Internal endpoint requires internal token type (sub=hub-service, scope=internal, token_type=internal)",
-            "error_type": "AuthorizationError"
-        }));
+    // Extract, verify, and authorize the caller in one step (internal-only).
+    if let Err(rej) = require_auth(&req, &auth, AuthNeed::Internal(GC_INTERNAL_MSG)) {
+        return gc_auth_reject(rej);
     }
 
     // Clone Arc for background task
@@ -75,33 +75,9 @@ pub async fn gc_status(
     auth: web::Data<Arc<AuthVerifier>>,
     last_stats: web::Data<Arc<RwLock<Option<IncrementalGcStats>>>>,
 ) -> HttpResponse {
-    // I6: Use standard auth extraction for consistency with other internal endpoints
-    let token = match extract_token_from_request(&req) {
-        Some(t) => t,
-        None => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Missing or invalid authorization",
-                "error_type": "AuthenticationError"
-            }));
-        }
-    };
-
-    let claims = match auth.verify_token(&token) {
-        Ok(c) => c,
-        Err(_) => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Invalid token",
-                "error_type": "AuthenticationError"
-            }));
-        }
-    };
-
-    // I2 fix: Use defense-in-depth check consistent with other internal endpoints.
-    if !is_internal_token(&claims) {
-        return HttpResponse::Forbidden().json(serde_json::json!({
-            "error": "Internal endpoint requires internal token type (sub=hub-service, scope=internal, token_type=internal)",
-            "error_type": "AuthorizationError"
-        }));
+    // Extract, verify, and authorize the caller in one step (internal-only).
+    if let Err(rej) = require_auth(&req, &auth, AuthNeed::Internal(GC_INTERNAL_MSG)) {
+        return gc_auth_reject(rej);
     }
 
     let stats = last_stats.read().await;
