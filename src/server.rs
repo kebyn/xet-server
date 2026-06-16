@@ -9,8 +9,6 @@ use crate::api::auth::AuthVerifier;
 use crate::api::guard::{require_auth, AuthNeed};
 use crate::config::ServerConfig;
 use crate::conversion::ConvertingOids;
-use crate::gc::{IncrementalGarbageCollector, IncrementalGcStats, start_incremental_gc_background_task};
-use crate::gc::reference_tracker::s3::SidecarReferenceTracker;
 use crate::storage::{create_storage, StorageBackend};
 use crate::middleware::metrics_middleware;
 
@@ -52,37 +50,6 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
     // Concurrent conversion tracker (in-memory, resets on restart)
     let converting = Arc::new(ConvertingOids::new());
 
-    // GC: Incremental garbage collector for orphaned blobs
-    // Validate GC configuration
-    for warning in crate::config::validate_gc_config(&config) {
-        tracing::warn!("{}", warning);
-    }
-
-    // Create sidecar reference tracker for incremental GC
-    let ref_tracker: Arc<dyn crate::gc::reference_tracker::ReferenceTracker> =
-        Arc::new(SidecarReferenceTracker::new(storage.clone()));
-    // I5 fix: Share ref_tracker via web::Data so conversion pipeline and shard upload
-    // can proactively generate sidecars (avoids first-GC-scan Layer 2 fallback).
-    // Use web::Data::new() (not ::from()) to match handler's `web::Data<Arc<dyn ReferenceTracker>>` type.
-    let ref_tracker_data = actix_web::web::Data::new(ref_tracker.clone());
-
-    // Create incremental GC
-    let gc = match IncrementalGarbageCollector::new(
-        storage.clone(),
-        ref_tracker.clone(),
-        config.gc.clone(),
-    ) {
-        Ok(gc) => Arc::new(gc),
-        Err(e) => {
-            tracing::error!("Failed to create incremental garbage collector: {}", e);
-            return Err(std::io::Error::other(format!("Failed to create GC: {}", e)));
-        }
-    };
-    let last_gc_stats = Arc::new(RwLock::new(None::<IncrementalGcStats>));
-
-    // Start background GC task (if enabled)
-    start_incremental_gc_background_task(gc.clone(), last_gc_stats.clone()).await;
-
     let bind_addr = format!("{}:{}", config.server.host, config.server.port);
 
     tracing::info!("Starting Xet Storage server on {}", bind_addr);
@@ -99,14 +66,6 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
     tracing::info!("Storage backend: {}", config.storage.backend);
     tracing::info!("Max upload size: {} MB", config.server.max_body_size_mb);
     tracing::info!("Conversion: {}", if config.conversion.enabled { "enabled" } else { "disabled" });
-    tracing::info!("GC: {} (incremental, interval={}s, dry_run={})",
-        if config.gc.enabled { "enabled" } else { "disabled" },
-        config.gc.interval_seconds,
-        config.gc.dry_run
-    );
-
-    let gc_for_app = gc.clone();
-    let stats_for_app = last_gc_stats.clone();
 
     // Configure rate limiting for public endpoints only.
     // Internal endpoints (/internal/*) bypass rate limiting to avoid
@@ -166,9 +125,6 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
             .app_data(web::Data::new(converting.clone()))
             .app_data(web::Data::new(config.clone()))
             .app_data(web::Data::new(config.conversion.clone()))
-            .app_data(web::Data::new(gc_for_app.clone()))
-            .app_data(web::Data::new(stats_for_app.clone()))
-            .app_data(ref_tracker_data.clone())
             // =============================================================
             // Internal endpoints (Hub-to-CAS communication) - NO rate limiting
             // These are registered at App level, BEFORE the public scope,
@@ -176,9 +132,6 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
             // =============================================================
             .route("/internal/state/{oid}", web::get().to(crate::api::internal::get_blob_state))
             .route("/internal/blob/{oid}", web::head().to(crate::api::internal::head_blob))
-            // GC endpoints (CAS internal) - no rate limiting
-            .route("/internal/gc/run", web::post().to(crate::api::gc::trigger_gc))
-            .route("/internal/gc/status", web::get().to(crate::api::gc::gc_status))
             // Health and metrics endpoints - no rate limiting
             .route("/health", web::get().to(health_check))
             .route("/metrics", web::get().to(metrics_endpoint))
