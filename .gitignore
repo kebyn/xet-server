@@ -27,3 +27,4 @@ test-data/*.db-journal
 # Generated test reports
 *TEST*REPORT*.md
 *TEST*SUMMARY*.md
+*COMPLETION_REPORT*.md
