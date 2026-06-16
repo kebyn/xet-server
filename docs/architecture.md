@@ -170,7 +170,7 @@ src/
 │   ├── checkpoint.rs # 崩溃恢复和断点续传
 │   ├── coordinator.rs # 多节点租约协调（S3 conditional PUT）
 │   ├── scanner.rs    # 增量分页扫描器
-│   ├── grace.rs      # 两层宽限期管理
+│   ├── grace.rs      # 宽限期管理（当前仅绝对宽限期）
 │   ├── errors.rs     # GC 错误类型定义
 │   └── reference_tracker/  # 引用追踪
 │       ├── mod.rs    # 引用追踪接口
@@ -407,7 +407,7 @@ export CAS_TRUSTED_KIDS=hub-key-1,backup-key-1            # 受信任的密钥 I
 
 2. **清理流程**：
    ```
-   定时触发 → 构建 Bloom Filter → 增量扫描存储 → 对比引用集 → 删除未引用的 blob（应用两层宽限期）
+   定时触发 → 构建 Bloom Filter → 增量扫描存储 → 对比引用集 → 删除未引用的 blob（应用宽限期）
    ```
    - **LFS blob**：原始上传的大文件
    - **Xorb**：压缩后的块容器（包含多个 CDC 分块）
@@ -429,9 +429,9 @@ export CAS_TRUSTED_KIDS=hub-key-1,backup-key-1            # 受信任的密钥 I
    - 崩溃或重启后从最后 checkpoint 恢复，无需重新扫描
    - 单次扫描最大时长限制（默认 30 分钟），防止长时间占用资源
 
-5. **两层宽限期保护**：
+5. **宽限期保护**：
    - **绝对宽限期**（`GC_GRACE_ABSOLUTE_SECONDS`）：blob 年龄小于此值时永不删除（默认 1 小时）
-   - **软宽限期**（`GC_GRACE_SOFT_CYCLES`）：blob 必须经过 N 个完整 GC 周期后才可删除（默认 2 周期）
+   - **软宽限期**（`GC_GRACE_SOFT_CYCLES`）：**未实现，必须为 0**
    - 防止竞态条件：blob 已上传但 commit 尚未写入文件树时不会被误删
 
 6. **多节点协调**：
@@ -455,7 +455,7 @@ export CAS_TRUSTED_KIDS=hub-key-1,backup-key-1            # 受信任的密钥 I
 - **增量扫描器**：分页扫描存储，支持崩溃恢复和断点续传
 - **多节点协调**：S3-based 租约确保单节点运行，避免冲突
 - **Sidecar 文件模式**：每个 shard 写入 `.refs.json` 文件存储引用集
-- **两层宽限期**：绝对宽限期 + 软宽限期，防止过早删除
+- **宽限期**：绝对宽限期（已实现）防止过早删除
 - **Checkpoint 恢复**：扫描进度定期保存，重启后从断点继续
 
 ### 配置
@@ -473,11 +473,11 @@ export CAS_TRUSTED_KIDS=hub-key-1,backup-key-1            # 受信任的密钥 I
 | `GC_SCANNER_CHECKPOINT_INTERVAL` | 强制 checkpoint 间隔 | `10000` |
 | `GC_SCANNER_MAX_DURATION_SECONDS` | 单次扫描最大时长（秒） | `1800` (30分钟) |
 | `GC_GRACE_ABSOLUTE_SECONDS` | 绝对宽限期（秒） | `3600` (1小时) |
-| `GC_GRACE_SOFT_CYCLES` | 软宽限期周期数 | `2` |
+| `GC_GRACE_SOFT_CYCLES` | 软宽限期周期数。**未实现，必须为 0** | `0` |
 | `GC_LEASE_TTL_SECONDS` | 租约 TTL（秒） | `3600` (1小时) |
 | `GC_LEASE_RENEW_INTERVAL_SECONDS` | 租约续期间隔（秒） | `600` (10分钟) |
-| `GC_REFERENCE_TRACKER_MODE` | 引用追踪模式（`sidecar` 或 `local_cache_db`） | `sidecar` |
-| `GC_LOCAL_CACHE_DB_PATH` | 本地缓存数据库路径 | `/var/lib/cas/gc/refs.db` |
+| `GC_REFERENCE_TRACKER_MODE` | 引用追踪模式。**仅 `sidecar` 已实现** | `sidecar` |
+| `GC_LOCAL_CACHE_DB_PATH` | **未使用**（`local_cache_db` 模式未实现） | `/var/lib/cas/gc/refs.db` |
 | `GC_DELETE_BATCH_SIZE` | 每批次删除数量上限 | `100` |
 | `GC_DELETE_MAX_RETRIES` | 删除失败最大重试次数 | `3` |
 
