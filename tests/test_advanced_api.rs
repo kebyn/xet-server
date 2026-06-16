@@ -50,8 +50,6 @@ async fn test_full_upload_workflow() {
     let index = MetadataIndex::new();
     let ctx: TestContext = test_config_with_new_key();
     let token = test_token_for_keypair(&ctx.keypair, "read write");
-    let ref_tracker: std::sync::Arc<dyn xet_server::gc::reference_tracker::ReferenceTracker> =
-        std::sync::Arc::new(xet_server::gc::reference_tracker::s3::SidecarReferenceTracker::new(storage_arc.clone()));
 
     let app = test::init_service(
         App::new()
@@ -59,7 +57,6 @@ async fn test_full_upload_workflow() {
             .app_data(web::Data::new(index))
             .app_data(web::Data::new(ctx.auth_verifier))
             .app_data(web::Data::new(ctx.config))
-            .app_data(web::Data::new(ref_tracker))
             .route("/v1/xorbs/{prefix}/{hash}", web::post().to(xet_server::api::xorb::upload_xorb))
             .route("/v1/shards", web::post().to(xet_server::api::shard::upload_shard))
             .route("/v2/reconstructions/{file_id}", web::get().to(xet_server::api::reconstruction::get_reconstruction))

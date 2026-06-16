@@ -56,7 +56,6 @@ fn create_test_config_with_temp_dir(temp_dir: &str) -> TestContext {
         },
         auth: auth_config,
         conversion: xet_server::config::ConversionConfig::default(),
-        gc: xet_server::config::GcConfig::default(),
     };
 
     TestContext {
@@ -375,8 +374,6 @@ async fn test_streaming_shard_upload() {
     let storage_arc: std::sync::Arc<Box<dyn StorageBackend>> = std::sync::Arc::new(storage);
 
     let index = MetadataIndex::new();
-    let ref_tracker: std::sync::Arc<dyn xet_server::gc::reference_tracker::ReferenceTracker> =
-        std::sync::Arc::new(xet_server::gc::reference_tracker::s3::SidecarReferenceTracker::new(storage_arc.clone()));
 
     // Create a valid shard by serializing header + padding + footer
     use xet_server::format::shard::{MDBShardFileFooter, MDBShardFileHeader};
@@ -419,7 +416,6 @@ async fn test_streaming_shard_upload() {
             .app_data(web::Data::new(index))
             .app_data(web::Data::new(ctx.auth_verifier))
             .app_data(web::Data::new(ctx.config))
-            .app_data(web::Data::new(ref_tracker))
             .route(
                 "/v1/shards",
                 web::post().to(xet_server::api::shard::upload_shard),

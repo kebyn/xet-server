@@ -106,31 +106,4 @@ fn test_min_conversion_size_default_64kb() {
         "Default min_conversion_size should be 64KB (65536 bytes)");
 }
 
-#[test]
-fn test_gc_incremental_validation() {
-    use xet_server::config::validate_gc_config;
-
-    // GC disabled — no warnings
-    let config = ServerConfig {
-        gc: xet_server::config::GcConfig { enabled: false, ..Default::default() },
-        ..Default::default()
-    };
-    assert!(validate_gc_config(&config).is_empty());
-
-    // GC enabled in dry-run mode — should warn about dry-run
-    let config = ServerConfig {
-        gc: xet_server::config::GcConfig { enabled: true, dry_run: true, ..Default::default() },
-        ..Default::default()
-    };
-    let warnings = validate_gc_config(&config);
-    assert!(!warnings.is_empty());
-    assert!(warnings.iter().any(|w| w.contains("dry-run")));
-}
-
-#[test]
-fn test_gc_incremental_defaults() {
-    let config = ServerConfig::default();
-    assert!(config.gc.dry_run);
-    assert_eq!(config.gc.bloom.expected_items, 10_000_000);
-    assert_eq!(config.gc.grace.absolute_seconds, 3600);
-}
+// GC config tests removed — GC module was removed from the project.

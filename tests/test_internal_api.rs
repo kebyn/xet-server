@@ -362,8 +362,6 @@ async fn test_lfs_download_raw_only() {
 
     let converting = std::sync::Arc::new(xet_server::conversion::ConvertingOids::new());
     let conversion_config = xet_server::config::ConversionConfig::default();
-    let ref_tracker: std::sync::Arc<dyn xet_server::gc::reference_tracker::ReferenceTracker> =
-        std::sync::Arc::new(xet_server::gc::reference_tracker::s3::SidecarReferenceTracker::new(storage_arc.clone()));
 
     let app = test::init_service(
         App::new()
@@ -373,7 +371,6 @@ async fn test_lfs_download_raw_only() {
             .app_data(web::Data::new(conversion_config))
             .app_data(web::Data::new(ctx.auth_verifier.clone()))
             .app_data(web::Data::new(config))
-            .app_data(web::Data::new(ref_tracker))
             .route("/lfs/objects/{oid}", web::put().to(xet_server::api::lfs::upload_lfs_object))
             .route("/lfs/objects/{oid}", web::get().to(xet_server::api::lfs::download_lfs_object)),
     )
