@@ -5,7 +5,6 @@
 use actix_web::{web, HttpResponse};
 use futures_util::StreamExt;
 use serde::Serialize;
-use std::sync::Arc;
 use tracing::{error, info};
 
 use crate::api::auth::AuthVerifier;
