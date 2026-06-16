@@ -292,7 +292,6 @@ pub async fn download_lfs_object(
     converting: web::Data<Arc<ConvertingOids>>,
     conversion_config: web::Data<ConversionConfig>,
     config: web::Data<ServerConfig>,
-    ref_tracker: web::Data<Arc<dyn crate::gc::reference_tracker::ReferenceTracker>>,
     req: actix_web::HttpRequest,
 ) -> HttpResponse {
     let start = std::time::Instant::now();
@@ -354,9 +353,7 @@ pub async fn download_lfs_object(
                     storage.clone().into_inner(),
                     index.clone().into_inner(),
                     conversion_config.get_ref().clone(),
-                )
-                // I5 fix: Pass ref_tracker for proactive sidecar generation
-                .with_ref_tracker(ref_tracker.get_ref().clone());
+                );
                 let converting_clone = converting.clone();
                 let oid_clone = oid.clone();
                 tokio::spawn(async move {
