@@ -210,6 +210,7 @@ mod tests {
     use crate::storage::local::LocalStorage;
     use actix_web::{test, web, App};
     use tempfile::tempdir;
+    use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn create_test_config() -> (KeyPair, AuthVerifier, ServerConfig) {
