@@ -186,14 +186,12 @@ impl StorageBackend for LocalStorage {
 }
 
 impl LocalStorage {
-    /// M1: Recursively walk a directory, collecting entries with optional mtime.
-    /// Single implementation to reduce code duplication.
-    async fn walk_dir_impl(
+    /// Recursively walk a directory, collecting keys relative to base_path.
+    async fn walk_dir(
         base_path: &Path,
         dir: &Path,
-        include_mtime: bool,
-    ) -> StorageResult<Vec<(String, Option<u64>)>> {
-        let mut results = Vec::new();
+        keys: &mut Vec<String>,
+    ) -> StorageResult<()> {
         let mut entries = fs::read_dir(dir).await.map_err(|e| {
             StorageError::Internal(format!("Failed to read dir {}: {}", dir.display(), e))
         })?;
@@ -207,8 +205,7 @@ impl LocalStorage {
             })?;
 
             if file_type.is_dir() {
-                let sub_results = Box::pin(Self::walk_dir_impl(base_path, &path, include_mtime)).await?;
-                results.extend(sub_results);
+                Box::pin(Self::walk_dir(base_path, &path, keys)).await?;
             } else if file_type.is_file() {
                 let key = path
                     .strip_prefix(base_path)
@@ -220,41 +217,10 @@ impl LocalStorage {
                     })?
                     .to_string_lossy()
                     .to_string();
-
-                let mtime = if include_mtime {
-                    match fs::metadata(&path).await {
-                        Ok(meta) => meta
-                            .modified()
-                            .ok()
-                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                            .map(|d| d.as_secs()),
-                        // M6 fix: Use current time instead of 0 to prevent GC from incorrectly
-                        // deleting files with unreadable metadata. If we use 0, the grace period
-                        // check (now - mtime > grace) would think the file is extremely old.
-                        Err(_) => Some(std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_secs())
-                            .unwrap_or(0)),
-                    }
-                } else {
-                    None
-                };
-
-                results.push((key, mtime));
+                keys.push(key);
             }
         }
 
-        Ok(results)
-    }
-
-    /// Recursively walk a directory, collecting keys relative to base_path.
-    async fn walk_dir(
-        base_path: &Path,
-        dir: &Path,
-        keys: &mut Vec<String>,
-    ) -> StorageResult<()> {
-        let entries = Self::walk_dir_impl(base_path, dir, false).await?;
-        keys.extend(entries.into_iter().map(|(key, _)| key));
         Ok(())
     }
 }

@@ -9,7 +9,7 @@
 //! Rendering stays flexible: `AuthReject` carries the HTTP status and message, and
 //! the `respond`/`respond_message` helpers reproduce the two common error-body
 //! shapes (`{"error": ..}` and the Git-LFS `{"message": ..}`). Handlers with a
-//! bespoke body (e.g. the GC endpoints) match on the variant and render directly.
+//! bespoke body match on the variant and render directly.
 
 use std::time::Instant;
 
