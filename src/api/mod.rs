@@ -9,4 +9,3 @@ pub mod global_dedup;
 pub mod batch;
 pub mod lfs;
 pub mod internal;
-pub mod gc;
