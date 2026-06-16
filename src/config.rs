@@ -10,7 +10,6 @@ pub struct ServerConfig {
     pub storage: StorageConfig,
     pub auth: AuthConfig,
     pub conversion: ConversionConfig,
-    pub gc: GcConfig,
 }
 
 /// HTTP server settings
@@ -217,276 +216,6 @@ impl ConversionConfig {
     }
 }
 
-/// Bloom filter configuration for incremental GC reference tracking.
-///
-/// The Bloom filter provides O(1) probabilistic membership tests for chunk hashes,
-/// dramatically reducing the memory and I/O cost of scanning. A false positive rate
-/// of 0.001 with 10M expected items uses ~17 MB (14 bits/item) — far cheaper than
-/// keeping all hashes in RAM.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BloomConfig {
-    /// Expected number of items to insert into the Bloom filter.
-    /// Used to size the underlying bit array for the target false positive rate.
-    pub expected_items: u64,
-    /// Acceptable false positive rate (0.0–1.0). Lower = more memory.
-    /// 0.001 means ~1 in 1000 non-referenced chunks will be falsely kept.
-    pub false_positive_rate: f64,
-    /// When the filter's occupancy reaches this fraction of capacity, rebuild it.
-    /// Rebuilding clears stale entries and re-sizes for current workload.
-    pub rebuild_threshold: f64,
-}
-
-impl Default for BloomConfig {
-    fn default() -> Self {
-        Self {
-            expected_items: 10_000_000,
-            false_positive_rate: 0.001,
-            rebuild_threshold: 0.8,
-        }
-    }
-}
-
-/// Scanner configuration for the incremental storage scanner.
-///
-/// The scanner walks storage in pages (batches), checkpointing progress after each
-/// page so a crash or restart resumes from the last checkpoint instead of restarting
-/// the full scan.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScannerConfig {
-    /// Number of objects to process per page before checkpointing.
-    pub page_size: usize,
-    /// Force a checkpoint every N objects even if mid-page (safety net).
-    pub checkpoint_interval: u64,
-    /// Maximum wall-clock seconds for a single scanner invocation.
-    /// Prevents the scanner from monopolizing the event loop on huge stores.
-    pub max_duration_seconds: u64,
-}
-
-impl Default for ScannerConfig {
-    fn default() -> Self {
-        Self {
-            page_size: 1000,
-            checkpoint_interval: 10000,
-            max_duration_seconds: 1800, // 30 minutes
-        }
-    }
-}
-
-/// Grace period configuration for protecting recently uploaded blobs.
-///
-/// Two complementary mechanisms prevent premature deletion:
-/// - `absolute_seconds`: blobs younger than this are never deleted (wall-clock safety).
-/// - `soft_cycles`: blobs must survive N complete GC scan cycles before becoming
-///   eligible for deletion (handles the case where a blob is referenced by a commit
-///   that hasn't been written to Hub's file_tree yet).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GraceConfig {
-    /// Absolute minimum age in seconds before a blob can be deleted.
-    pub absolute_seconds: u64,
-    /// Number of complete GC cycles a blob must be observed as unreferenced
-    /// before it becomes eligible for deletion.
-    pub soft_cycles: u32,
-}
-
-impl Default for GraceConfig {
-    fn default() -> Self {
-        Self {
-            absolute_seconds: 3600, // 1 hour
-            // I4 fix: Default to 0 because soft_cycles is NOT implemented.
-            // Setting a non-zero default would silently create a false sense of safety.
-            // Operators must explicitly set GC_GRACE_SOFT_CYCLES > 0 (which is rejected
-            // at startup until the feature is implemented).
-            soft_cycles: 0,
-        }
-    }
-}
-
-/// Lease configuration for multi-node GC coordination.
-///
-/// When multiple CAS nodes run GC concurrently, each node takes a short-lived lease
-/// on a partition of the keyspace. Leases expire automatically, so a crashed node's
-/// partition becomes available for another node to claim.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LeaseConfig {
-    /// Time-to-live for a partition lease in seconds.
-    pub ttl_seconds: u64,
-    /// How often (seconds) a node renews its active leases.
-    /// Should be substantially less than ttl_seconds to survive transient pauses.
-    pub renew_interval_seconds: u64,
-}
-
-impl Default for LeaseConfig {
-    fn default() -> Self {
-        Self {
-            ttl_seconds: 3600,        // 1 hour
-            renew_interval_seconds: 600, // 10 minutes
-        }
-    }
-}
-
-/// Reference tracker configuration.
-///
-/// The reference tracker extracts chunk hashes from shard files and stores them
-/// as sidecar JSON files for fast subsequent reads. This is a fully local operation
-/// that does NOT query Hub API.
-///
-/// Two modes are defined but only "sidecar" is currently implemented:
-/// - `"sidecar"`: Extract references from shard files and store as `.refs.json` files.
-///   Uses a three-layer defense: read sidecar → parse shard → conservative skip.
-/// - `"local_cache_db"`: (NOT IMPLEMENTED) Would maintain a local SQLite cache of
-///   referenced hashes, updated via Hub webhooks or polling.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReferenceTrackerConfig {
-    /// Tracker mode: "sidecar" (implemented) or "local_cache_db" (not implemented).
-    pub mode: String,
-    /// Path to the local SQLite database when mode = "local_cache_db".
-    pub local_cache_db_path: String,
-}
-
-impl Default for ReferenceTrackerConfig {
-    fn default() -> Self {
-        Self {
-            mode: "sidecar".to_string(),
-            local_cache_db_path: "/var/lib/cas/gc/refs.db".to_string(),
-        }
-    }
-}
-
-/// Garbage collection configuration for cleaning up orphaned blobs
-///
-/// GC runs as a background task that periodically scans storage for blobs
-/// that are no longer referenced by any file_tree entry in the Hub metadata.
-///
-/// # Incremental GC (v2)
-///
-/// The v2 incremental GC system uses:
-/// - Bloom filter-based reference tracking (O(1) lookups, ~17MB for 10M items)
-/// - Checkpoint-based incremental scanning (crash recovery, resume from cursor)
-/// - Two-tier grace periods (absolute wall-clock + soft cycle-based)
-/// - S3-based lease coordination for multi-node deployments
-/// - Sidecar `.refs.json` files for reference tracking
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GcConfig {
-    /// Enable background GC task
-    pub enabled: bool,
-    /// GC run interval in seconds
-    pub interval_seconds: u64,
-    /// Dry-run mode: report stats but don't actually delete
-    pub dry_run: bool,
-
-    // ── Incremental GC v2 fields ────────────────────────────────────────
-    /// Working directory for GC state (checkpoints, bloom filter, leases).
-    pub data_dir: String,
-    /// Bloom filter configuration for O(1) reference lookups.
-    pub bloom: BloomConfig,
-    /// Scanner configuration (page size, checkpointing, max duration).
-    pub scanner: ScannerConfig,
-    /// Grace period configuration (absolute + soft cycles).
-    pub grace: GraceConfig,
-    /// Multi-node lease configuration.
-    pub lease: LeaseConfig,
-    /// Reference tracker configuration (sidecar vs local cache DB).
-    pub reference_tracker: ReferenceTrackerConfig,
-    /// Number of blobs to delete per batch in a single GC cycle.
-    /// Limits per-cycle I/O impact; remaining orphans are deleted in subsequent cycles.
-    pub delete_batch_size: usize,
-    /// Maximum retry attempts for a failed blob deletion before giving up.
-    pub delete_max_retries: u32,
-}
-
-impl Default for GcConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,             // Disabled by default, must opt-in
-            interval_seconds: 3600,     // Every hour
-            dry_run: true,              // Dry-run by default for safety
-            // Incremental GC v2 defaults
-            data_dir: "/var/lib/cas/gc".to_string(),
-            bloom: BloomConfig::default(),
-            scanner: ScannerConfig::default(),
-            grace: GraceConfig::default(),
-            lease: LeaseConfig::default(),
-            reference_tracker: ReferenceTrackerConfig::default(),
-            delete_batch_size: 100,
-            delete_max_retries: 3,
-        }
-    }
-}
-
-impl GcConfig {
-    /// Load GC configuration from environment variables, falling back to defaults.
-    ///
-    /// This method reads all `GC_*` environment variables and overrides the
-    /// corresponding fields. Unknown or unparseable values log a warning and
-    /// keep the default.
-    pub fn from_env() -> Self {
-        let mut config = Self::default();
-
-        // Helper: parse bool accepting "true"/"1" as true, "false"/"0" as false.
-        let parse_bool = |s: &str| -> Option<bool> {
-            match s.to_lowercase().as_str() {
-                "true" | "1" => Some(true),
-                "false" | "0" => Some(false),
-                _ => None,
-            }
-        };
-
-        // C7 fix: Helper macro to parse env vars with warning on failure
-        macro_rules! parse_env {
-            ($var:expr, $field:expr, $type:ty) => {
-                if let Ok(val) = std::env::var($var) {
-                    match val.parse::<$type>() {
-                        Ok(parsed) => $field = parsed,
-                        Err(_) => tracing::warn!(
-                            var = $var,
-                            value = %val,
-                            "Invalid value for GC config, using default"
-                        ),
-                    }
-                }
-            };
-        }
-
-        if let Ok(val) = std::env::var("GC_ENABLED") {
-            match parse_bool(&val) {
-                Some(b) => config.enabled = b,
-                None => tracing::warn!(var = "GC_ENABLED", value = %val, "Invalid bool value, using default"),
-            }
-        }
-        parse_env!("GC_INTERVAL_SECONDS", config.interval_seconds, u64);
-        if let Ok(val) = std::env::var("GC_DATA_DIR") {
-            config.data_dir = val;
-        }
-        if let Ok(val) = std::env::var("GC_DRY_RUN") {
-            match parse_bool(&val) {
-                Some(b) => config.dry_run = b,
-                None => tracing::warn!(var = "GC_DRY_RUN", value = %val, "Invalid bool value, using default"),
-            }
-        }
-        parse_env!("GC_BLOOM_EXPECTED_ITEMS", config.bloom.expected_items, u64);
-        parse_env!("GC_BLOOM_FALSE_POSITIVE_RATE", config.bloom.false_positive_rate, f64);
-        parse_env!("GC_SCANNER_PAGE_SIZE", config.scanner.page_size, usize);
-        parse_env!("GC_GRACE_ABSOLUTE_SECONDS", config.grace.absolute_seconds, u64);
-        parse_env!("GC_GRACE_SOFT_CYCLES", config.grace.soft_cycles, u32);
-        parse_env!("GC_LEASE_TTL_SECONDS", config.lease.ttl_seconds, u64);
-        parse_env!("GC_DELETE_BATCH_SIZE", config.delete_batch_size, usize);
-
-        // Incremental GC v2 environment variables
-        parse_env!("GC_BLOOM_REBUILD_THRESHOLD", config.bloom.rebuild_threshold, f64);
-        parse_env!("GC_SCANNER_CHECKPOINT_INTERVAL", config.scanner.checkpoint_interval, u64);
-        parse_env!("GC_SCANNER_MAX_DURATION_SECONDS", config.scanner.max_duration_seconds, u64);
-        parse_env!("GC_LEASE_RENEW_INTERVAL_SECONDS", config.lease.renew_interval_seconds, u64);
-        if let Ok(val) = std::env::var("GC_REFERENCE_TRACKER_MODE") {
-            config.reference_tracker.mode = val;
-        }
-        if let Ok(val) = std::env::var("GC_LOCAL_CACHE_DB_PATH") {
-            config.reference_tracker.local_cache_db_path = val;
-        }
-        parse_env!("GC_DELETE_MAX_RETRIES", config.delete_max_retries, u32);
-
-        config
-    }
-}
 
 impl Default for ServerConfig {
     fn default() -> Self {
@@ -517,7 +246,6 @@ impl Default for ServerConfig {
                 signing_kid: None,
             },
             conversion: ConversionConfig::default(),
-            gc: GcConfig::default(),
         }
     }
 }
@@ -535,61 +263,6 @@ impl ServerConfig {
         }
         if self.server.max_body_size_mb == 0 {
             return Err("XET_MAX_BODY_SIZE_MB must be > 0 (got 0). This would prevent all uploads.".to_string());
-        }
-        if self.gc.enabled {
-            if self.gc.interval_seconds == 0 {
-                return Err("GC_INTERVAL_SECONDS must be > 0 when GC is enabled (got 0).".to_string());
-            }
-            // I1 fix: Validate reference_tracker.mode at startup instead of silently ignoring it.
-            // Only "sidecar" is implemented; other modes would silently use sidecar anyway,
-            // giving operators a false sense of configuration.
-            if self.gc.reference_tracker.mode != "sidecar" {
-                return Err(format!(
-                    "GC_REFERENCE_TRACKER_MODE '{}' is not supported. \
-                     Only 'sidecar' is currently implemented. \
-                     The 'local_cache_db' mode is planned but not yet available.",
-                    self.gc.reference_tracker.mode
-                ));
-            }
-            // I4 fix: soft_cycles is not implemented — reject non-zero values to prevent
-            // operators from relying on a protection layer that doesn't exist.
-            // The grace module logs a warning but the config default is 2, which creates
-            // a false sense of safety. Force it to 0 unless explicitly implemented.
-            if self.gc.grace.soft_cycles > 0 {
-                return Err(format!(
-                    "GC_GRACE_SOFT_CYCLES is set to {} but soft_cycles is NOT implemented. \
-                     Only grace.absolute_seconds is enforced. \
-                     Set GC_GRACE_SOFT_CYCLES=0 to acknowledge this, or increase \
-                     GC_GRACE_ABSOLUTE_SECONDS for equivalent protection.",
-                    self.gc.grace.soft_cycles
-                ));
-            }
-            if self.gc.grace.absolute_seconds == 0 && self.gc.grace.soft_cycles == 0 {
-                tracing::warn!(
-                    "Both GC grace.absolute_seconds and grace.soft_cycles are 0. \
-                     This disables all grace-period protection and may delete \
-                     blobs that are referenced but not yet visible in file_tree."
-                );
-            }
-            if self.gc.bloom.false_positive_rate <= 0.0 || self.gc.bloom.false_positive_rate >= 1.0 {
-                return Err(format!(
-                    "GC_BLOOM_FALSE_POSITIVE_RATE must be in (0.0, 1.0) (got {}).",
-                    self.gc.bloom.false_positive_rate
-                ));
-            }
-            // M3 fix: Validate rebuild_threshold range
-            if self.gc.bloom.rebuild_threshold <= 0.0 || self.gc.bloom.rebuild_threshold >= 1.0 {
-                return Err(format!(
-                    "GC_BLOOM_REBUILD_THRESHOLD must be in (0.0, 1.0) (got {}).",
-                    self.gc.bloom.rebuild_threshold
-                ));
-            }
-            if self.gc.bloom.expected_items == 0 {
-                return Err("GC_BLOOM_EXPECTED_ITEMS must be > 0 (got 0).".to_string());
-            }
-            if self.gc.delete_batch_size == 0 {
-                return Err("GC_DELETE_BATCH_SIZE must be > 0 (got 0).".to_string());
-            }
         }
         // M6 fix: Warn on invalid compression_scheme instead of silently falling back to LZ4.
         match self.conversion.compression_scheme.to_lowercase().as_str() {
@@ -692,10 +365,6 @@ impl ServerConfig {
             Err(_) => 512 * 1024 * 1024,  // 512MB — match Hub max_upload_size
         };
 
-        // GC configuration — delegate to GcConfig::from_env() which reads all GC_*
-        // environment variables (including legacy vars used by src/gc/mod.rs).
-        let gc_config = GcConfig::from_env();
-
         let config = Self {
             server: ServerSettings { host, port, public_base_url, max_body_size_mb, rate_limit_rpm },
             storage: StorageConfig {
@@ -721,7 +390,6 @@ impl ServerConfig {
                 min_conversion_size,
                 max_conversion_size,
             },
-            gc: gc_config,
         };
         // M1 fix: Handle validation errors with clear error messages
         if let Err(e) = config.validate() {
@@ -766,40 +434,4 @@ pub fn check_public_key_permissions(path: &str) -> Option<String> {
     } else {
         None
     }
-}
-
-/// Validate GC configuration and return warning messages for misconfigurations.
-pub fn validate_gc_config(config: &ServerConfig) -> Vec<String> {
-    let mut warnings = Vec::new();
-    if config.gc.enabled {
-        if config.gc.bloom.expected_items == 0 {
-            warnings.push(
-                "GC is enabled but bloom.expected_items is 0. \
-                Set GC_BLOOM_EXPECTED_ITEMS to a reasonable estimate of total chunks.".to_string(),
-            );
-        }
-        if config.gc.grace.absolute_seconds == 0 && config.gc.grace.soft_cycles == 0 {
-            warnings.push(
-                "GC is enabled with no grace period protection. \
-                Set GC_GRACE_ABSOLUTE_SECONDS or GC_GRACE_SOFT_CYCLES to prevent \
-                premature deletion of recently uploaded blobs.".to_string(),
-            );
-        }
-        if config.gc.dry_run {
-            warnings.push(
-                "GC is enabled in dry-run mode. No blobs will actually be deleted. \
-                Set GC_DRY_RUN=false to enable actual deletion.".to_string(),
-            );
-        }
-        // C2 fix: Warn about local storage lease precision limitations
-        if config.storage.backend == "local" {
-            warnings.push(
-                "GC is enabled with local storage backend. Local storage lease coordination \
-                uses filesystem mtime for conditional operations, which is only safe for \
-                single-node deployments. For multi-node GC, use S3 storage backend which \
-                provides true atomic conditional operations via ETags.".to_string(),
-            );
-        }
-    }
-    warnings
 }
