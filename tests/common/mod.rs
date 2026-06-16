@@ -103,7 +103,6 @@ pub fn test_config_with_key(kp: &KeyPair) -> TestContext {
         },
         auth: auth_config,
         conversion: ConversionConfig::default(),
-        gc: xet_server::config::GcConfig::default(),
     };
 
     TestContext {
@@ -155,7 +154,6 @@ pub fn test_config_with_new_key() -> TestContext {
         },
         auth: auth_config,
         conversion: ConversionConfig::default(),
-        gc: xet_server::config::GcConfig::default(),
     };
 
     TestContext {
