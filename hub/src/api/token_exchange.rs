@@ -1,9 +1,9 @@
-use actix_web::{web, HttpResponse};
-use crate::auth::extract::{AuthUser, AuthRead, AuthWrite};
+use super::shared::can_access_repo;
+use crate::auth::extract::{AuthRead, AuthUser, AuthWrite};
 use crate::auth::token_store::TokenInfo;
 use crate::auth::xet_signer::XetSigner;
 use crate::metadata::{MetadataStore, RepoType};
-use super::shared::can_access_repo;
+use actix_web::{HttpResponse, web};
 use serde::{Deserialize, Serialize};
 
 /// Token exchange response
@@ -29,7 +29,10 @@ async fn do_exchange(
     cas_url: &str,
 ) -> HttpResponse {
     // Check repo exists
-    let repo = match metadata.get_repo(path_namespace, path_repo, repo_type).await {
+    let repo = match metadata
+        .get_repo(path_namespace, path_repo, repo_type)
+        .await
+    {
         Ok(r) => r,
         Err(e) => {
             return match e {
@@ -42,7 +45,7 @@ async fn do_exchange(
                 _ => HttpResponse::InternalServerError().json(serde_json::json!({
                     "error": e.to_string(),
                     "error_type": "InternalError"
-                }))
+                })),
             };
         }
     };
@@ -71,7 +74,7 @@ async fn do_exchange(
     let repo_id = format!("{}/{}", path_namespace, path_repo);
     let (xet_token, exp) = match xet_signer.sign(
         &info.user_id,
-        required_scope,  // Use requested scope, not info.scope
+        required_scope, // Use requested scope, not info.scope
         &repo_id,
         &repo_type.to_string(),
         &revision,
@@ -111,7 +114,8 @@ pub async fn exchange_model_read(
         &xet_signer,
         &metadata,
         &config.cas.base_url,
-    ).await
+    )
+    .await
 }
 
 pub async fn exchange_model_write(
@@ -132,7 +136,8 @@ pub async fn exchange_model_write(
         &xet_signer,
         &metadata,
         &config.cas.base_url,
-    ).await
+    )
+    .await
 }
 
 // Dataset endpoints
@@ -154,7 +159,8 @@ pub async fn exchange_dataset_read(
         &xet_signer,
         &metadata,
         &config.cas.base_url,
-    ).await
+    )
+    .await
 }
 
 pub async fn exchange_dataset_write(
@@ -175,7 +181,8 @@ pub async fn exchange_dataset_write(
         &xet_signer,
         &metadata,
         &config.cas.base_url,
-    ).await
+    )
+    .await
 }
 
 // Space endpoints
@@ -197,7 +204,8 @@ pub async fn exchange_space_read(
         &xet_signer,
         &metadata,
         &config.cas.base_url,
-    ).await
+    )
+    .await
 }
 
 pub async fn exchange_space_write(
@@ -218,16 +226,17 @@ pub async fn exchange_space_write(
         &xet_signer,
         &metadata,
         &config.cas.base_url,
-    ).await
+    )
+    .await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use actix_web::{test, App};
     use crate::auth::token_store::TokenStore;
-    use crate::metadata::SqliteMetadataStore;
     use crate::config::HubConfig;
+    use crate::metadata::SqliteMetadataStore;
+    use actix_web::{App, test};
     use ed25519_dalek::SigningKey;
     use rand::rngs::OsRng;
 
@@ -241,9 +250,8 @@ mod tests {
         let mut csprng = OsRng;
         let signing_key = SigningKey::generate(&mut csprng);
         let xet_signer = std::sync::Arc::new(XetSigner::new(signing_key, "test-key", 3600, 300));
-        let metadata: std::sync::Arc<dyn MetadataStore> = std::sync::Arc::new(
-            SqliteMetadataStore::in_memory().await.unwrap()
-        );
+        let metadata: std::sync::Arc<dyn MetadataStore> =
+            std::sync::Arc::new(SqliteMetadataStore::in_memory().await.unwrap());
         let config = HubConfig::default();
         (token_store, xet_signer, metadata, config)
     }
@@ -253,8 +261,14 @@ mod tests {
         let (token_store, xet_signer, metadata, config) = setup_test_env().await;
 
         // Create a token and repo
-        let token = token_store.create_token("testuser", "test-token", "read").await.unwrap();
-        metadata.create_repo("ns", "repo", RepoType::Model, false).await.unwrap();
+        let token = token_store
+            .create_token("testuser", "test-token", "read")
+            .await
+            .unwrap();
+        metadata
+            .create_repo("ns", "repo", RepoType::Model, false)
+            .await
+            .unwrap();
 
         let app = test::init_service(
             App::new()
@@ -262,8 +276,12 @@ mod tests {
                 .app_data(web::Data::new(xet_signer.clone()))
                 .app_data(web::Data::new(metadata.clone()))
                 .app_data(web::Data::new(config.clone()))
-                .route("/api/models/{namespace}/{repo}/read/{revision}", web::post().to(exchange_model_read))
-        ).await;
+                .route(
+                    "/api/models/{namespace}/{repo}/read/{revision}",
+                    web::post().to(exchange_model_read),
+                ),
+        )
+        .await;
 
         let req = test::TestRequest::post()
             .uri("/api/models/ns/repo/read/main")
@@ -283,8 +301,14 @@ mod tests {
         let (token_store, xet_signer, metadata, config) = setup_test_env().await;
 
         // Create a read-only token
-        let token = token_store.create_token("testuser", "test-token", "read").await.unwrap();
-        metadata.create_repo("ns", "repo", RepoType::Model, false).await.unwrap();
+        let token = token_store
+            .create_token("testuser", "test-token", "read")
+            .await
+            .unwrap();
+        metadata
+            .create_repo("ns", "repo", RepoType::Model, false)
+            .await
+            .unwrap();
 
         let app = test::init_service(
             App::new()
@@ -292,8 +316,12 @@ mod tests {
                 .app_data(web::Data::new(xet_signer.clone()))
                 .app_data(web::Data::new(metadata.clone()))
                 .app_data(web::Data::new(config.clone()))
-                .route("/api/models/{namespace}/{repo}/write/{revision}", web::post().to(exchange_model_write))
-        ).await;
+                .route(
+                    "/api/models/{namespace}/{repo}/write/{revision}",
+                    web::post().to(exchange_model_write),
+                ),
+        )
+        .await;
 
         let req = test::TestRequest::post()
             .uri("/api/models/ns/repo/write/main")
@@ -309,8 +337,14 @@ mod tests {
         let (token_store, xet_signer, metadata, config) = setup_test_env().await;
 
         // Create a write token
-        let token = token_store.create_token("testuser", "test-token", "write").await.unwrap();
-        metadata.create_repo("ns", "repo", RepoType::Model, false).await.unwrap();
+        let token = token_store
+            .create_token("testuser", "test-token", "write")
+            .await
+            .unwrap();
+        metadata
+            .create_repo("ns", "repo", RepoType::Model, false)
+            .await
+            .unwrap();
 
         let app = test::init_service(
             App::new()
@@ -318,8 +352,12 @@ mod tests {
                 .app_data(web::Data::new(xet_signer.clone()))
                 .app_data(web::Data::new(metadata.clone()))
                 .app_data(web::Data::new(config.clone()))
-                .route("/api/models/{namespace}/{repo}/write/{revision}", web::post().to(exchange_model_write))
-        ).await;
+                .route(
+                    "/api/models/{namespace}/{repo}/write/{revision}",
+                    web::post().to(exchange_model_write),
+                ),
+        )
+        .await;
 
         let req = test::TestRequest::post()
             .uri("/api/models/ns/repo/write/main")
@@ -333,15 +371,26 @@ mod tests {
     #[actix_web::test]
     async fn test_exchange_private_repo_denies_non_owner() {
         let (token_store, xet_signer, metadata, config) = setup_test_env().await;
-        let token = token_store.create_token("attacker", "t", "read").await.unwrap();
-        metadata.create_repo("owner", "repo", RepoType::Model, true).await.unwrap();
-        let app = test::init_service(App::new()
-            .app_data(web::Data::new(token_store.clone()))
-            .app_data(web::Data::new(xet_signer.clone()))
-            .app_data(web::Data::new(metadata.clone()))
-            .app_data(web::Data::new(config.clone()))
-            .route("/api/models/{namespace}/{repo}/read/{revision}", web::post().to(exchange_model_read))
-        ).await;
+        let token = token_store
+            .create_token("attacker", "t", "read")
+            .await
+            .unwrap();
+        metadata
+            .create_repo("owner", "repo", RepoType::Model, true)
+            .await
+            .unwrap();
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(token_store.clone()))
+                .app_data(web::Data::new(xet_signer.clone()))
+                .app_data(web::Data::new(metadata.clone()))
+                .app_data(web::Data::new(config.clone()))
+                .route(
+                    "/api/models/{namespace}/{repo}/read/{revision}",
+                    web::post().to(exchange_model_read),
+                ),
+        )
+        .await;
         let req = test::TestRequest::post()
             .uri("/api/models/owner/repo/read/main")
             .insert_header(("Authorization", format!("Bearer {}", token)))
@@ -354,7 +403,10 @@ mod tests {
     async fn test_exchange_repo_not_found() {
         let (token_store, xet_signer, metadata, config) = setup_test_env().await;
 
-        let token = token_store.create_token("testuser", "test-token", "read").await.unwrap();
+        let token = token_store
+            .create_token("testuser", "test-token", "read")
+            .await
+            .unwrap();
         // Don't create the repo
 
         let app = test::init_service(
@@ -363,8 +415,12 @@ mod tests {
                 .app_data(web::Data::new(xet_signer.clone()))
                 .app_data(web::Data::new(metadata.clone()))
                 .app_data(web::Data::new(config.clone()))
-                .route("/api/models/{namespace}/{repo}/read/{revision}", web::post().to(exchange_model_read))
-        ).await;
+                .route(
+                    "/api/models/{namespace}/{repo}/read/{revision}",
+                    web::post().to(exchange_model_read),
+                ),
+        )
+        .await;
 
         let req = test::TestRequest::post()
             .uri("/api/models/nonexistent/repo/read/main")
@@ -385,8 +441,12 @@ mod tests {
                 .app_data(web::Data::new(xet_signer.clone()))
                 .app_data(web::Data::new(metadata.clone()))
                 .app_data(web::Data::new(config.clone()))
-                .route("/api/models/{namespace}/{repo}/read/{revision}", web::post().to(exchange_model_read))
-        ).await;
+                .route(
+                    "/api/models/{namespace}/{repo}/read/{revision}",
+                    web::post().to(exchange_model_read),
+                ),
+        )
+        .await;
 
         let req = test::TestRequest::post()
             .uri("/api/models/ns/repo/read/main")

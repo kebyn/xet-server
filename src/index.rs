@@ -7,9 +7,9 @@
 //! The index is rebuilt from storage on each startup (stateless server design).
 //! This ensures consistency and avoids local state management complexity.
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
-use parking_lot::RwLock;
 
 /// Metadata index for managing file-to-shard and chunk-to-xorb mappings
 #[derive(Debug, Clone)]
@@ -108,7 +108,9 @@ impl MetadataIndex {
     ) -> Result<usize, String> {
         use crate::format::shard::MDBShardFile;
 
-        let shard_keys = storage.list_objects("shards/").await
+        let shard_keys = storage
+            .list_objects("shards/")
+            .await
             .map_err(|e| format!("Failed to list shards: {}", e))?;
 
         // I1 fix: Process shards concurrently with bounded parallelism
@@ -136,13 +138,12 @@ impl MetadataIndex {
                     match MDBShardFile::parse(&shard_data) {
                         Ok(shard) => {
                             // Extract file hashes and convert to strings
-                            let file_hashes: Vec<String> = shard.file_hashes()
-                                .iter()
-                                .map(|h| h.to_hex())
-                                .collect();
+                            let file_hashes: Vec<String> =
+                                shard.file_hashes().iter().map(|h| h.to_hex()).collect();
 
                             // Extract chunk mappings and convert to strings
-                            let chunk_mappings: Vec<(String, String, u32)> = shard.chunk_mappings()
+                            let chunk_mappings: Vec<(String, String, u32)> = shard
+                                .chunk_mappings()
                                 .iter()
                                 .map(|(chunk, xorb, idx)| (chunk.to_hex(), xorb.to_hex(), *idx))
                                 .collect();

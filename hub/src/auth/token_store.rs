@@ -3,8 +3,8 @@
 //! Migrated from rusqlite to sqlx for true async database operations.
 //! This prevents blocking the async runtime on database I/O.
 
-use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 use sqlx::FromRow;
+use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 
 /// Token information returned after validation
 #[derive(Debug, Clone)]
@@ -52,7 +52,9 @@ impl TokenStore {
         // This ensures tokens survive restarts even without explicit configuration.
         let hash_salt = match std::env::var("HUB_TOKEN_HASH_SALT") {
             Ok(salt) => {
-                tracing::info!("Using token hash salt from HUB_TOKEN_HASH_SALT environment variable");
+                tracing::info!(
+                    "Using token hash salt from HUB_TOKEN_HASH_SALT environment variable"
+                );
                 salt
             }
             Err(_) => {
@@ -72,12 +74,12 @@ impl TokenStore {
 
         let hash_salt = match std::env::var("HUB_TOKEN_HASH_SALT") {
             Ok(salt) => {
-                tracing::info!("Using token hash salt from HUB_TOKEN_HASH_SALT environment variable");
+                tracing::info!(
+                    "Using token hash salt from HUB_TOKEN_HASH_SALT environment variable"
+                );
                 salt
             }
-            Err(_) => {
-                Self::get_or_generate_hash_salt(&pool).await?
-            }
+            Err(_) => Self::get_or_generate_hash_salt(&pool).await?,
         };
 
         Ok(Self { pool, hash_salt })
@@ -109,7 +111,7 @@ impl TokenStore {
                 user_id TEXT PRIMARY KEY,
                 username TEXT NOT NULL UNIQUE,
                 created_at INTEGER NOT NULL
-            )"
+            )",
         )
         .execute(pool)
         .await?;
@@ -125,7 +127,7 @@ impl TokenStore {
                 revoked_at INTEGER,
                 FOREIGN KEY (user_id) REFERENCES users(user_id)
             );
-            CREATE INDEX IF NOT EXISTS idx_tokens_user ON tokens(user_id);"
+            CREATE INDEX IF NOT EXISTS idx_tokens_user ON tokens(user_id);",
         )
         .execute(pool)
         .await?;
@@ -137,7 +139,7 @@ impl TokenStore {
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL,
                 created_at INTEGER NOT NULL
-            )"
+            )",
         )
         .execute(pool)
         .await?;
@@ -154,12 +156,10 @@ impl TokenStore {
         const SALT_KEY: &str = "token_hash_salt";
 
         // Try to load existing salt from database
-        let result: Option<(String,)> = sqlx::query_as(
-            "SELECT value FROM _config WHERE key = ?1"
-        )
-        .bind(SALT_KEY)
-        .fetch_optional(pool)
-        .await?;
+        let result: Option<(String,)> = sqlx::query_as("SELECT value FROM _config WHERE key = ?1")
+            .bind(SALT_KEY)
+            .fetch_optional(pool)
+            .await?;
 
         if let Some((salt,)) = result {
             tracing::info!("Loaded persistent token hash salt from database");
@@ -176,27 +176,22 @@ impl TokenStore {
 
         // I2 fix: Use INSERT OR IGNORE to handle concurrent inserts atomically.
         // If another instance inserted first, this is a no-op.
-        sqlx::query(
-            "INSERT OR IGNORE INTO _config (key, value, created_at) VALUES (?1, ?2, ?3)"
-        )
-        .bind(SALT_KEY)
-        .bind(&new_salt)
-        .bind(now)
-        .execute(pool)
-        .await?;
+        sqlx::query("INSERT OR IGNORE INTO _config (key, value, created_at) VALUES (?1, ?2, ?3)")
+            .bind(SALT_KEY)
+            .bind(&new_salt)
+            .bind(now)
+            .execute(pool)
+            .await?;
 
         // I2 fix: Re-SELECT to get the actual persisted value (handles race condition).
         // If another instance inserted first, we use their salt for consistency.
-        let actual_salt: Option<(String,)> = sqlx::query_as(
-            "SELECT value FROM _config WHERE key = ?1"
-        )
-        .bind(SALT_KEY)
-        .fetch_optional(pool)
-        .await?;
+        let actual_salt: Option<(String,)> =
+            sqlx::query_as("SELECT value FROM _config WHERE key = ?1")
+                .bind(SALT_KEY)
+                .fetch_optional(pool)
+                .await?;
 
-        let salt = actual_salt
-            .map(|(s,)| s)
-            .unwrap_or(new_salt);
+        let salt = actual_salt.map(|(s,)| s).unwrap_or(new_salt);
 
         tracing::warn!(
             "Generated and persisted new token hash salt. \
@@ -222,7 +217,7 @@ impl TokenStore {
         let mut tx = self.pool.begin().await?;
 
         sqlx::query(
-            "INSERT OR IGNORE INTO users (user_id, username, created_at) VALUES (?1, ?2, ?3)"
+            "INSERT OR IGNORE INTO users (user_id, username, created_at) VALUES (?1, ?2, ?3)",
         )
         .bind(&user_id)
         .bind(username)
@@ -281,7 +276,7 @@ impl TokenStore {
         let result: Option<TokenRow> = sqlx::query_as(
             "SELECT u.user_id, u.username, t.name, t.scope, t.expires_at, t.revoked_at
              FROM tokens t JOIN users u ON t.user_id = u.user_id
-             WHERE t.token_hash = ?1"
+             WHERE t.token_hash = ?1",
         )
         .bind(&token_hash)
         .fetch_optional(&self.pool)
@@ -295,7 +290,7 @@ impl TokenStore {
                 let legacy_result: Option<TokenRow> = sqlx::query_as(
                     "SELECT u.user_id, u.username, t.name, t.scope, t.expires_at, t.revoked_at
                      FROM tokens t JOIN users u ON t.user_id = u.user_id
-                     WHERE t.token_hash = ?1"
+                     WHERE t.token_hash = ?1",
                 )
                 .bind(&legacy_hash)
                 .fetch_optional(&self.pool)
@@ -321,13 +316,13 @@ impl TokenStore {
                 // I4 fix: Transparently migrate legacy hash to HMAC hash
                 if needs_migration {
                     let legacy_hash = Self::legacy_hash_token(token);
-                    if let Err(e) = sqlx::query(
-                        "UPDATE tokens SET token_hash = ?1 WHERE token_hash = ?2"
-                    )
-                    .bind(&token_hash)
-                    .bind(&legacy_hash)
-                    .execute(&self.pool)
-                    .await {
+                    if let Err(e) =
+                        sqlx::query("UPDATE tokens SET token_hash = ?1 WHERE token_hash = ?2")
+                            .bind(&token_hash)
+                            .bind(&legacy_hash)
+                            .execute(&self.pool)
+                            .await
+                    {
                         tracing::warn!("Failed to migrate token hash (non-fatal): {}", e);
                     } else {
                         tracing::info!(user_id = %row.user_id, "Migrated token hash from SHA-256 to HMAC-SHA256");
@@ -351,7 +346,7 @@ impl TokenStore {
         let now = now_secs() as i64;
 
         let result = sqlx::query(
-            "UPDATE tokens SET revoked_at = ?1 WHERE token_hash = ?2 AND revoked_at IS NULL"
+            "UPDATE tokens SET revoked_at = ?1 WHERE token_hash = ?2 AND revoked_at IS NULL",
         )
         .bind(now)
         .bind(token_hash)
@@ -362,10 +357,13 @@ impl TokenStore {
     }
 
     /// Get all tokens for a user (without returning the actual tokens, just metadata)
-    pub async fn list_tokens_for_user(&self, user_id: &str) -> Result<Vec<TokenMetadata>, sqlx::Error> {
+    pub async fn list_tokens_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<TokenMetadata>, sqlx::Error> {
         let rows = sqlx::query_as::<_, TokenMetadataRow>(
             "SELECT name, scope, created_at, expires_at, revoked_at
-             FROM tokens WHERE user_id = ?1 ORDER BY created_at DESC"
+             FROM tokens WHERE user_id = ?1 ORDER BY created_at DESC",
         )
         .bind(user_id)
         .fetch_all(&self.pool)
@@ -388,8 +386,8 @@ impl TokenStore {
     /// against a leaked DB; an auto-generated salt persisted in the same DB does not.
     /// M2 fix: Uses HMAC instead of simple concatenation for cryptographic soundness.
     fn hash_token(&self, token: &str) -> String {
-        use sha2::Sha256;
         use hmac::{Hmac, Mac};
+        use sha2::Sha256;
         type HmacSha256 = Hmac<Sha256>;
 
         let mut mac = HmacSha256::new_from_slice(self.hash_salt.as_bytes())
@@ -401,14 +399,18 @@ impl TokenStore {
     /// I4 fix: Legacy SHA-256 hash for backward compatibility during migration.
     /// Tokens created before the HMAC migration used plain SHA-256 without salt.
     fn legacy_hash_token(token: &str) -> String {
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(token.as_bytes());
         hex::encode(hasher.finalize())
     }
 
     /// Set expiration on a token (for testing)
-    pub async fn set_token_expiration(&self, token: &str, expires_at: u64) -> Result<(), sqlx::Error> {
+    pub async fn set_token_expiration(
+        &self,
+        token: &str,
+        expires_at: u64,
+    ) -> Result<(), sqlx::Error> {
         let token_hash = self.hash_token(token);
 
         sqlx::query("UPDATE tokens SET expires_at = ?1 WHERE token_hash = ?2")
@@ -461,14 +463,20 @@ mod tests {
         assert_eq!(hash1, hash2, "Same token should produce same hash");
 
         let hash3 = store.hash_token("hf_test456");
-        assert_ne!(hash1, hash3, "Different tokens should produce different hashes");
+        assert_ne!(
+            hash1, hash3,
+            "Different tokens should produce different hashes"
+        );
     }
 
     #[tokio::test]
     async fn test_create_and_validate_token() {
         let store = TokenStore::in_memory().await.unwrap();
 
-        let token = store.create_token("testuser", "test-token", "read").await.unwrap();
+        let token = store
+            .create_token("testuser", "test-token", "read")
+            .await
+            .unwrap();
         assert!(token.starts_with("hf_"), "Token should start with hf_");
 
         let info = store.validate_token(&token).await.unwrap();
@@ -492,7 +500,10 @@ mod tests {
     async fn test_expired_token() {
         let store = TokenStore::in_memory().await.unwrap();
 
-        let token = store.create_token("testuser", "test-token", "read").await.unwrap();
+        let token = store
+            .create_token("testuser", "test-token", "read")
+            .await
+            .unwrap();
 
         // Set expiration in the past
         let past_time = now_secs() - 3600; // 1 hour ago
@@ -506,7 +517,10 @@ mod tests {
     async fn test_revoked_token() {
         let store = TokenStore::in_memory().await.unwrap();
 
-        let token = store.create_token("testuser", "test-token", "read").await.unwrap();
+        let token = store
+            .create_token("testuser", "test-token", "read")
+            .await
+            .unwrap();
 
         // Verify token works
         let info = store.validate_token(&token).await.unwrap();
@@ -514,7 +528,10 @@ mod tests {
 
         // Revoke the token
         let revoked = store.revoke_token(&token).await.unwrap();
-        assert!(revoked, "revoke_token should return true for existing token");
+        assert!(
+            revoked,
+            "revoke_token should return true for existing token"
+        );
 
         // Verify token no longer works
         let info = store.validate_token(&token).await.unwrap();
@@ -525,7 +542,10 @@ mod tests {
     async fn test_write_scope() {
         let store = TokenStore::in_memory().await.unwrap();
 
-        let token = store.create_token("testuser", "write-token", "write").await.unwrap();
+        let token = store
+            .create_token("testuser", "write-token", "write")
+            .await
+            .unwrap();
 
         let info = store.validate_token(&token).await.unwrap().unwrap();
         assert_eq!(info.scope, "write");

@@ -1,7 +1,7 @@
-use std::io::{Read, Result, Write, Seek, SeekFrom, Cursor};
-use std::fs::File;
-use std::path::Path;
 use crate::error::Result as XetResult;
+use std::fs::File;
+use std::io::{Cursor, Read, Result, Seek, SeekFrom, Write};
+use std::path::Path;
 
 /// Shard file header (48 bytes)
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,8 +15,8 @@ impl Default for MDBShardFileHeader {
     fn default() -> Self {
         Self {
             tag: [
-                72, 70, 82, 101, 112, 111, 77, 101, 116, 97, 68, 97, 116, 97, 0, 85,
-                105, 103, 69, 106, 123, 129, 87, 131, 165, 189, 217, 92, 205, 209, 74, 169,
+                72, 70, 82, 101, 112, 111, 77, 101, 116, 97, 68, 97, 116, 97, 0, 85, 105, 103, 69,
+                106, 123, 129, 87, 131, 165, 189, 217, 92, 205, 209, 74, 169,
             ],
             version: 2,
             footer_size: 208,
@@ -186,7 +186,11 @@ impl FileDataSequenceHeader {
         let mut unused = [0u8; 8];
         reader.read_exact(&mut unused)?;
 
-        Ok(Self { file_hash, file_flags, num_entries })
+        Ok(Self {
+            file_hash,
+            file_flags,
+            num_entries,
+        })
     }
 }
 
@@ -353,17 +357,19 @@ impl MDBShardFile {
 
         // Verify footer offset
         if header.footer_size != 208 {
-            return Err(crate::error::XetError::ParseError(
-                format!("Invalid footer size: expected 208, got {}", header.footer_size),
-            ));
+            return Err(crate::error::XetError::ParseError(format!(
+                "Invalid footer size: expected 208, got {}",
+                header.footer_size
+            )));
         }
 
         // Parse footer (at end of file)
         // Validate minimum size before subtraction to prevent panic
         if data.len() < 208 {
-            return Err(crate::error::XetError::ParseError(
-                format!("Shard data too small: {} bytes, minimum 208 bytes required", data.len())
-            ));
+            return Err(crate::error::XetError::ParseError(format!(
+                "Shard data too small: {} bytes, minimum 208 bytes required",
+                data.len()
+            )));
         }
         let footer_start = data.len() - 208;
         let mut footer_cursor = Cursor::new(&data[footer_start..]);
@@ -413,7 +419,9 @@ impl MDBShardFile {
                                          expected {} entries, got {} (error: {}). \
                                          Shard data may be incomplete.",
                                         file_header.file_hash.to_hex(),
-                                        file_header.num_entries, parsed_entries, e
+                                        file_header.num_entries,
+                                        parsed_entries,
+                                        e
                                     );
                                     break;
                                 }
@@ -477,7 +485,9 @@ impl MDBShardFile {
                                          expected {} entries, got {} (error: {}). \
                                          Shard data may be incomplete.",
                                         xorb_hash.to_hex(),
-                                        num_chunks, parsed_chunks, e
+                                        num_chunks,
+                                        parsed_chunks,
+                                        e
                                     );
                                     break;
                                 }
@@ -516,30 +526,38 @@ impl MDBShardFile {
     /// For full parsing with all data sections populated, use `parse()` instead.
     pub fn parse_header_footer_from_file(path: &Path) -> XetResult<Self> {
         let mut file = File::open(path).map_err(|e| {
-            crate::error::XetError::IoError(std::io::Error::other(
-                format!("Failed to open shard file {}: {}", path.display(), e),
-            ))
+            crate::error::XetError::IoError(std::io::Error::other(format!(
+                "Failed to open shard file {}: {}",
+                path.display(),
+                e
+            )))
         })?;
 
-        let file_len = file.metadata().map_err(|e| {
-            crate::error::XetError::IoError(std::io::Error::other(
-                format!("Failed to get file metadata: {}", e),
-            ))
-        })?.len();
+        let file_len = file
+            .metadata()
+            .map_err(|e| {
+                crate::error::XetError::IoError(std::io::Error::other(format!(
+                    "Failed to get file metadata: {}",
+                    e
+                )))
+            })?
+            .len();
 
         if file_len < 256 {
-            return Err(crate::error::XetError::ParseError(
-                format!("Shard file too small: {} bytes, minimum 256 bytes required (48-byte header + 208-byte footer)", file_len)
-            ));
+            return Err(crate::error::XetError::ParseError(format!(
+                "Shard file too small: {} bytes, minimum 256 bytes required (48-byte header + 208-byte footer)",
+                file_len
+            )));
         }
 
         // Read header from start of file
         // Read enough bytes for the header (48 bytes: 32 tag + 8 version + 8 footer_size)
         let mut header_buf = [0u8; 48];
         file.read_exact(&mut header_buf).map_err(|e| {
-            crate::error::XetError::IoError(std::io::Error::other(
-                format!("Failed to read shard header: {}", e),
-            ))
+            crate::error::XetError::IoError(std::io::Error::other(format!(
+                "Failed to read shard header: {}",
+                e
+            )))
         })?;
         let mut header_cursor = Cursor::new(&header_buf[..]);
         let header = MDBShardFileHeader::deserialize(&mut header_cursor)?;
@@ -554,22 +572,25 @@ impl MDBShardFile {
 
         // Verify footer size
         if header.footer_size != 208 {
-            return Err(crate::error::XetError::ParseError(
-                format!("Invalid footer size: expected 208, got {}", header.footer_size),
-            ));
+            return Err(crate::error::XetError::ParseError(format!(
+                "Invalid footer size: expected 208, got {}",
+                header.footer_size
+            )));
         }
 
         // Read footer from end of file
         file.seek(SeekFrom::End(-208)).map_err(|e| {
-            crate::error::XetError::IoError(std::io::Error::other(
-                format!("Failed to seek to shard footer: {}", e),
-            ))
+            crate::error::XetError::IoError(std::io::Error::other(format!(
+                "Failed to seek to shard footer: {}",
+                e
+            )))
         })?;
         let mut footer_buf = [0u8; 208];
         file.read_exact(&mut footer_buf).map_err(|e| {
-            crate::error::XetError::IoError(std::io::Error::other(
-                format!("Failed to read shard footer: {}", e),
-            ))
+            crate::error::XetError::IoError(std::io::Error::other(format!(
+                "Failed to read shard footer: {}",
+                e
+            )))
         })?;
         let mut footer_cursor = Cursor::new(&footer_buf[..]);
         let footer = MDBShardFileFooter::deserialize(&mut footer_cursor)?;
@@ -600,20 +621,24 @@ impl MDBShardFile {
     pub fn compute_hash_from_file(path: &Path) -> XetResult<String> {
         use crate::util::StreamingHasher;
         let mut file = File::open(path).map_err(|e| {
-            crate::error::XetError::IoError(std::io::Error::other(
-                format!("Failed to open shard file for hashing: {}", e),
-            ))
+            crate::error::XetError::IoError(std::io::Error::other(format!(
+                "Failed to open shard file for hashing: {}",
+                e
+            )))
         })?;
 
         let mut hasher = StreamingHasher::new();
         let mut buf = [0u8; 64 * 1024];
         loop {
             let n = file.read(&mut buf).map_err(|e| {
-                crate::error::XetError::IoError(std::io::Error::other(
-                    format!("Failed to read shard file for hashing: {}", e),
-                ))
+                crate::error::XetError::IoError(std::io::Error::other(format!(
+                    "Failed to read shard file for hashing: {}",
+                    e
+                )))
             })?;
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             hasher.update(&buf[..n]);
         }
         Ok(hasher.finalize().to_hex())

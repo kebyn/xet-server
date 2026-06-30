@@ -12,13 +12,13 @@ use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 use xet_server::config::ConversionConfig;
-use xet_server::conversion::{ConvertingOids, ConversionError, ConversionPipeline};
+use xet_server::conversion::{ConversionError, ConversionPipeline, ConvertingOids};
 use xet_server::format::compression;
 use xet_server::format::shard::MDBShardFile;
 use xet_server::format::xorb::{XorbChunkHeader, XorbObjectInfoV1};
 use xet_server::index::MetadataIndex;
-use xet_server::storage::local::LocalStorage;
 use xet_server::storage::StorageBackend;
+use xet_server::storage::local::LocalStorage;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -27,8 +27,12 @@ use xet_server::storage::StorageBackend;
 /// Create a test environment: storage backed by `tempdir`, an empty index, and
 /// the default conversion config. The `TempDir` is returned so the caller can
 /// keep it alive for the duration of the test.
-fn setup_test_env(
-) -> (Arc<Box<dyn StorageBackend>>, Arc<MetadataIndex>, ConversionConfig, TempDir) {
+fn setup_test_env() -> (
+    Arc<Box<dyn StorageBackend>>,
+    Arc<MetadataIndex>,
+    ConversionConfig,
+    TempDir,
+) {
     let tempdir = tempfile::tempdir().unwrap();
     let storage: Box<dyn StorageBackend> =
         Box::new(LocalStorage::new(tempdir.path().to_str().unwrap()).unwrap());
@@ -59,10 +63,7 @@ fn make_test_data(seed: u64, size: usize) -> Vec<u8> {
 }
 
 /// Upload `data` as a raw LFS blob and return its SHA-256 OID.
-async fn upload_raw_blob(
-    storage: &Arc<Box<dyn StorageBackend>>,
-    data: &[u8],
-) -> String {
+async fn upload_raw_blob(storage: &Arc<Box<dyn StorageBackend>>, data: &[u8]) -> String {
     let oid = sha256_hex(data);
     let key = format!("lfs/objects/{}", oid);
     storage.put(&key, Bytes::from(data.to_vec())).await.unwrap();
@@ -75,15 +76,10 @@ macro_rules! assert_conversion_err {
     ($result:expr, $pattern:pat => $body:block) => {
         match $result {
             Ok(_) => panic!("expected conversion error, got Ok"),
-            Err(e) => {
-                match e {
-                    $pattern => $body,
-                    other => panic!(
-                        "unexpected ConversionError variant: {}",
-                        other
-                    ),
-                }
-            }
+            Err(e) => match e {
+                $pattern => $body,
+                other => panic!("unexpected ConversionError variant: {}", other),
+            },
         }
     };
 }
@@ -223,14 +219,23 @@ async fn test_convert_small_file() {
     assert_eq!(result.raw_size, original_size);
 
     // Xorb and shard exist in storage.
-    let xorb_exists = storage.exists(&format!("xorbs/{}", result.xorb_hash)).await.unwrap();
+    let xorb_exists = storage
+        .exists(&format!("xorbs/{}", result.xorb_hash))
+        .await
+        .unwrap();
     assert!(xorb_exists, "xorb should exist in storage");
 
-    let shard_exists = storage.exists(&format!("shards/{}", result.shard_hash)).await.unwrap();
+    let shard_exists = storage
+        .exists(&format!("shards/{}", result.shard_hash))
+        .await
+        .unwrap();
     assert!(shard_exists, "shard should exist in storage");
 
     // Raw blob was deleted (default config: delete_raw_after_conversion = true).
-    let raw_exists = storage.exists(&format!("lfs/objects/{}", oid)).await.unwrap();
+    let raw_exists = storage
+        .exists(&format!("lfs/objects/{}", oid))
+        .await
+        .unwrap();
     assert!(!raw_exists, "raw blob should be deleted after conversion");
 
     // Index was updated.
@@ -333,7 +338,10 @@ async fn test_rebuild_from_storage() {
 
     // Create a fresh, empty index and rebuild it from storage.
     let fresh_index = MetadataIndex::new();
-    let count = fresh_index.rebuild_from_storage(storage.clone()).await.unwrap();
+    let count = fresh_index
+        .rebuild_from_storage(storage.clone())
+        .await
+        .unwrap();
     assert!(count >= 1, "should have rebuilt at least 1 shard");
 
     // The rebuilt index should know about the file.

@@ -1,12 +1,12 @@
 //! Tests for configuration module
 
-use xet_server::config::{ServerConfig, StorageConfig, AuthConfig};
+use xet_server::config::{AuthConfig, ServerConfig, StorageConfig};
 
 #[test]
 fn test_config_default() {
     let config = ServerConfig::default();
     assert_eq!(config.server.host, "127.0.0.1");
-    assert_eq!(config.server.port, 8081);  // Changed from 8080 to avoid conflict with Hub API
+    assert_eq!(config.server.port, 8081); // Changed from 8080 to avoid conflict with Hub API
     assert_eq!(config.storage.backend, "local");
     assert!(!config.auth.trusted_kids.is_empty());
     assert!(!config.auth.public_key_path.is_empty());
@@ -52,7 +52,10 @@ fn test_config_auth_settings() {
 #[test]
 fn test_config_rate_limit_default() {
     let config = ServerConfig::default();
-    assert_eq!(config.server.rate_limit_rpm, 60, "Default CAS rate limit should be 60 RPM");
+    assert_eq!(
+        config.server.rate_limit_rpm, 60,
+        "Default CAS rate limit should be 60 RPM"
+    );
 }
 
 #[test]
@@ -75,7 +78,10 @@ fn test_check_public_key_permissions_insecure() {
     fs::set_permissions(path, fs::Permissions::from_mode(0o666)).unwrap();
 
     let result = xet_server::config::check_public_key_permissions(path);
-    assert!(result.is_some(), "World-writable key file should produce a warning");
+    assert!(
+        result.is_some(),
+        "World-writable key file should produce a warning"
+    );
     assert!(result.unwrap().contains("world-writable"));
 }
 
@@ -90,20 +96,28 @@ fn test_check_public_key_permissions_secure() {
     fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
 
     let result = xet_server::config::check_public_key_permissions(path);
-    assert!(result.is_none(), "Secure key file should not produce a warning");
+    assert!(
+        result.is_none(),
+        "Secure key file should not produce a warning"
+    );
 }
 
 #[test]
 fn test_cas_default_host_is_localhost() {
     let config = ServerConfig::default();
-    assert_eq!(config.server.host, "127.0.0.1", "CAS should default to localhost for dev safety");
+    assert_eq!(
+        config.server.host, "127.0.0.1",
+        "CAS should default to localhost for dev safety"
+    );
 }
 
 #[test]
 fn test_min_conversion_size_default_64kb() {
     let config = ServerConfig::default();
-    assert_eq!(config.conversion.min_conversion_size, 65536,
-        "Default min_conversion_size should be 64KB (65536 bytes)");
+    assert_eq!(
+        config.conversion.min_conversion_size, 65536,
+        "Default min_conversion_size should be 64KB (65536 bytes)"
+    );
 }
 
 // GC config tests removed — GC module was removed from the project.

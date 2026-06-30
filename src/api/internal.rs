@@ -3,12 +3,12 @@
 //! These endpoints are used by HuggingFace Hub to query blob storage state
 //! and check blob accessibility. They require the "internal" scope.
 
-use actix_web::{web, HttpResponse};
+use actix_web::{HttpResponse, web};
 use serde::Serialize;
 use tracing::{info, warn};
 
 use crate::api::auth::AuthVerifier;
-use crate::api::guard::{require_auth, AuthNeed};
+use crate::api::guard::{AuthNeed, require_auth};
 use crate::index::MetadataIndex;
 use crate::metrics::GLOBAL_METRICS;
 use crate::storage::StorageBackend;

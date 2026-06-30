@@ -9,7 +9,7 @@
 //! Uploads stream data from the HTTP payload to a temp file with incremental
 //! BLAKE3 hashing, bounding memory to O(chunk_size) regardless of file size.
 
-use actix_web::{web, HttpResponse};
+use actix_web::{HttpResponse, web};
 use futures_util::{Stream, StreamExt};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -17,7 +17,7 @@ use std::task::{Context, Poll};
 use tracing::{debug, error, info};
 
 use crate::api::auth::AuthVerifier;
-use crate::api::guard::{require_auth, AuthNeed};
+use crate::api::guard::{AuthNeed, require_auth};
 use crate::api::reconstruction::fetch_and_parse_shard;
 use crate::config::{ConversionConfig, ServerConfig};
 use crate::conversion::ConvertingOids;
@@ -107,26 +107,31 @@ pub async fn upload_lfs_object(
     // C6 fix: Verify proxy token is bound to this specific OID and operation
     if claims.token_type == "proxy" {
         if let Some(ref bound_oid) = claims.oid
-            && bound_oid != &oid {
-                GLOBAL_METRICS.record_request(403);
-                GLOBAL_METRICS.record_latency(start);
-                return HttpResponse::Forbidden().json(serde_json::json!({
-                    "error": "Proxy token is bound to a different OID"
-                }));
-            }
+            && bound_oid != &oid
+        {
+            GLOBAL_METRICS.record_request(403);
+            GLOBAL_METRICS.record_latency(start);
+            return HttpResponse::Forbidden().json(serde_json::json!({
+                "error": "Proxy token is bound to a different OID"
+            }));
+        }
         if let Some(ref bound_op) = claims.operation
-            && bound_op != "upload" {
-                GLOBAL_METRICS.record_request(403);
-                GLOBAL_METRICS.record_latency(start);
-                return HttpResponse::Forbidden().json(serde_json::json!({
-                    "error": "Proxy token is not authorized for upload"
-                }));
-            }
+            && bound_op != "upload"
+        {
+            GLOBAL_METRICS.record_request(403);
+            GLOBAL_METRICS.record_latency(start);
+            return HttpResponse::Forbidden().json(serde_json::json!({
+                "error": "Proxy token is not authorized for upload"
+            }));
+        }
     }
 
     // M7 fix: Use a more reasonable pre-check threshold (see xorb.rs for rationale).
     let temp_dir = config.storage.resolve_upload_temp_dir();
-    let check_bytes = std::cmp::min(config.server.max_body_size_bytes() as u64, 100 * 1024 * 1024);
+    let check_bytes = std::cmp::min(
+        config.server.max_body_size_bytes() as u64,
+        100 * 1024 * 1024,
+    );
     if let Err(e) = check_disk_space(&temp_dir, check_bytes) {
         error!("Insufficient disk space: {}", e);
         GLOBAL_METRICS.record_request(507);
@@ -315,21 +320,23 @@ pub async fn download_lfs_object(
     // C6 fix: Verify proxy token is bound to this specific OID and operation
     if claims.token_type == "proxy" {
         if let Some(ref bound_oid) = claims.oid
-            && bound_oid != &oid {
-                GLOBAL_METRICS.record_request(403);
-                GLOBAL_METRICS.record_latency(start);
-                return HttpResponse::Forbidden().json(serde_json::json!({
-                    "error": "Proxy token is bound to a different OID"
-                }));
-            }
+            && bound_oid != &oid
+        {
+            GLOBAL_METRICS.record_request(403);
+            GLOBAL_METRICS.record_latency(start);
+            return HttpResponse::Forbidden().json(serde_json::json!({
+                "error": "Proxy token is bound to a different OID"
+            }));
+        }
         if let Some(ref bound_op) = claims.operation
-            && bound_op != "download" {
-                GLOBAL_METRICS.record_request(403);
-                GLOBAL_METRICS.record_latency(start);
-                return HttpResponse::Forbidden().json(serde_json::json!({
-                    "error": "Proxy token is not authorized for download"
-                }));
-            }
+            && bound_op != "download"
+        {
+            GLOBAL_METRICS.record_request(403);
+            GLOBAL_METRICS.record_latency(start);
+            return HttpResponse::Forbidden().json(serde_json::json!({
+                "error": "Proxy token is not authorized for download"
+            }));
+        }
     }
 
     // STATELESS: Check MetadataIndex for xet data
@@ -369,16 +376,28 @@ pub async fn download_lfs_object(
                             self.converting.release(&self.oid);
                         }
                     }
-                    let _guard = OidGuard { converting: converting_clone.get_ref().clone(), oid: oid_clone.clone() };
+                    let _guard = OidGuard {
+                        converting: converting_clone.get_ref().clone(),
+                        oid: oid_clone.clone(),
+                    };
 
                     match pipeline.convert(&oid_clone).await {
                         Ok(result) => {
-                            tracing::info!("Lazy converted {}: {} chunks, {} deduped, {} → {} bytes",
-                                oid_clone, result.num_chunks, result.num_deduped_chunks,
-                                result.raw_size, result.xorb_size);
+                            tracing::info!(
+                                "Lazy converted {}: {} chunks, {} deduped, {} → {} bytes",
+                                oid_clone,
+                                result.num_chunks,
+                                result.num_deduped_chunks,
+                                result.raw_size,
+                                result.xorb_size
+                            );
                         }
                         Err(e) => {
-                            tracing::warn!("Lazy conversion failed for {}: {} (raw blob preserved)", oid_clone, e);
+                            tracing::warn!(
+                                "Lazy conversion failed for {}: {} (raw blob preserved)",
+                                oid_clone,
+                                e
+                            );
                         }
                     }
                     // _guard.drop() releases the OID lock, even on panic
@@ -431,7 +450,11 @@ async fn serve_raw_blob(
             let file = match tokio::fs::File::open(&path).await {
                 Ok(f) => f,
                 Err(e) => {
-                    error!("Failed to open file for streaming {}: {}", path.display(), e);
+                    error!(
+                        "Failed to open file for streaming {}: {}",
+                        path.display(),
+                        e
+                    );
                     GLOBAL_METRICS.record_request(500);
                     GLOBAL_METRICS.record_error();
                     GLOBAL_METRICS.record_latency(start);
@@ -468,7 +491,10 @@ async fn serve_raw_blob(
                 let hashing_stream = IntegrityVerifyingStream::new(base_stream, oid_owned);
                 let body = actix_web::body::SizedStream::new(file_size, hashing_stream);
 
-                info!("Streaming LFS object {} ({} bytes) with integrity verification", oid, file_size);
+                info!(
+                    "Streaming LFS object {} ({} bytes) with integrity verification",
+                    oid, file_size
+                );
                 GLOBAL_METRICS.record_request(200);
                 GLOBAL_METRICS.record_storage_operation();
                 GLOBAL_METRICS.record_download_bytes(file_size);
@@ -672,7 +698,10 @@ async fn serve_raw_blob_inmemory(
         if computed_hash != oid {
             error!(
                 "Integrity check FAILED for {}: computed {} != expected {} ({} bytes)",
-                oid, computed_hash, oid, object_data.len()
+                oid,
+                computed_hash,
+                oid,
+                object_data.len()
             );
             GLOBAL_METRICS.record_request(500);
             GLOBAL_METRICS.record_error();
@@ -682,10 +711,18 @@ async fn serve_raw_blob_inmemory(
             }));
         }
 
-        info!("Integrity check passed for {} ({} bytes)", oid, object_data.len());
+        info!(
+            "Integrity check passed for {} ({} bytes)",
+            oid,
+            object_data.len()
+        );
     }
 
-    info!("Downloaded LFS object {} ({} bytes)", oid, object_data.len());
+    info!(
+        "Downloaded LFS object {} ({} bytes)",
+        oid,
+        object_data.len()
+    );
 
     GLOBAL_METRICS.record_request(200);
     GLOBAL_METRICS.record_download_bytes(object_data.len() as u64);
@@ -738,13 +775,11 @@ async fn reconstruct_from_xet(
     let metrics_stream = MetricsRecordingStream::new(stream, start);
 
     // Map stream errors to HttpResponse
-    let mapped_stream = metrics_stream.map(|result| {
-        match result {
-            Ok(bytes) => Ok(bytes),
-            Err(e) => {
-                error!("Reconstruction stream error: {}", e);
-                Err(actix_web::Error::from(std::io::Error::other(e)))
-            }
+    let mapped_stream = metrics_stream.map(|result| match result {
+        Ok(bytes) => Ok(bytes),
+        Err(e) => {
+            error!("Reconstruction stream error: {}", e);
+            Err(actix_web::Error::from(std::io::Error::other(e)))
         }
     });
 
@@ -1068,7 +1103,7 @@ mod tests {
 
     #[test]
     fn test_extract_chunk_verified_detects_corruption() {
-        use crate::format::compression::{compress, CompressionScheme};
+        use crate::format::compression::{CompressionScheme, compress};
         use crate::hash::compute_data_hash;
 
         let raw = b"some chunk payload data for verification".to_vec();

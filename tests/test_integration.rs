@@ -1,4 +1,4 @@
-use xet_server::chunking::{Chunker, ChunkConfig};
+use xet_server::chunking::{ChunkConfig, Chunker};
 use xet_server::hash::{compute_data_hash, file_hash, xorb_hash};
 use xet_server::types::MerkleHash;
 
@@ -45,7 +45,9 @@ fn test_deduplication_scenario() {
     // Two files share a common prefix (realistic dedup scenario)
     // When files have identical prefixes, CDC should find matching chunks
     // Use large enough data to trigger multiple chunks (need > 128KB max chunk size)
-    let common_part = b"This is common content that is shared across multiple files for deduplication testing. ".repeat(2000);
+    let common_part =
+        b"This is common content that is shared across multiple files for deduplication testing. "
+            .repeat(2000);
     let suffix1 = b"Unique suffix for file 1 with extra data.";
     let suffix2 = b"Different suffix for file 2 with different data.";
 
@@ -60,7 +62,12 @@ fn test_deduplication_scenario() {
     let chunks2 = chunker2.chunk_data(&file2);
 
     // Files should produce multiple chunks (file is ~180KB, max chunk is 128KB)
-    assert!(chunks1.len() > 1, "Should produce multiple chunks, got {} chunks for {} bytes", chunks1.len(), file1.len());
+    assert!(
+        chunks1.len() > 1,
+        "Should produce multiple chunks, got {} chunks for {} bytes",
+        chunks1.len(),
+        file1.len()
+    );
 
     // Compute chunk hashes
     let hashes1: Vec<MerkleHash> = chunks1
@@ -75,10 +82,7 @@ fn test_deduplication_scenario() {
 
     // Files should share some chunk hashes (dedup opportunity)
     // Since they share a common prefix, all chunks before the last one should match
-    let common_count: usize = hashes1
-        .iter()
-        .filter(|h| hashes2.contains(h))
-        .count();
+    let common_count: usize = hashes1.iter().filter(|h| hashes2.contains(h)).count();
 
     assert!(common_count > 0, "Files should share some chunks for dedup");
 }

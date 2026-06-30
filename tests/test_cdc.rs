@@ -1,4 +1,4 @@
-use xet_server::chunking::{Chunker, ChunkConfig};
+use xet_server::chunking::{ChunkConfig, Chunker};
 
 #[test]
 fn test_chunker_basic() {

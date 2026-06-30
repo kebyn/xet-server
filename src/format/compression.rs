@@ -1,5 +1,5 @@
+use crate::error::{Result, XetError};
 use lz4_flex::{compress_prepend_size, decompress_size_prepended};
-use crate::error::{XetError, Result};
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,7 +17,10 @@ impl TryFrom<u8> for CompressionScheme {
             0 => Ok(CompressionScheme::None),
             1 => Ok(CompressionScheme::LZ4),
             2 => Ok(CompressionScheme::ByteGrouping4LZ4),
-            _ => Err(XetError::ParseError(format!("Invalid compression scheme: {}", value))),
+            _ => Err(XetError::ParseError(format!(
+                "Invalid compression scheme: {}",
+                value
+            ))),
         }
     }
 }
@@ -84,7 +87,9 @@ fn bg4_split(data: &[u8]) -> Vec<u8> {
 fn bg4_regroup(data: &[u8], original_len: usize) -> Result<Vec<u8>> {
     if original_len == 0 {
         if !data.is_empty() {
-            return Err(XetError::ParseError("BG4 regroup: expected empty data".into()));
+            return Err(XetError::ParseError(
+                "BG4 regroup: expected empty data".into(),
+            ));
         }
         return Ok(Vec::new());
     }
@@ -177,7 +182,9 @@ pub fn decompress(scheme: CompressionScheme, data: &[u8], original_size: usize) 
         CompressionScheme::None => {
             if data.len() != original_size {
                 return Err(XetError::ParseError(format!(
-                    "Uncompressed data size {} != expected {}", data.len(), original_size
+                    "Uncompressed data size {} != expected {}",
+                    data.len(),
+                    original_size
                 )));
             }
             Ok(data.to_vec())
@@ -188,15 +195,18 @@ pub fn decompress(scheme: CompressionScheme, data: &[u8], original_size: usize) 
                 .map_err(|e| XetError::ParseError(format!("LZ4 decompression failed: {}", e)))?;
             if out.len() != original_size {
                 return Err(XetError::ParseError(format!(
-                    "LZ4 output size {} != expected {}", out.len(), original_size
+                    "LZ4 output size {} != expected {}",
+                    out.len(),
+                    original_size
                 )));
             }
             Ok(out)
         }
         CompressionScheme::ByteGrouping4LZ4 => {
             check_lz4_prefix(data, original_size)?;
-            let decompressed = decompress_size_prepended(data)
-                .map_err(|e| XetError::ParseError(format!("BG4-LZ4 decompression failed: {}", e)))?;
+            let decompressed = decompress_size_prepended(data).map_err(|e| {
+                XetError::ParseError(format!("BG4-LZ4 decompression failed: {}", e))
+            })?;
             bg4_regroup(&decompressed, original_size)
         }
     }
@@ -345,19 +355,27 @@ mod tests {
     fn test_bg4lz4_compress_decompress() {
         let original = b"Test data for BG4-LZ4 compression testing";
         let compressed = compress(CompressionScheme::ByteGrouping4LZ4, original).unwrap();
-        let decompressed = decompress(CompressionScheme::ByteGrouping4LZ4, &compressed, original.len()).unwrap();
+        let decompressed = decompress(
+            CompressionScheme::ByteGrouping4LZ4,
+            &compressed,
+            original.len(),
+        )
+        .unwrap();
         assert_eq!(decompressed, original);
     }
 
     #[test]
     fn test_bg4lz4_numerical_data() {
         // BG4 should work well with numerical data
-        let original: Vec<u8> = (0..100u32)
-            .flat_map(|i| i.to_le_bytes())
-            .collect();
+        let original: Vec<u8> = (0..100u32).flat_map(|i| i.to_le_bytes()).collect();
 
         let compressed = compress(CompressionScheme::ByteGrouping4LZ4, &original).unwrap();
-        let decompressed = decompress(CompressionScheme::ByteGrouping4LZ4, &compressed, original.len()).unwrap();
+        let decompressed = decompress(
+            CompressionScheme::ByteGrouping4LZ4,
+            &compressed,
+            original.len(),
+        )
+        .unwrap();
 
         assert_eq!(decompressed, original);
     }

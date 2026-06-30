@@ -1,13 +1,13 @@
-use actix_web::{web, App, HttpServer, HttpResponse, middleware::Logger};
 use actix_governor::{Governor, GovernorConfigBuilder};
+use actix_web::{App, HttpResponse, HttpServer, middleware::Logger, web};
 use std::sync::Arc;
 
 use crate::auth::token_store::TokenStore;
 use crate::auth::xet_signer::XetSigner;
 use crate::cas_client::CasClient;
 use crate::config::HubConfig;
-use crate::metadata::sqlite::SqliteMetadataStore;
 use crate::metadata::MetadataStore;
+use crate::metadata::sqlite::SqliteMetadataStore;
 
 pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
     // M2 fix: Create a shared SQLite connection pool for both TokenStore and MetadataStore.
@@ -19,12 +19,20 @@ pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
         .max_connections(config.metadata.db_pool_size)
         .min_connections(1)
         .acquire_timeout(std::time::Duration::from_secs(5))
-        .after_connect(|conn, _| Box::pin(async move {
-            sqlx::query("PRAGMA journal_mode = WAL;").execute(&mut *conn).await?;
-            sqlx::query("PRAGMA foreign_keys = ON;").execute(&mut *conn).await?;
-            sqlx::query("PRAGMA busy_timeout = 5000;").execute(&mut *conn).await?;
-            Ok(())
-        }))
+        .after_connect(|conn, _| {
+            Box::pin(async move {
+                sqlx::query("PRAGMA journal_mode = WAL;")
+                    .execute(&mut *conn)
+                    .await?;
+                sqlx::query("PRAGMA foreign_keys = ON;")
+                    .execute(&mut *conn)
+                    .await?;
+                sqlx::query("PRAGMA busy_timeout = 5000;")
+                    .execute(&mut *conn)
+                    .await?;
+                Ok(())
+            })
+        })
         .connect(&config.metadata.sqlite_path)
         .await
         .map_err(|e| std::io::Error::other(format!("Failed to connect to database: {}", e)))?;
@@ -40,14 +48,16 @@ pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
     let token_store = Arc::new(
         TokenStore::with_pool(shared_pool.clone())
             .await
-            .map_err(|e| std::io::Error::other(format!("Failed to create token store: {}", e)))?
+            .map_err(|e| std::io::Error::other(format!("Failed to create token store: {}", e)))?,
     );
 
     // Initialize metadata store with shared pool
     let metadata: Arc<dyn MetadataStore> = Arc::new(
         SqliteMetadataStore::with_pool(shared_pool)
             .await
-            .map_err(|e| std::io::Error::other(format!("Failed to create metadata store: {}", e)))?
+            .map_err(|e| {
+                std::io::Error::other(format!("Failed to create metadata store: {}", e))
+            })?,
     );
 
     // Initialize xet signer
@@ -63,22 +73,27 @@ pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
                     "SECURITY: Private key file '{}' is readable by group/other (mode {:o}). \
                      An attacker with read access could forge authentication tokens. \
                      Use chmod 600 to restrict access.",
-                    config.auth.private_key_path, mode
+                    config.auth.private_key_path,
+                    mode
                 );
             }
         }
     }
-    let private_key_pem = std::fs::read(&config.auth.private_key_path)
-        .map_err(|e| std::io::Error::other(format!("Failed to read private key from '{}': {}", config.auth.private_key_path, e)))?;
+    let private_key_pem = std::fs::read(&config.auth.private_key_path).map_err(|e| {
+        std::io::Error::other(format!(
+            "Failed to read private key from '{}': {}",
+            config.auth.private_key_path, e
+        ))
+    })?;
     let signer = Arc::new(
         XetSigner::from_pem_with_internal_ttl(
             &private_key_pem,
             &config.auth.kid,
             config.auth.token_ttl_seconds,
             config.auth.proxy_token_ttl_seconds,
-            config.auth.internal_token_ttl_seconds,  // C1 fix: configurable internal token TTL
+            config.auth.internal_token_ttl_seconds, // C1 fix: configurable internal token TTL
         )
-            .map_err(|e| std::io::Error::other(format!("Failed to create xet signer: {}", e)))?
+        .map_err(|e| std::io::Error::other(format!("Failed to create xet signer: {}", e)))?,
     );
 
     // Initialize CAS client
@@ -92,12 +107,22 @@ pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
     tokio::spawn(async move {
         match tokio::time::timeout(
             std::time::Duration::from_secs(health_check_timeout),
-            cas_health.health_check()
-        ).await {
+            cas_health.health_check(),
+        )
+        .await
+        {
             Ok(Ok(true)) => tracing::info!("CAS health check passed"),
-            Ok(Ok(false)) => tracing::warn!("CAS health check returned non-success. Verify CAS is running."),
-            Ok(Err(e)) => tracing::warn!("CAS health check failed: {}. Hub and CAS may not be able to communicate.", e),
-            Err(_) => tracing::error!("CAS health check timed out after {} seconds", health_check_timeout),
+            Ok(Ok(false)) => {
+                tracing::warn!("CAS health check returned non-success. Verify CAS is running.")
+            }
+            Ok(Err(e)) => tracing::warn!(
+                "CAS health check failed: {}. Hub and CAS may not be able to communicate.",
+                e
+            ),
+            Err(_) => tracing::error!(
+                "CAS health check timed out after {} seconds",
+                health_check_timeout
+            ),
         }
     });
 
@@ -148,7 +173,7 @@ pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
     // This is effectively "requests per minute" with burst tolerance.
     let rpm = config.server.rate_limit_rpm;
     let governor_conf = GovernorConfigBuilder::default()
-        .per_second(60)  // 60-second refill window
+        .per_second(60) // 60-second refill window
         .burst_size(rpm) // configured requests per window
         .finish()
         .expect("Failed to configure rate limiter");
@@ -156,7 +181,9 @@ pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
     tracing::info!(
         "Rate limiting: {} requests per 60-second window per IP for public endpoints \
          (internal/health excluded). Burst: {}, refill: {} tokens/second",
-        rpm, rpm, rpm
+        rpm,
+        rpm,
+        rpm
     );
 
     HttpServer::new(move || {
@@ -175,7 +202,11 @@ pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
             // Non-rate-limited endpoints (registered at App level, before scope)
             // =============================================================
             // Health endpoint is non-rate-limited for monitoring purposes.
-            .route("/health", web::get().to(|| async { HttpResponse::Ok().json(serde_json::json!({"status": "ok"})) }))
+            .route(
+                "/health",
+                web::get()
+                    .to(|| async { HttpResponse::Ok().json(serde_json::json!({"status": "ok"})) }),
+            )
             // =============================================================
             // Public API routes - rate limited via Governor middleware
             // =============================================================
@@ -185,71 +216,236 @@ pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
                     // Auth
                     .route("/api/whoami-v2", web::get().to(crate::api::whoami::whoami))
                     // Token exchange — explicit routes for each repo type
-                    .route("/api/models/{ns}/{repo}/xet-read-token/{rev}", web::get().to(crate::api::token_exchange::exchange_model_read))
-                    .route("/api/models/{ns}/{repo}/xet-write-token/{rev}", web::get().to(crate::api::token_exchange::exchange_model_write))
-                    .route("/api/datasets/{ns}/{repo}/xet-read-token/{rev}", web::get().to(crate::api::token_exchange::exchange_dataset_read))
-                    .route("/api/datasets/{ns}/{repo}/xet-write-token/{rev}", web::get().to(crate::api::token_exchange::exchange_dataset_write))
-                    .route("/api/spaces/{ns}/{repo}/xet-read-token/{rev}", web::get().to(crate::api::token_exchange::exchange_space_read))
-                    .route("/api/spaces/{ns}/{repo}/xet-write-token/{rev}", web::get().to(crate::api::token_exchange::exchange_space_write))
+                    .route(
+                        "/api/models/{ns}/{repo}/xet-read-token/{rev}",
+                        web::get().to(crate::api::token_exchange::exchange_model_read),
+                    )
+                    .route(
+                        "/api/models/{ns}/{repo}/xet-write-token/{rev}",
+                        web::get().to(crate::api::token_exchange::exchange_model_write),
+                    )
+                    .route(
+                        "/api/datasets/{ns}/{repo}/xet-read-token/{rev}",
+                        web::get().to(crate::api::token_exchange::exchange_dataset_read),
+                    )
+                    .route(
+                        "/api/datasets/{ns}/{repo}/xet-write-token/{rev}",
+                        web::get().to(crate::api::token_exchange::exchange_dataset_write),
+                    )
+                    .route(
+                        "/api/spaces/{ns}/{repo}/xet-read-token/{rev}",
+                        web::get().to(crate::api::token_exchange::exchange_space_read),
+                    )
+                    .route(
+                        "/api/spaces/{ns}/{repo}/xet-write-token/{rev}",
+                        web::get().to(crate::api::token_exchange::exchange_space_write),
+                    )
                     // Repo CRUD
-                    .route("/api/repos/create", web::post().to(crate::api::repo::create_repo_unified))
-                    .route("/api/models", web::post().to(crate::api::repo::create_model))
-                    .route("/api/datasets", web::post().to(crate::api::repo::create_dataset))
-                    .route("/api/spaces", web::post().to(crate::api::repo::create_space))
-                    .route("/api/models/{ns}/{repo}", web::get().to(crate::api::repo::get_repo_model))
-                    .route("/api/datasets/{ns}/{repo}", web::get().to(crate::api::repo::get_repo_dataset))
-                    .route("/api/spaces/{ns}/{repo}", web::get().to(crate::api::repo::get_repo_space))
-                    .route("/api/models/{ns}/{repo}", web::delete().to(crate::api::repo::delete_repo_model))
-                    .route("/api/datasets/{ns}/{repo}", web::delete().to(crate::api::repo::delete_repo_dataset))
-                    .route("/api/spaces/{ns}/{repo}", web::delete().to(crate::api::repo::delete_repo_space))
+                    .route(
+                        "/api/repos/create",
+                        web::post().to(crate::api::repo::create_repo_unified),
+                    )
+                    .route(
+                        "/api/models",
+                        web::post().to(crate::api::repo::create_model),
+                    )
+                    .route(
+                        "/api/datasets",
+                        web::post().to(crate::api::repo::create_dataset),
+                    )
+                    .route(
+                        "/api/spaces",
+                        web::post().to(crate::api::repo::create_space),
+                    )
+                    .route(
+                        "/api/models/{ns}/{repo}",
+                        web::get().to(crate::api::repo::get_repo_model),
+                    )
+                    .route(
+                        "/api/datasets/{ns}/{repo}",
+                        web::get().to(crate::api::repo::get_repo_dataset),
+                    )
+                    .route(
+                        "/api/spaces/{ns}/{repo}",
+                        web::get().to(crate::api::repo::get_repo_space),
+                    )
+                    .route(
+                        "/api/models/{ns}/{repo}",
+                        web::delete().to(crate::api::repo::delete_repo_model),
+                    )
+                    .route(
+                        "/api/datasets/{ns}/{repo}",
+                        web::delete().to(crate::api::repo::delete_repo_dataset),
+                    )
+                    .route(
+                        "/api/spaces/{ns}/{repo}",
+                        web::delete().to(crate::api::repo::delete_repo_space),
+                    )
                     // Revision info (used by hf upload)
-                    .route("/api/models/{ns}/{repo}/revision/{rev}", web::get().to(crate::api::repo::get_revision_model))
-                    .route("/api/datasets/{ns}/{repo}/revision/{rev}", web::get().to(crate::api::repo::get_revision_dataset))
-                    .route("/api/spaces/{ns}/{repo}/revision/{rev}", web::get().to(crate::api::repo::get_revision_space))
+                    .route(
+                        "/api/models/{ns}/{repo}/revision/{rev}",
+                        web::get().to(crate::api::repo::get_revision_model),
+                    )
+                    .route(
+                        "/api/datasets/{ns}/{repo}/revision/{rev}",
+                        web::get().to(crate::api::repo::get_revision_dataset),
+                    )
+                    .route(
+                        "/api/spaces/{ns}/{repo}/revision/{rev}",
+                        web::get().to(crate::api::repo::get_revision_space),
+                    )
                     // Commit
-                    .route("/api/models/{ns}/{repo}/commit/{rev}", web::post().to(crate::api::commit::commit_model))
-                    .route("/api/datasets/{ns}/{repo}/commit/{rev}", web::post().to(crate::api::commit::commit_dataset))
-                    .route("/api/spaces/{ns}/{repo}/commit/{rev}", web::post().to(crate::api::commit::commit_space))
+                    .route(
+                        "/api/models/{ns}/{repo}/commit/{rev}",
+                        web::post().to(crate::api::commit::commit_model),
+                    )
+                    .route(
+                        "/api/datasets/{ns}/{repo}/commit/{rev}",
+                        web::post().to(crate::api::commit::commit_dataset),
+                    )
+                    .route(
+                        "/api/spaces/{ns}/{repo}/commit/{rev}",
+                        web::post().to(crate::api::commit::commit_space),
+                    )
                     // Preupload
-                    .route("/api/models/{ns}/{repo}/preupload/{rev}", web::post().to(crate::api::preupload::preupload_model))
-                    .route("/api/datasets/{ns}/{repo}/preupload/{rev}", web::post().to(crate::api::preupload::preupload_dataset))
-                    .route("/api/spaces/{ns}/{repo}/preupload/{rev}", web::post().to(crate::api::preupload::preupload_space))
+                    .route(
+                        "/api/models/{ns}/{repo}/preupload/{rev}",
+                        web::post().to(crate::api::preupload::preupload_model),
+                    )
+                    .route(
+                        "/api/datasets/{ns}/{repo}/preupload/{rev}",
+                        web::post().to(crate::api::preupload::preupload_dataset),
+                    )
+                    .route(
+                        "/api/spaces/{ns}/{repo}/preupload/{rev}",
+                        web::post().to(crate::api::preupload::preupload_space),
+                    )
                     // Tree
-                    .route("/api/models/{ns}/{repo}/tree/{rev}/{path:.*}", web::get().to(crate::api::tree::tree_model))
-                    .route("/api/models/{ns}/{repo}/tree/{rev}", web::get().to(crate::api::tree::tree_model_no_path))
-                    .route("/api/datasets/{ns}/{repo}/tree/{rev}/{path:.*}", web::get().to(crate::api::tree::tree_dataset))
-                    .route("/api/datasets/{ns}/{repo}/tree/{rev}", web::get().to(crate::api::tree::tree_dataset_no_path))
-                    .route("/api/spaces/{ns}/{repo}/tree/{rev}/{path:.*}", web::get().to(crate::api::tree::tree_space))
-                    .route("/api/spaces/{ns}/{repo}/tree/{rev}", web::get().to(crate::api::tree::tree_space_no_path))
+                    .route(
+                        "/api/models/{ns}/{repo}/tree/{rev}/{path:.*}",
+                        web::get().to(crate::api::tree::tree_model),
+                    )
+                    .route(
+                        "/api/models/{ns}/{repo}/tree/{rev}",
+                        web::get().to(crate::api::tree::tree_model_no_path),
+                    )
+                    .route(
+                        "/api/datasets/{ns}/{repo}/tree/{rev}/{path:.*}",
+                        web::get().to(crate::api::tree::tree_dataset),
+                    )
+                    .route(
+                        "/api/datasets/{ns}/{repo}/tree/{rev}",
+                        web::get().to(crate::api::tree::tree_dataset_no_path),
+                    )
+                    .route(
+                        "/api/spaces/{ns}/{repo}/tree/{rev}/{path:.*}",
+                        web::get().to(crate::api::tree::tree_space),
+                    )
+                    .route(
+                        "/api/spaces/{ns}/{repo}/tree/{rev}",
+                        web::get().to(crate::api::tree::tree_space_no_path),
+                    )
                     // File download/resolve - Type-prefixed routes MUST come before generic routes
-                    .route("/models/{ns}/{repo}/resolve/{rev}/{path:.*}", web::get().to(crate::api::resolve::resolve_model))
-                    .route("/models/{ns}/{repo}/resolve/{rev}/{path:.*}", web::head().to(crate::api::resolve::resolve_model))
-                    .route("/datasets/{ns}/{repo}/resolve/{rev}/{path:.*}", web::get().to(crate::api::resolve::resolve_dataset))
-                    .route("/datasets/{ns}/{repo}/resolve/{rev}/{path:.*}", web::head().to(crate::api::resolve::resolve_dataset))
-                    .route("/spaces/{ns}/{repo}/resolve/{rev}/{path:.*}", web::get().to(crate::api::resolve::resolve_space))
-                    .route("/spaces/{ns}/{repo}/resolve/{rev}/{path:.*}", web::head().to(crate::api::resolve::resolve_space))
+                    .route(
+                        "/models/{ns}/{repo}/resolve/{rev}/{path:.*}",
+                        web::get().to(crate::api::resolve::resolve_model),
+                    )
+                    .route(
+                        "/models/{ns}/{repo}/resolve/{rev}/{path:.*}",
+                        web::head().to(crate::api::resolve::resolve_model),
+                    )
+                    .route(
+                        "/datasets/{ns}/{repo}/resolve/{rev}/{path:.*}",
+                        web::get().to(crate::api::resolve::resolve_dataset),
+                    )
+                    .route(
+                        "/datasets/{ns}/{repo}/resolve/{rev}/{path:.*}",
+                        web::head().to(crate::api::resolve::resolve_dataset),
+                    )
+                    .route(
+                        "/spaces/{ns}/{repo}/resolve/{rev}/{path:.*}",
+                        web::get().to(crate::api::resolve::resolve_space),
+                    )
+                    .route(
+                        "/spaces/{ns}/{repo}/resolve/{rev}/{path:.*}",
+                        web::head().to(crate::api::resolve::resolve_space),
+                    )
                     // Generic fallback (matches /{ns}/{repo}/resolve/...)
-                    .route("/{ns}/{repo}/resolve/{rev}/{path:.*}", web::get().to(crate::api::resolve::resolve_model))
-                    .route("/{ns}/{repo}/resolve/{rev}/{path:.*}", web::head().to(crate::api::resolve::resolve_model))
+                    .route(
+                        "/{ns}/{repo}/resolve/{rev}/{path:.*}",
+                        web::get().to(crate::api::resolve::resolve_model),
+                    )
+                    .route(
+                        "/{ns}/{repo}/resolve/{rev}/{path:.*}",
+                        web::head().to(crate::api::resolve::resolve_model),
+                    )
                     // Git LFS proxy
-                    .route("/objects/batch", web::post().to(crate::api::lfs_proxy::lfs_batch))
-                    .route("/lfs/objects/batch", web::post().to(crate::api::lfs_proxy::lfs_batch))
-                    .route("/lfs/objects/{oid}", web::put().to(crate::api::lfs_proxy::lfs_upload))
-                    .route("/lfs/objects/{oid}", web::get().to(crate::api::lfs_proxy::lfs_download))
+                    .route(
+                        "/objects/batch",
+                        web::post().to(crate::api::lfs_proxy::lfs_batch),
+                    )
+                    .route(
+                        "/lfs/objects/batch",
+                        web::post().to(crate::api::lfs_proxy::lfs_batch),
+                    )
+                    .route(
+                        "/lfs/objects/{oid}",
+                        web::put().to(crate::api::lfs_proxy::lfs_upload),
+                    )
+                    .route(
+                        "/lfs/objects/{oid}",
+                        web::get().to(crate::api::lfs_proxy::lfs_download),
+                    )
                     // Git-style LFS endpoints - Type-prefixed routes first
-                    .route("/models/{ns}/{repo}.git/info/lfs/objects/batch", web::post().to(crate::api::lfs_proxy::lfs_batch))
-                    .route("/datasets/{ns}/{repo}.git/info/lfs/objects/batch", web::post().to(crate::api::lfs_proxy::lfs_batch))
-                    .route("/spaces/{ns}/{repo}.git/info/lfs/objects/batch", web::post().to(crate::api::lfs_proxy::lfs_batch))
-                    .route("/models/{ns}/{repo}.git/info/lfs/objects/{oid}", web::put().to(crate::api::lfs_proxy::lfs_upload))
-                    .route("/datasets/{ns}/{repo}.git/info/lfs/objects/{oid}", web::put().to(crate::api::lfs_proxy::lfs_upload))
-                    .route("/spaces/{ns}/{repo}.git/info/lfs/objects/{oid}", web::put().to(crate::api::lfs_proxy::lfs_upload))
-                    .route("/models/{ns}/{repo}.git/info/lfs/objects/{oid}", web::get().to(crate::api::lfs_proxy::lfs_download))
-                    .route("/datasets/{ns}/{repo}.git/info/lfs/objects/{oid}", web::get().to(crate::api::lfs_proxy::lfs_download))
-                    .route("/spaces/{ns}/{repo}.git/info/lfs/objects/{oid}", web::get().to(crate::api::lfs_proxy::lfs_download))
+                    .route(
+                        "/models/{ns}/{repo}.git/info/lfs/objects/batch",
+                        web::post().to(crate::api::lfs_proxy::lfs_batch),
+                    )
+                    .route(
+                        "/datasets/{ns}/{repo}.git/info/lfs/objects/batch",
+                        web::post().to(crate::api::lfs_proxy::lfs_batch),
+                    )
+                    .route(
+                        "/spaces/{ns}/{repo}.git/info/lfs/objects/batch",
+                        web::post().to(crate::api::lfs_proxy::lfs_batch),
+                    )
+                    .route(
+                        "/models/{ns}/{repo}.git/info/lfs/objects/{oid}",
+                        web::put().to(crate::api::lfs_proxy::lfs_upload),
+                    )
+                    .route(
+                        "/datasets/{ns}/{repo}.git/info/lfs/objects/{oid}",
+                        web::put().to(crate::api::lfs_proxy::lfs_upload),
+                    )
+                    .route(
+                        "/spaces/{ns}/{repo}.git/info/lfs/objects/{oid}",
+                        web::put().to(crate::api::lfs_proxy::lfs_upload),
+                    )
+                    .route(
+                        "/models/{ns}/{repo}.git/info/lfs/objects/{oid}",
+                        web::get().to(crate::api::lfs_proxy::lfs_download),
+                    )
+                    .route(
+                        "/datasets/{ns}/{repo}.git/info/lfs/objects/{oid}",
+                        web::get().to(crate::api::lfs_proxy::lfs_download),
+                    )
+                    .route(
+                        "/spaces/{ns}/{repo}.git/info/lfs/objects/{oid}",
+                        web::get().to(crate::api::lfs_proxy::lfs_download),
+                    )
                     // Generic fallback
-                    .route("/{ns}/{repo}.git/info/lfs/objects/batch", web::post().to(crate::api::lfs_proxy::lfs_batch))
-                    .route("/{ns}/{repo}.git/info/lfs/objects/{oid}", web::put().to(crate::api::lfs_proxy::lfs_upload))
-                    .route("/{ns}/{repo}.git/info/lfs/objects/{oid}", web::get().to(crate::api::lfs_proxy::lfs_download))
+                    .route(
+                        "/{ns}/{repo}.git/info/lfs/objects/batch",
+                        web::post().to(crate::api::lfs_proxy::lfs_batch),
+                    )
+                    .route(
+                        "/{ns}/{repo}.git/info/lfs/objects/{oid}",
+                        web::put().to(crate::api::lfs_proxy::lfs_upload),
+                    )
+                    .route(
+                        "/{ns}/{repo}.git/info/lfs/objects/{oid}",
+                        web::get().to(crate::api::lfs_proxy::lfs_download),
+                    ),
             )
     })
     .bind(&bind_addr)?

@@ -33,7 +33,10 @@ pub async fn resolve_revision(
             None => Err("No HEAD found for repo".to_string()),
         }
     } else {
-        Err(format!("Revision not found: {} (only 'main' branch or commit hashes are supported)", revision))
+        Err(format!(
+            "Revision not found: {} (only 'main' branch or commit hashes are supported)",
+            revision
+        ))
     }
 }
 

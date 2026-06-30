@@ -1,7 +1,9 @@
 use hub_api::metadata::{FileEntry, MetadataStore, RepoType, Revision, SqliteMetadataStore};
 
 async fn create_test_store() -> SqliteMetadataStore {
-    SqliteMetadataStore::in_memory().await.expect("Failed to create in-memory store")
+    SqliteMetadataStore::in_memory()
+        .await
+        .expect("Failed to create in-memory store")
 }
 
 #[tokio::test]
@@ -61,10 +63,15 @@ async fn test_delete_repo() {
         .expect("Failed to create repo");
 
     // Delete the repo
-    store.delete_repo(repo.id).await.expect("Failed to delete repo");
+    store
+        .delete_repo(repo.id)
+        .await
+        .expect("Failed to delete repo");
 
     // Try to get the deleted repo
-    let result = store.get_repo("testuser", "testrepo", RepoType::Model).await;
+    let result = store
+        .get_repo("testuser", "testrepo", RepoType::Model)
+        .await;
     assert!(result.is_err());
     assert!(matches!(
         result.unwrap_err(),
@@ -128,7 +135,10 @@ async fn test_head_management() {
         author: "testuser".to_string(),
         created_at: 1234567890,
     };
-    store.add_revision(revision).await.expect("Failed to add revision");
+    store
+        .add_revision(revision)
+        .await
+        .expect("Failed to add revision");
 
     store
         .set_head(repo.id, "abc123")
@@ -147,7 +157,10 @@ async fn test_head_management() {
         author: "testuser".to_string(),
         created_at: 1234567891,
     };
-    store.add_revision(revision2).await.expect("Failed to add revision");
+    store
+        .add_revision(revision2)
+        .await
+        .expect("Failed to add revision");
 
     store
         .set_head(repo.id, "def456")
@@ -176,7 +189,10 @@ async fn test_file_tree_operations() {
         author: "testuser".to_string(),
         created_at: 1234567890,
     };
-    store.add_revision(revision).await.expect("Failed to add revision");
+    store
+        .add_revision(revision)
+        .await
+        .expect("Failed to add revision");
 
     // Add file entries
     let entries = vec![
@@ -243,7 +259,10 @@ async fn test_file_tree_prefix_filter() {
         author: "testuser".to_string(),
         created_at: 1234567890,
     };
-    store.add_revision(revision).await.expect("Failed to add revision");
+    store
+        .add_revision(revision)
+        .await
+        .expect("Failed to add revision");
 
     // Add file entries with nested paths
     let entries = vec![
@@ -314,7 +333,10 @@ async fn test_resolve_file() {
         author: "testuser".to_string(),
         created_at: 1234567890,
     };
-    store.add_revision(revision).await.expect("Failed to add revision");
+    store
+        .add_revision(revision)
+        .await
+        .expect("Failed to add revision");
 
     // Add file entry
     let entries = vec![FileEntry {
@@ -343,7 +365,9 @@ async fn test_resolve_file() {
     assert!(file.is_lfs);
 
     // Try to resolve non-existent file
-    let result = store.resolve_file(repo.id, "abc123", "nonexistent.bin").await;
+    let result = store
+        .resolve_file(repo.id, "abc123", "nonexistent.bin")
+        .await;
     assert!(result.is_err());
     assert!(matches!(
         result.unwrap_err(),
@@ -395,14 +419,20 @@ async fn test_commit_log() {
     store.set_head(repo.id, "commit3").await.unwrap();
 
     // Get commit log
-    let log = store.get_commit_log(repo.id, None).await.expect("Failed to get commit log");
+    let log = store
+        .get_commit_log(repo.id, None)
+        .await
+        .expect("Failed to get commit log");
     assert_eq!(log.len(), 3);
     assert_eq!(log[0].commit_id, "commit3");
     assert_eq!(log[1].commit_id, "commit2");
     assert_eq!(log[2].commit_id, "commit1");
 
     // Test limit
-    let log_limited = store.get_commit_log(repo.id, Some(2)).await.expect("Failed to get commit log");
+    let log_limited = store
+        .get_commit_log(repo.id, Some(2))
+        .await
+        .expect("Failed to get commit log");
     assert_eq!(log_limited.len(), 2);
     assert_eq!(log_limited[0].commit_id, "commit3");
     assert_eq!(log_limited[1].commit_id, "commit2");
@@ -426,26 +456,30 @@ async fn test_commit_atomic_success() {
         author: "testuser".to_string(),
         created_at: 1000,
     };
-    let entries = vec![
-        FileEntry {
-            path: "file1.txt".to_string(),
-            repo_id: repo.id,
-            commit_id: "commit1".to_string(),
-            size: 100,
-            cas_hash: "hash1".to_string(),
-            is_lfs: false,
-        },
-    ];
+    let entries = vec![FileEntry {
+        path: "file1.txt".to_string(),
+        repo_id: repo.id,
+        commit_id: "commit1".to_string(),
+        size: 100,
+        cas_hash: "hash1".to_string(),
+        is_lfs: false,
+    }];
 
     // Should succeed since HEAD is None and expected_parent is None
-    store.commit_atomic(&rev, &entries, None).await.expect("commit_atomic failed");
+    store
+        .commit_atomic(&rev, &entries, None)
+        .await
+        .expect("commit_atomic failed");
 
     // Verify HEAD was set
     let head = store.get_head(repo.id).await.expect("Failed to get head");
     assert_eq!(head, Some("commit1".to_string()));
 
     // Verify file entry was added
-    let tree = store.get_file_tree(repo.id, "commit1").await.expect("Failed to get tree");
+    let tree = store
+        .get_file_tree(repo.id, "commit1")
+        .await
+        .expect("Failed to get tree");
     assert_eq!(tree.len(), 1);
     assert_eq!(tree[0].path, "file1.txt");
 }
@@ -483,7 +517,9 @@ async fn test_commit_atomic_rejects_mismatched_parent() {
     let entries = vec![];
 
     // Should fail since HEAD is "commit1" but expected_parent is "wrong_parent"
-    let result = store.commit_atomic(&rev2, &entries, Some("wrong_parent")).await;
+    let result = store
+        .commit_atomic(&rev2, &entries, Some("wrong_parent"))
+        .await;
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(matches!(err, hub_api::metadata::MetadataError::Conflict(_)));
@@ -510,19 +546,33 @@ async fn test_commit_atomic_rejects_first_commit_when_head_exists() {
 
     // 第一个首提交(parent=None)在 HEAD 为空时成功。
     let first = Revision {
-        commit_id: "c1".to_string(), repo_id: repo.id, parent: None,
-        message: "init".to_string(), author: "u".to_string(), created_at: 1,
+        commit_id: "c1".to_string(),
+        repo_id: repo.id,
+        parent: None,
+        message: "init".to_string(),
+        author: "u".to_string(),
+        created_at: 1,
     };
-    store.commit_atomic(&first, &empty, None).await.expect("first commit failed");
+    store
+        .commit_atomic(&first, &empty, None)
+        .await
+        .expect("first commit failed");
 
     // 第二个「首提交」(parent=None)必须被拒绝,因为 HEAD 现在是 c1。
     // 这正是并发首次提交场景下保护数据不被覆盖的不变量。
     let second = Revision {
-        commit_id: "c2".to_string(), repo_id: repo.id, parent: None,
-        message: "init2".to_string(), author: "u".to_string(), created_at: 2,
+        commit_id: "c2".to_string(),
+        repo_id: repo.id,
+        parent: None,
+        message: "init2".to_string(),
+        author: "u".to_string(),
+        created_at: 2,
     };
     let result = store.commit_atomic(&second, &empty, None).await;
-    assert!(matches!(result, Err(hub_api::metadata::MetadataError::Conflict(_))));
+    assert!(matches!(
+        result,
+        Err(hub_api::metadata::MetadataError::Conflict(_))
+    ));
 
     // HEAD 仍是 c1,未被覆盖。
     let head = store.get_head(repo.id).await.expect("Failed to get head");
@@ -547,7 +597,10 @@ async fn test_commit_atomic_concurrent_protection() {
         author: "testuser".to_string(),
         created_at: 1000,
     };
-    store.commit_atomic(&rev1, &[], None).await.expect("First commit failed");
+    store
+        .commit_atomic(&rev1, &[], None)
+        .await
+        .expect("First commit failed");
 
     // First concurrent attempt with correct parent
     let rev2a = Revision {
@@ -560,7 +613,10 @@ async fn test_commit_atomic_concurrent_protection() {
     };
 
     // This should succeed
-    store.commit_atomic(&rev2a, &[], Some("commit1")).await.expect("commit_atomic should succeed");
+    store
+        .commit_atomic(&rev2a, &[], Some("commit1"))
+        .await
+        .expect("commit_atomic should succeed");
 
     // Second concurrent attempt with same parent (now stale)
     let rev2b = Revision {
@@ -575,7 +631,10 @@ async fn test_commit_atomic_concurrent_protection() {
     // This should fail since HEAD is now "commit2a", not "commit1"
     let result = store.commit_atomic(&rev2b, &[], Some("commit1")).await;
     assert!(result.is_err());
-    assert!(matches!(result.unwrap_err(), hub_api::metadata::MetadataError::Conflict(_)));
+    assert!(matches!(
+        result.unwrap_err(),
+        hub_api::metadata::MetadataError::Conflict(_)
+    ));
 
     // Verify HEAD is commit2a
     let head = store.get_head(repo.id).await.expect("Failed to get head");

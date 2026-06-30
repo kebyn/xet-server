@@ -41,8 +41,9 @@ pub trait StorageBackend: Send + Sync {
              StorageBackend implementation for streaming support.",
             key
         );
-        let data = tokio::fs::read(path).await
-            .map_err(|e| StorageError::Internal(format!("Failed to read file {}: {}", path.display(), e)))?;
+        let data = tokio::fs::read(path).await.map_err(|e| {
+            StorageError::Internal(format!("Failed to read file {}: {}", path.display(), e))
+        })?;
         self.put(key, Bytes::from(data)).await
     }
 
@@ -91,30 +92,41 @@ pub trait StorageBackend: Send + Sync {
             key
         );
         let data = self.get(key).await?;
-        tokio::fs::write(dest, &data).await
-            .map_err(|e| StorageError::Internal(
-                format!("Failed to write to {}: {}", dest.display(), e)
-            ))?;
+        tokio::fs::write(dest, &data).await.map_err(|e| {
+            StorageError::Internal(format!("Failed to write to {}: {}", dest.display(), e))
+        })?;
         Ok(())
     }
 }
 
-pub async fn create_storage(config: &crate::config::StorageConfig) -> StorageResult<Box<dyn StorageBackend>> {
+pub async fn create_storage(
+    config: &crate::config::StorageConfig,
+) -> StorageResult<Box<dyn StorageBackend>> {
     match config.backend.as_str() {
         "local" => {
-            let path = config.local_path.as_ref()
+            let path = config
+                .local_path
+                .as_ref()
                 .ok_or_else(|| StorageError::InvalidArgument("local_path required".to_string()))?;
             Ok(Box::new(local::LocalStorage::new(path)?))
         }
         "s3" => {
-            let bucket = config.s3_bucket.as_ref()
+            let bucket = config
+                .s3_bucket
+                .as_ref()
                 .ok_or_else(|| StorageError::InvalidArgument("s3_bucket required".to_string()))?;
-            Ok(Box::new(s3::S3Storage::new(
-                bucket,
-                config.s3_region.as_deref(),
-                config.s3_endpoint.as_deref(),
-            ).await?))
+            Ok(Box::new(
+                s3::S3Storage::new(
+                    bucket,
+                    config.s3_region.as_deref(),
+                    config.s3_endpoint.as_deref(),
+                )
+                .await?,
+            ))
         }
-        _ => Err(StorageError::InvalidArgument(format!("Unknown backend: {}", config.backend))),
+        _ => Err(StorageError::InvalidArgument(format!(
+            "Unknown backend: {}",
+            config.backend
+        ))),
     }
 }

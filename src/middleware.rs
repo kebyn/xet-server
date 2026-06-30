@@ -1,9 +1,9 @@
 //! HTTP middleware for metrics collection
 
 use actix_web::{
+    Error,
     body::MessageBody,
     dev::{ServiceRequest, ServiceResponse},
-    Error,
     middleware::Next,
 };
 

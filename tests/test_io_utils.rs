@@ -1,5 +1,5 @@
-use xet_server::format::io_utils::{read_u32_le, read_u64_le, write_u32_le, write_u64_le};
 use std::io::Cursor;
+use xet_server::format::io_utils::{read_u32_le, read_u64_le, write_u32_le, write_u64_le};
 
 #[test]
 fn test_read_write_u32_le() {

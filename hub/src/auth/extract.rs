@@ -1,5 +1,5 @@
-use actix_web::{dev::Payload, web, FromRequest, HttpRequest, HttpResponse};
-use std::future::{ready, Future};
+use actix_web::{FromRequest, HttpRequest, HttpResponse, dev::Payload, web};
+use std::future::{Future, ready};
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -133,9 +133,10 @@ impl<S: ScopeRequirement + 'static> FromRequest for AuthUser<S> {
         let token_store = match req.app_data::<web::Data<Arc<TokenStore>>>() {
             Some(ts) => ts.clone(),
             None => {
-                return Box::pin(ready(Err(
-                    AuthError::Internal("TokenStore not configured".into()).into()
-                )));
+                return Box::pin(ready(Err(AuthError::Internal(
+                    "TokenStore not configured".into(),
+                )
+                .into())));
             }
         };
 
@@ -168,7 +169,7 @@ impl<S: ScopeRequirement + 'static> FromRequest for AuthUser<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use actix_web::{test, App};
+    use actix_web::{App, test};
 
     #[actix_web::test]
     async fn test_auth_any_valid_token() {

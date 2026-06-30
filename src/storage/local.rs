@@ -12,13 +12,19 @@ async fn copy_then_rename(source: &Path, dest: &Path) -> StorageResult<()> {
     let temp_dest = dest.with_extension("tmp");
     fs::copy(source, &temp_dest).await.map_err(|e| {
         StorageError::Internal(format!(
-            "Failed to copy {} → {}: {}", source.display(), temp_dest.display(), e
+            "Failed to copy {} → {}: {}",
+            source.display(),
+            temp_dest.display(),
+            e
         ))
     })?;
     fs::rename(&temp_dest, dest).await.map_err(|e| {
         let _ = std::fs::remove_file(&temp_dest);
         StorageError::Internal(format!(
-            "Failed to rename {} → {}: {}", temp_dest.display(), dest.display(), e
+            "Failed to rename {} → {}: {}",
+            temp_dest.display(),
+            dest.display(),
+            e
         ))
     })?;
     Ok(())
@@ -38,22 +44,23 @@ impl LocalStorage {
     fn object_path(&self, key: &str) -> StorageResult<PathBuf> {
         // Reject absolute paths
         if key.starts_with('/') || key.starts_with('\\') {
-            return Err(StorageError::InvalidArgument(
-                format!("Invalid key: absolute path not allowed: {}", key)
-            ));
+            return Err(StorageError::InvalidArgument(format!(
+                "Invalid key: absolute path not allowed: {}",
+                key
+            )));
         }
 
         // Check for null bytes
         if key.contains('\0') {
             return Err(StorageError::InvalidArgument(
-                "Invalid key: contains null bytes".to_string()
+                "Invalid key: contains null bytes".to_string(),
             ));
         }
 
         // Check for empty key
         if key.is_empty() {
             return Err(StorageError::InvalidArgument(
-                "Invalid key: empty key".to_string()
+                "Invalid key: empty key".to_string(),
             ));
         }
 
@@ -63,9 +70,10 @@ impl LocalStorage {
         // legitimate filenames like "file..name" or "..hidden".
         for component in key.split(['/', '\\']) {
             if component == ".." {
-                return Err(StorageError::InvalidArgument(
-                    format!("Invalid key: path traversal detected: {}", key)
-                ));
+                return Err(StorageError::InvalidArgument(format!(
+                    "Invalid key: path traversal detected: {}",
+                    key
+                )));
             }
         }
 
@@ -82,21 +90,22 @@ impl StorageBackend for LocalStorage {
 
         // Create parent directories
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).await
+            fs::create_dir_all(parent)
+                .await
                 .map_err(|e| StorageError::Internal(format!("Failed to create dirs: {}", e)))?;
         }
 
         // Write to temp file
-        fs::write(&temp_path, &data).await
+        fs::write(&temp_path, &data)
+            .await
             .map_err(|e| StorageError::Internal(format!("Failed to write temp file: {}", e)))?;
 
         // Atomic rename
-        fs::rename(&temp_path, &path).await
-            .map_err(|e| {
-                // Best-effort cleanup of temp file
-                let _ = std::fs::remove_file(&temp_path);
-                StorageError::Internal(format!("Failed to rename temp to final: {}", e))
-            })?;
+        fs::rename(&temp_path, &path).await.map_err(|e| {
+            // Best-effort cleanup of temp file
+            let _ = std::fs::remove_file(&temp_path);
+            StorageError::Internal(format!("Failed to rename temp to final: {}", e))
+        })?;
 
         Ok(())
     }
@@ -108,7 +117,8 @@ impl StorageBackend for LocalStorage {
         let dest = self.object_path(key)?;
 
         if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent).await
+            fs::create_dir_all(parent)
+                .await
                 .map_err(|e| StorageError::Internal(format!("Failed to create dirs: {}", e)))?;
         }
 
@@ -180,29 +190,31 @@ impl StorageBackend for LocalStorage {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 Err(StorageError::NotFound(key.to_string()))
             }
-            Err(e) => Err(StorageError::Internal(format!("Failed to get metadata: {}", e))),
+            Err(e) => Err(StorageError::Internal(format!(
+                "Failed to get metadata: {}",
+                e
+            ))),
         }
     }
 }
 
 impl LocalStorage {
     /// Recursively walk a directory, collecting keys relative to base_path.
-    async fn walk_dir(
-        base_path: &Path,
-        dir: &Path,
-        keys: &mut Vec<String>,
-    ) -> StorageResult<()> {
+    async fn walk_dir(base_path: &Path, dir: &Path, keys: &mut Vec<String>) -> StorageResult<()> {
         let mut entries = fs::read_dir(dir).await.map_err(|e| {
             StorageError::Internal(format!("Failed to read dir {}: {}", dir.display(), e))
         })?;
 
-        while let Some(entry) = entries.next_entry().await.map_err(|e| {
-            StorageError::Internal(format!("Failed to read dir entry: {}", e))
-        })? {
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|e| StorageError::Internal(format!("Failed to read dir entry: {}", e)))?
+        {
             let path = entry.path();
-            let file_type = entry.file_type().await.map_err(|e| {
-                StorageError::Internal(format!("Failed to get file type: {}", e))
-            })?;
+            let file_type = entry
+                .file_type()
+                .await
+                .map_err(|e| StorageError::Internal(format!("Failed to get file type: {}", e)))?;
 
             if file_type.is_dir() {
                 Box::pin(Self::walk_dir(base_path, &path, keys)).await?;
@@ -210,10 +222,7 @@ impl LocalStorage {
                 let key = path
                     .strip_prefix(base_path)
                     .map_err(|e| {
-                        StorageError::Internal(format!(
-                            "Failed to compute relative path: {}",
-                            e
-                        ))
+                        StorageError::Internal(format!("Failed to compute relative path: {}", e))
                     })?
                     .to_string_lossy()
                     .to_string();
@@ -234,7 +243,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src.bin");
         let dest = dir.path().join("sub/dest.bin");
-        tokio::fs::create_dir_all(dest.parent().unwrap()).await.unwrap();
+        tokio::fs::create_dir_all(dest.parent().unwrap())
+            .await
+            .unwrap();
         tokio::fs::write(&src, b"payload").await.unwrap();
 
         copy_then_rename(&src, &dest).await.unwrap();
@@ -248,8 +259,14 @@ mod tests {
     async fn test_put_is_atomic_no_temp_leftover() {
         let dir = tempfile::tempdir().unwrap();
         let store = LocalStorage::new(dir.path().to_str().unwrap()).unwrap();
-        store.put("xorbs/abc", Bytes::from_static(b"data")).await.unwrap();
-        assert_eq!(store.get("xorbs/abc").await.unwrap(), Bytes::from_static(b"data"));
+        store
+            .put("xorbs/abc", Bytes::from_static(b"data"))
+            .await
+            .unwrap();
+        assert_eq!(
+            store.get("xorbs/abc").await.unwrap(),
+            Bytes::from_static(b"data")
+        );
         // 原子写不应残留 .tmp
         assert!(!dir.path().join("xorbs/abc.tmp").exists());
     }

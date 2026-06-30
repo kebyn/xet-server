@@ -1,6 +1,6 @@
+use hub_api::auth::token_store::TokenStore;
 use hub_api::config::HubConfig;
 use hub_api::server::start_server;
-use hub_api::auth::token_store::TokenStore;
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
@@ -69,7 +69,8 @@ async fn create_token_command(args: &[String]) -> std::io::Result<()> {
         .await
         .map_err(std::io::Error::other)?;
 
-    let token = token_store.create_token(username, name, scope)
+    let token = token_store
+        .create_token(username, name, scope)
         .await
         .map_err(std::io::Error::other)?;
 

@@ -1,10 +1,10 @@
-use std::io::{Read, Write, Result, Seek, SeekFrom};
-use std::fs::File;
-use std::path::Path;
-use crate::format::compression::CompressionScheme;
 use crate::error::Result as XetResult;
 use crate::error::XetError;
+use crate::format::compression::CompressionScheme;
 use crate::types::MerkleHash;
+use std::fs::File;
+use std::io::{Read, Result, Seek, SeekFrom, Write};
+use std::path::Path;
 
 /// Xorb chunk header (8 bytes, packed)
 ///
@@ -219,15 +219,14 @@ pub fn verify_xorb(data: &[u8]) -> XetResult<()> {
     // the IDENT_HASHES magic bytes ("XBLBHSH") — those would appear before the real footer.
     let max_start = data.len().saturating_sub(7);
     for i in (0..=max_start).rev() {
-        if data[i..i+7] == hashes_ident {
+        if data[i..i + 7] == hashes_ident {
             footer_start = Some(i);
             break;
         }
     }
 
-    let footer_start = footer_start.ok_or_else(|| {
-        XetError::ParseError("Could not find xorb footer".into())
-    })?;
+    let footer_start =
+        footer_start.ok_or_else(|| XetError::ParseError("Could not find xorb footer".into()))?;
 
     // Parse the footer
     let footer = XorbObjectInfoV1::from_bytes(&data[footer_start..])?;
@@ -293,19 +292,26 @@ pub fn verify_xorb(data: &[u8]) -> XetResult<()> {
 /// 3. Computes the aggregated xorb hash and verifies it matches
 pub fn verify_xorb_from_file(path: &Path) -> XetResult<()> {
     let mut file = File::open(path).map_err(|e| {
-        XetError::IoError(std::io::Error::other(
-            format!("Failed to open xorb file {}: {}", path.display(), e),
-        ))
+        XetError::IoError(std::io::Error::other(format!(
+            "Failed to open xorb file {}: {}",
+            path.display(),
+            e
+        )))
     })?;
-    let file_len = file.metadata().map_err(|e| {
-        XetError::IoError(std::io::Error::other(
-            format!("Failed to get file metadata: {}", e),
-        ))
-    })?.len();
+    let file_len = file
+        .metadata()
+        .map_err(|e| {
+            XetError::IoError(std::io::Error::other(format!(
+                "Failed to get file metadata: {}",
+                e
+            )))
+        })?
+        .len();
 
     if file_len < 8 {
         return Err(XetError::ParseError(format!(
-            "Xorb file too small: {} bytes", file_len
+            "Xorb file too small: {} bytes",
+            file_len
         )));
     }
 
@@ -313,14 +319,16 @@ pub fn verify_xorb_from_file(path: &Path) -> XetResult<()> {
     let scan_size = std::cmp::min(file_len, 64 * 1024) as usize;
     let mut tail_buf = vec![0u8; scan_size];
     file.seek(SeekFrom::End(-(scan_size as i64))).map_err(|e| {
-        XetError::IoError(std::io::Error::other(
-            format!("Failed to seek to file tail: {}", e),
-        ))
+        XetError::IoError(std::io::Error::other(format!(
+            "Failed to seek to file tail: {}",
+            e
+        )))
     })?;
     file.read_exact(&mut tail_buf).map_err(|e| {
-        XetError::IoError(std::io::Error::other(
-            format!("Failed to read file tail: {}", e),
-        ))
+        XetError::IoError(std::io::Error::other(format!(
+            "Failed to read file tail: {}",
+            e
+        )))
     })?;
 
     // The tail was read from offset (file_len - scan_size) in the file.
@@ -342,9 +350,8 @@ pub fn verify_xorb_from_file(path: &Path) -> XetResult<()> {
         }
     }
 
-    let footer_start = footer_start_in_file.ok_or_else(|| {
-        XetError::ParseError("Could not find xorb footer in file".into())
-    })?;
+    let footer_start = footer_start_in_file
+        .ok_or_else(|| XetError::ParseError("Could not find xorb footer in file".into()))?;
 
     // Parse footer from tail_buf at the position where IDENT_HASHES was found
     let footer_offset_in_tail = (footer_start - tail_file_offset) as usize;
@@ -374,9 +381,10 @@ pub fn verify_xorb_from_file(path: &Path) -> XetResult<()> {
 
         // Seek to chunk start and hash incrementally
         file.seek(SeekFrom::Start(current_offset)).map_err(|e| {
-            XetError::IoError(std::io::Error::other(
-                format!("Failed to seek to chunk {}: {}", i, e),
-            ))
+            XetError::IoError(std::io::Error::other(format!(
+                "Failed to seek to chunk {}: {}",
+                i, e
+            )))
         })?;
 
         let mut hasher = blake3::Hasher::new_keyed(&crate::hash::DATA_KEY);
@@ -384,9 +392,10 @@ pub fn verify_xorb_from_file(path: &Path) -> XetResult<()> {
         while remaining > 0 {
             let to_read = std::cmp::min(remaining, read_buf.len() as u64) as usize;
             let n = file.read(&mut read_buf[..to_read]).map_err(|e| {
-                XetError::IoError(std::io::Error::other(
-                    format!("Failed to read chunk {} data: {}", i, e),
-                ))
+                XetError::IoError(std::io::Error::other(format!(
+                    "Failed to read chunk {} data: {}",
+                    i, e
+                )))
             })?;
             if n == 0 {
                 return Err(XetError::ParseError(format!(

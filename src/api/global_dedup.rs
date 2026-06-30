@@ -2,11 +2,11 @@
 //!
 //! GET /v1/chunks/{prefix}/{hash} - Query chunk deduplication information
 
-use actix_web::{web, HttpResponse};
-use serde::{Serialize, Deserialize};
+use actix_web::{HttpResponse, web};
+use serde::{Deserialize, Serialize};
 
 use crate::api::auth::AuthVerifier;
-use crate::api::guard::{require_auth, AuthNeed};
+use crate::api::guard::{AuthNeed, require_auth};
 use crate::index::MetadataIndex;
 use crate::metrics::GLOBAL_METRICS;
 use crate::storage::StorageBackend;
@@ -60,22 +60,18 @@ pub async fn query_chunk_dedup(
 
     // Look up chunk in metadata index
     let response = match index.get_xorb_for_chunk(&hash) {
-        Some((xorb_hash, chunk_index)) => {
-            ChunkDedupResponse {
-                hash,
-                found: true,
-                xorb_hash: Some(xorb_hash),
-                chunk_index: Some(chunk_index),
-            }
-        }
-        None => {
-            ChunkDedupResponse {
-                hash,
-                found: false,
-                xorb_hash: None,
-                chunk_index: None,
-            }
-        }
+        Some((xorb_hash, chunk_index)) => ChunkDedupResponse {
+            hash,
+            found: true,
+            xorb_hash: Some(xorb_hash),
+            chunk_index: Some(chunk_index),
+        },
+        None => ChunkDedupResponse {
+            hash,
+            found: false,
+            xorb_hash: None,
+            chunk_index: None,
+        },
     };
 
     GLOBAL_METRICS.record_request(200);
@@ -87,12 +83,12 @@ pub async fn query_chunk_dedup(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use actix_web::{test, web, App};
     use crate::api::auth::{AuthVerifier, KeyPair, XetClaims, sign_xet_token};
     use crate::config::{AuthConfig, ServerConfig};
     use crate::storage::local::LocalStorage;
-    use tempfile::tempdir;
+    use actix_web::{App, test, web};
     use std::time::{SystemTime, UNIX_EPOCH};
+    use tempfile::tempdir;
 
     fn create_test_config() -> (KeyPair, AuthVerifier, ServerConfig) {
         let kp = KeyPair::generate();
@@ -144,9 +140,8 @@ mod tests {
     #[actix_web::test]
     async fn test_chunk_dedup_not_found() {
         let dir = tempdir().unwrap();
-        let storage: Box<dyn StorageBackend> = Box::new(
-            LocalStorage::new(dir.path().to_str().unwrap()).unwrap()
-        );
+        let storage: Box<dyn StorageBackend> =
+            Box::new(LocalStorage::new(dir.path().to_str().unwrap()).unwrap());
 
         let (kp, auth, _config) = create_test_config();
         let token = create_test_token(&kp, "read");
@@ -158,8 +153,12 @@ mod tests {
                 .app_data(web::Data::new(index))
                 .app_data(web::Data::new(storage))
                 .app_data(web::Data::new(auth))
-                .route("/v1/chunks/{prefix}/{hash}", web::get().to(query_chunk_dedup))
-        ).await;
+                .route(
+                    "/v1/chunks/{prefix}/{hash}",
+                    web::get().to(query_chunk_dedup),
+                ),
+        )
+        .await;
 
         let hash = "a".repeat(64);
         let req = test::TestRequest::get()
@@ -178,9 +177,8 @@ mod tests {
     #[actix_web::test]
     async fn test_chunk_dedup_invalid_prefix() {
         let dir = tempdir().unwrap();
-        let storage: Box<dyn StorageBackend> = Box::new(
-            LocalStorage::new(dir.path().to_str().unwrap()).unwrap()
-        );
+        let storage: Box<dyn StorageBackend> =
+            Box::new(LocalStorage::new(dir.path().to_str().unwrap()).unwrap());
 
         let (kp, auth, _config) = create_test_config();
         let token = create_test_token(&kp, "read");
@@ -192,8 +190,12 @@ mod tests {
                 .app_data(web::Data::new(index))
                 .app_data(web::Data::new(storage))
                 .app_data(web::Data::new(auth))
-                .route("/v1/chunks/{prefix}/{hash}", web::get().to(query_chunk_dedup))
-        ).await;
+                .route(
+                    "/v1/chunks/{prefix}/{hash}",
+                    web::get().to(query_chunk_dedup),
+                ),
+        )
+        .await;
 
         let hash = "a".repeat(64);
         let req = test::TestRequest::get()
@@ -208,9 +210,8 @@ mod tests {
     #[actix_web::test]
     async fn test_chunk_dedup_invalid_hash() {
         let dir = tempdir().unwrap();
-        let storage: Box<dyn StorageBackend> = Box::new(
-            LocalStorage::new(dir.path().to_str().unwrap()).unwrap()
-        );
+        let storage: Box<dyn StorageBackend> =
+            Box::new(LocalStorage::new(dir.path().to_str().unwrap()).unwrap());
 
         let (kp, auth, _config) = create_test_config();
         let token = create_test_token(&kp, "read");
@@ -222,8 +223,12 @@ mod tests {
                 .app_data(web::Data::new(index))
                 .app_data(web::Data::new(storage))
                 .app_data(web::Data::new(auth))
-                .route("/v1/chunks/{prefix}/{hash}", web::get().to(query_chunk_dedup))
-        ).await;
+                .route(
+                    "/v1/chunks/{prefix}/{hash}",
+                    web::get().to(query_chunk_dedup),
+                ),
+        )
+        .await;
 
         let req = test::TestRequest::get()
             .uri("/v1/chunks/default/invalid_hash")

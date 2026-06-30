@@ -28,10 +28,10 @@
 
 use super::{StorageBackend, StorageError, StorageResult};
 use async_trait::async_trait;
-use aws_sdk_s3::{Client, Config};
 use aws_sdk_s3::config::Credentials;
 use aws_sdk_s3::error::ProvideErrorMetadata;
 use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
+use aws_sdk_s3::{Client, Config};
 use bytes::Bytes;
 use std::path::Path;
 use tokio::fs::File;
@@ -70,11 +70,17 @@ impl S3Storage {
 
         // Gracefully handle missing credentials instead of panicking
         let access_key_id = std::env::var("AWS_ACCESS_KEY_ID").map_err(|_| {
-            StorageError::Internal("AWS_ACCESS_KEY_ID environment variable must be set for S3 storage backend".to_string())
+            StorageError::Internal(
+                "AWS_ACCESS_KEY_ID environment variable must be set for S3 storage backend"
+                    .to_string(),
+            )
         })?;
 
         let secret_access_key = std::env::var("AWS_SECRET_ACCESS_KEY").map_err(|_| {
-            StorageError::Internal("AWS_SECRET_ACCESS_KEY environment variable must be set for S3 storage backend".to_string())
+            StorageError::Internal(
+                "AWS_SECRET_ACCESS_KEY environment variable must be set for S3 storage backend"
+                    .to_string(),
+            )
         })?;
 
         let mut config_builder = Config::builder()
@@ -122,11 +128,18 @@ impl S3Storage {
             .key(key)
             .send()
             .await
-            .map_err(|e| StorageError::Internal(format!("S3 create_multipart_upload failed: {}", e)))?;
+            .map_err(|e| {
+                StorageError::Internal(format!("S3 create_multipart_upload failed: {}", e))
+            })?;
 
-        let upload_id = create_output.upload_id().ok_or_else(|| {
-            StorageError::Internal("S3 create_multipart_upload returned no upload_id".to_string())
-        })?.to_string();
+        let upload_id = create_output
+            .upload_id()
+            .ok_or_else(|| {
+                StorageError::Internal(
+                    "S3 create_multipart_upload returned no upload_id".to_string(),
+                )
+            })?
+            .to_string();
 
         // Register the upload so Drop can abort it on shutdown
         if let Ok(mut guard) = self.active_uploads.lock() {
@@ -134,9 +147,7 @@ impl S3Storage {
         }
 
         // 2. Upload parts — if any part fails, abort the entire upload
-        let upload_result = self
-            .upload_parts(key, &upload_id, path, file_size)
-            .await;
+        let upload_result = self.upload_parts(key, &upload_id, path, file_size).await;
 
         let parts = match upload_result {
             Ok(parts) => parts,
@@ -165,7 +176,8 @@ impl S3Storage {
             .set_parts(Some(parts))
             .build();
 
-        let complete_result = self.client
+        let complete_result = self
+            .client
             .complete_multipart_upload()
             .bucket(&self.bucket)
             .key(key)
@@ -206,7 +218,10 @@ impl S3Storage {
                 if let Ok(mut guard) = self.active_uploads.lock() {
                     guard.remove(key);
                 }
-                Err(StorageError::Internal(format!("S3 complete_multipart_upload failed: {}", e)))
+                Err(StorageError::Internal(format!(
+                    "S3 complete_multipart_upload failed: {}",
+                    e
+                )))
             }
         }
     }
@@ -233,7 +248,8 @@ impl S3Storage {
                 upload_id = %upload_id,
                 "Aborting in-flight multipart upload during shutdown"
             );
-            let _ = self.client
+            let _ = self
+                .client
                 .abort_multipart_upload()
                 .bucket(&self.bucket)
                 .key(&key)
@@ -301,10 +317,7 @@ impl S3Storage {
                 .send()
                 .await
                 .map_err(|e| {
-                    StorageError::Internal(format!(
-                        "S3 upload_part {} failed: {}",
-                        part_number, e
-                    ))
+                    StorageError::Internal(format!("S3 upload_part {} failed: {}", part_number, e))
                 })?;
 
             let completed_part = CompletedPart::builder()
@@ -410,16 +423,14 @@ impl StorageBackend for S3Storage {
     async fn put_from_path(&self, key: &str, path: &Path) -> StorageResult<()> {
         let file_size = tokio::fs::metadata(path)
             .await
-            .map_err(|e| {
-                StorageError::Internal(format!("Failed to read file metadata: {}", e))
-            })?
+            .map_err(|e| StorageError::Internal(format!("Failed to read file metadata: {}", e)))?
             .len();
 
         if file_size < MULTIPART_THRESHOLD {
             // Small file: simple put_object
-            let data = tokio::fs::read(path).await.map_err(|e| {
-                StorageError::Internal(format!("Failed to read file: {}", e))
-            })?;
+            let data = tokio::fs::read(path)
+                .await
+                .map_err(|e| StorageError::Internal(format!("Failed to read file: {}", e)))?;
             return self.put(key, Bytes::from(data)).await;
         }
 
@@ -483,7 +494,11 @@ impl StorageBackend for S3Storage {
         let temp_dest = dest.with_extension("part");
 
         let mut file = File::create(&temp_dest).await.map_err(|e| {
-            StorageError::Internal(format!("Failed to create file {}: {}", temp_dest.display(), e))
+            StorageError::Internal(format!(
+                "Failed to create file {}: {}",
+                temp_dest.display(),
+                e
+            ))
         })?;
 
         // Stream the body directly to file without collecting into memory
@@ -494,7 +509,11 @@ impl StorageBackend for S3Storage {
                     StorageError::Internal(format!("Failed to read S3 stream: {}", e))
                 })?;
                 file.write_all(&chunk).await.map_err(|e| {
-                    StorageError::Internal(format!("Failed to write to {}: {}", temp_dest.display(), e))
+                    StorageError::Internal(format!(
+                        "Failed to write to {}: {}",
+                        temp_dest.display(),
+                        e
+                    ))
                 })?;
             }
 
@@ -504,7 +523,8 @@ impl StorageBackend for S3Storage {
             })?;
 
             Ok(())
-        }.await;
+        }
+        .await;
 
         // If download failed, clean up the partial temp file
         if let Err(e) = download_result {
@@ -515,7 +535,11 @@ impl StorageBackend for S3Storage {
         // Atomic rename from temp to final destination
         tokio::fs::rename(&temp_dest, dest).await.map_err(|e| {
             let _ = std::fs::remove_file(&temp_dest);
-            StorageError::Internal(format!("Failed to rename temp file to {}: {}", dest.display(), e))
+            StorageError::Internal(format!(
+                "Failed to rename temp file to {}: {}",
+                dest.display(),
+                e
+            ))
         })?;
 
         Ok(())
@@ -563,9 +587,10 @@ impl StorageBackend for S3Storage {
                 req = req.continuation_token(token);
             }
 
-            let resp = req.send().await.map_err(|e| {
-                StorageError::Internal(format!("S3 list_objects_v2 failed: {}", e))
-            })?;
+            let resp = req
+                .send()
+                .await
+                .map_err(|e| StorageError::Internal(format!("S3 list_objects_v2 failed: {}", e)))?;
 
             for obj in resp.contents() {
                 if let Some(key) = obj.key() {
@@ -599,9 +624,7 @@ impl StorageBackend for S3Storage {
             })?;
 
         // Get content length from HEAD response
-        let size = result
-            .content_length()
-            .unwrap_or(0) as u64;
+        let size = result.content_length().unwrap_or(0) as u64;
 
         Ok(size)
     }

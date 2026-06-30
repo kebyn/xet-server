@@ -1,6 +1,9 @@
-use xet_server::format::shard::{MDBShardFileHeader, MDBShardFileFooter, FileDataSequenceHeader, FileDataSequenceEntry, XorbChunkSequenceHeader, XorbChunkSequenceEntry};
-use xet_server::types::MerkleHash;
 use std::io::Cursor;
+use xet_server::format::shard::{
+    FileDataSequenceEntry, FileDataSequenceHeader, MDBShardFileFooter, MDBShardFileHeader,
+    XorbChunkSequenceEntry, XorbChunkSequenceHeader,
+};
+use xet_server::types::MerkleHash;
 
 #[test]
 fn test_shard_header_magic() {
@@ -64,7 +67,10 @@ fn test_shard_footer_roundtrip() {
     assert_eq!(parsed.xorb_lookup_num_entry, footer.xorb_lookup_num_entry);
     assert_eq!(parsed.chunk_lookup_offset, footer.chunk_lookup_offset);
     assert_eq!(parsed.chunk_lookup_num_entry, footer.chunk_lookup_num_entry);
-    assert_eq!(parsed.shard_creation_timestamp, footer.shard_creation_timestamp);
+    assert_eq!(
+        parsed.shard_creation_timestamp,
+        footer.shard_creation_timestamp
+    );
     assert_eq!(parsed.shard_key_expiry, footer.shard_key_expiry);
     assert_eq!(parsed.stored_bytes_on_disk, footer.stored_bytes_on_disk);
     assert_eq!(parsed.materialized_bytes, footer.materialized_bytes);

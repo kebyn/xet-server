@@ -1,10 +1,10 @@
 //! Tests for Ed25519 JWT authentication
 
-use xet_server::api::auth::{
-    check_scope, extract_bearer_token,
-    KeyPair, XetClaims, sign_xet_token, verify_xet_token, AuthError,
-};
 use std::time::{SystemTime, UNIX_EPOCH};
+use xet_server::api::auth::{
+    AuthError, KeyPair, XetClaims, check_scope, extract_bearer_token, sign_xet_token,
+    verify_xet_token,
+};
 
 fn create_test_claims(kid: &str, scope: &str) -> XetClaims {
     let now = SystemTime::now()
@@ -147,7 +147,10 @@ fn test_verify_invalid_token_format() {
 fn test_extract_bearer_token() {
     let header = "Bearer xet_eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...";
     let token = extract_bearer_token(header);
-    assert_eq!(token, Some("xet_eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...".to_string()));
+    assert_eq!(
+        token,
+        Some("xet_eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...".to_string())
+    );
 
     let invalid = "Basic dXNlcjpwYXNz";
     assert_eq!(extract_bearer_token(invalid), None);

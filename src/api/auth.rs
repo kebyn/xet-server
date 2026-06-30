@@ -3,7 +3,7 @@
 //! Uses EdDSA signing for xet tokens with the format:
 //! `xet_{base64url(header).base64url(payload).base64url(signature)}`
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -143,7 +143,8 @@ pub fn verify_xet_token(
 ) -> Result<XetClaims, AuthError> {
     // C2 fix: Strip either "xet_" or "internal_" prefix
     // I5 fix: Also accept "proxy_" prefix for short-lived LFS tokens
-    let token_body = token.strip_prefix("xet_")
+    let token_body = token
+        .strip_prefix("xet_")
         .or_else(|| token.strip_prefix("internal_"))
         .or_else(|| token.strip_prefix("proxy_"))
         .ok_or(AuthError::InvalidToken)?;
@@ -179,8 +180,7 @@ pub fn verify_xet_token(
     let sig_bytes = URL_SAFE_NO_PAD
         .decode(sig_b64)
         .map_err(|_| AuthError::InvalidToken)?;
-    let signature =
-        Signature::from_slice(&sig_bytes).map_err(|_| AuthError::InvalidSignature)?;
+    let signature = Signature::from_slice(&sig_bytes).map_err(|_| AuthError::InvalidSignature)?;
 
     // Verify signature over "{header_b64}.{payload_b64}"
     let message = format!("{}.{}", header_b64, payload_b64);
@@ -217,7 +217,9 @@ pub fn verify_xet_token(
 
     // C2 fix (security): Enforce that proxy tokens can only have lfs-* scopes
     if claims.token_type == "proxy" {
-        let valid_proxy_scope = claims.scope.split_whitespace()
+        let valid_proxy_scope = claims
+            .scope
+            .split_whitespace()
             .all(|s| s.starts_with("lfs-"));
         if !valid_proxy_scope {
             return Err(AuthError::InvalidToken);
@@ -257,9 +259,7 @@ pub fn check_scope(claims: &XetClaims, required_scope: &str) -> bool {
 pub fn is_internal_token(claims: &XetClaims) -> bool {
     // I5 fix: Use consistent internal scope check (split_whitespace)
     let has_internal_scope = claims.scope.split_whitespace().any(|s| s == "internal");
-    claims.sub == "hub-service"
-        && has_internal_scope
-        && claims.token_type == "internal"
+    claims.sub == "hub-service" && has_internal_scope && claims.token_type == "internal"
 }
 
 /// I1 fix: Unified authorization helper for public endpoints.
@@ -323,13 +323,15 @@ impl AuthVerifier {
                     pk_path
                 );
             }
-            let pk_pem = std::fs::read_to_string(pk_path)
-                .map_err(|e| {
-                    tracing::error!("Failed to read CAS private key from {}: {}", pk_path, e);
-                    AuthError::InvalidKey
-                })?;
+            let pk_pem = std::fs::read_to_string(pk_path).map_err(|e| {
+                tracing::error!("Failed to read CAS private key from {}: {}", pk_path, e);
+                AuthError::InvalidKey
+            })?;
             let keypair = KeyPair::private_key_from_pem(&pk_pem)?;
-            tracing::info!("CAS private key loaded from {} — proxy token generation enabled", pk_path);
+            tracing::info!(
+                "CAS private key loaded from {} — proxy token generation enabled",
+                pk_path
+            );
             Some(keypair.signing_key)
         } else {
             tracing::warn!(
@@ -343,7 +345,9 @@ impl AuthVerifier {
             public_key,
             trusted_kids: auth_config.trusted_kids.clone(),
             signing_key,
-            signing_kid: auth_config.signing_kid.clone()
+            signing_kid: auth_config
+                .signing_kid
+                .clone()
                 .or_else(|| auth_config.trusted_kids.first().cloned()),
         })
     }
@@ -443,13 +447,14 @@ pub fn extract_token_from_request(req: &actix_web::HttpRequest) -> Option<String
     // Try Basic auth (username:password where password is JWT token)
     if let Some(encoded) = auth_str.strip_prefix("Basic ")
         && let Ok(decoded) = BASE64.decode(encoded)
-            && let Ok(credentials) = String::from_utf8(decoded) {
-                // Format: username:password (split only on first colon to preserve
-                // passwords that may contain ':' characters)
-                if let Some(password) = credentials.split_once(':').map(|x| x.1) {
-                    return Some(password.to_string());
-                }
-            }
+        && let Ok(credentials) = String::from_utf8(decoded)
+    {
+        // Format: username:password (split only on first colon to preserve
+        // passwords that may contain ':' characters)
+        if let Some(password) = credentials.split_once(':').map(|x| x.1) {
+            return Some(password.to_string());
+        }
+    }
 
     None
 }

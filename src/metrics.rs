@@ -233,9 +233,18 @@ mod tests {
         metrics.record_request(500);
 
         assert_eq!(metrics.http_requests_total.load(Ordering::Relaxed), 4);
-        assert_eq!(metrics.http_requests_by_status[0].load(Ordering::Relaxed), 2); // 2xx
-        assert_eq!(metrics.http_requests_by_status[2].load(Ordering::Relaxed), 1); // 4xx
-        assert_eq!(metrics.http_requests_by_status[3].load(Ordering::Relaxed), 1); // 5xx
+        assert_eq!(
+            metrics.http_requests_by_status[0].load(Ordering::Relaxed),
+            2
+        ); // 2xx
+        assert_eq!(
+            metrics.http_requests_by_status[2].load(Ordering::Relaxed),
+            1
+        ); // 4xx
+        assert_eq!(
+            metrics.http_requests_by_status[3].load(Ordering::Relaxed),
+            1
+        ); // 5xx
 
         // 记录存储操作
         metrics.record_storage_operation();
@@ -260,12 +269,18 @@ mod tests {
         // 测试 3xx 状态码
         metrics.record_request(301);
         metrics.record_request(302);
-        assert_eq!(metrics.http_requests_by_status[1].load(Ordering::Relaxed), 2); // 3xx
+        assert_eq!(
+            metrics.http_requests_by_status[1].load(Ordering::Relaxed),
+            2
+        ); // 3xx
 
         // 测试 "other" 状态码（1xx 和超出范围的）
         metrics.record_request(100);
         metrics.record_request(600);
-        assert_eq!(metrics.http_requests_by_status[4].load(Ordering::Relaxed), 2); // other
+        assert_eq!(
+            metrics.http_requests_by_status[4].load(Ordering::Relaxed),
+            2
+        ); // other
 
         assert_eq!(metrics.http_requests_total.load(Ordering::Relaxed), 4);
     }
@@ -291,7 +306,10 @@ mod tests {
         metrics.record_latency(start);
 
         let avg = metrics.average_latency_us();
-        assert!(avg >= 10000.0, "Average latency should be at least 10ms (10000us)");
+        assert!(
+            avg >= 10000.0,
+            "Average latency should be at least 10ms (10000us)"
+        );
     }
 
     #[test]

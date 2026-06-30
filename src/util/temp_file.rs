@@ -69,9 +69,9 @@ impl TempFile {
         let file = self.file.as_mut().ok_or_else(|| {
             StorageError::Internal("TempFile already persisted or consumed".to_string())
         })?;
-        file.write_all(data).await.map_err(|e| {
-            StorageError::Internal(format!("Failed to write to temp file: {}", e))
-        })
+        file.write_all(data)
+            .await
+            .map_err(|e| StorageError::Internal(format!("Failed to write to temp file: {}", e)))
     }
 
     /// Flush and fsync the temp file to disk.
@@ -80,12 +80,12 @@ impl TempFile {
         let file = self.file.as_mut().ok_or_else(|| {
             StorageError::Internal("TempFile already persisted or consumed".to_string())
         })?;
-        file.flush().await.map_err(|e| {
-            StorageError::Internal(format!("Failed to flush temp file: {}", e))
-        })?;
-        file.sync_all().await.map_err(|e| {
-            StorageError::Internal(format!("Failed to fsync temp file: {}", e))
-        })
+        file.flush()
+            .await
+            .map_err(|e| StorageError::Internal(format!("Failed to flush temp file: {}", e)))?;
+        file.sync_all()
+            .await
+            .map_err(|e| StorageError::Internal(format!("Failed to fsync temp file: {}", e)))
     }
 
     /// Consume the TempFile and return its path, without cleanup.

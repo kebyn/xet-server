@@ -78,7 +78,11 @@ impl std::fmt::Display for ConversionError {
             Self::ChunkingError(e) => write!(f, "Chunking error: {}", e),
             Self::BuildError(e) => write!(f, "Build error: {}", e),
             Self::TooSmall(size) => write!(f, "File too small to convert: {} bytes", size),
-            Self::TooLarge(size) => write!(f, "File too large to convert: {} bytes (exceeds max_conversion_size)", size),
+            Self::TooLarge(size) => write!(
+                f,
+                "File too large to convert: {} bytes (exceeds max_conversion_size)",
+                size
+            ),
             Self::Disabled => write!(f, "Conversion is disabled"),
         }
     }
@@ -100,7 +104,11 @@ impl ConversionPipeline {
         index: Arc<MetadataIndex>,
         config: ConversionConfig,
     ) -> Self {
-        Self { storage, index, config }
+        Self {
+            storage,
+            index,
+            config,
+        }
     }
 
     /// Convert a raw blob to xorb/shard format.
@@ -122,7 +130,8 @@ impl ConversionPipeline {
         let (file_path, _temp_guard) = self.open_blob_for_streaming(&object_key).await?;
 
         // Get file size for bounds checking
-        let file_meta = tokio::fs::metadata(&file_path).await
+        let file_meta = tokio::fs::metadata(&file_path)
+            .await
             .map_err(|e| ConversionError::StorageError(format!("Failed to stat blob: {}", e)))?;
         let raw_size = file_meta.len();
 
@@ -137,7 +146,8 @@ impl ConversionPipeline {
         }
 
         // 2. Open file for streaming reads
-        let mut file = tokio::fs::File::open(&file_path).await
+        let mut file = tokio::fs::File::open(&file_path)
+            .await
             .map_err(|e| ConversionError::StorageError(format!("Failed to open blob: {}", e)))?;
 
         use tokio::io::AsyncReadExt;
@@ -162,8 +172,9 @@ impl ConversionPipeline {
         let mut chunk_data_buf: Vec<u8> = Vec::new();
 
         loop {
-            let bytes_read = file.read(&mut read_buf).await
-                .map_err(|e| ConversionError::StorageError(format!("Failed to read blob: {}", e)))?;
+            let bytes_read = file.read(&mut read_buf).await.map_err(|e| {
+                ConversionError::StorageError(format!("Failed to read blob: {}", e))
+            })?;
 
             if bytes_read == 0 {
                 break;
@@ -199,7 +210,8 @@ impl ConversionPipeline {
                 }
 
                 // Add to xorb builder
-                let (_hash, compressed_len) = xorb_builder.add_chunk(chunk_data)
+                let (_hash, compressed_len) = xorb_builder
+                    .add_chunk(chunk_data)
                     .map_err(|e| ConversionError::BuildError(format!("Add chunk failed: {}", e)))?;
 
                 chunk_entries.push(XorbChunkBuildEntry {
@@ -229,7 +241,8 @@ impl ConversionPipeline {
                 num_deduped += 1;
             }
 
-            let (_hash, compressed_len) = xorb_builder.add_chunk(chunk_data)
+            let (_hash, compressed_len) = xorb_builder
+                .add_chunk(chunk_data)
                 .map_err(|e| ConversionError::BuildError(format!("Add chunk failed: {}", e)))?;
 
             chunk_entries.push(XorbChunkBuildEntry {
@@ -253,28 +266,43 @@ impl ConversionPipeline {
             chunk_data_buf.len()
         );
 
-        info!("Converting OID {}: {} bytes, {} chunks (streaming)", oid, raw_size, num_chunks);
+        info!(
+            "Converting OID {}: {} bytes, {} chunks (streaming)",
+            oid, raw_size, num_chunks
+        );
 
         // 4. Build xorb
-        let xorb_result = xorb_builder.build()
+        let xorb_result = xorb_builder
+            .build()
             .map_err(|e| ConversionError::BuildError(format!("Xorb build failed: {}", e)))?;
 
         let xorb_hash = xorb_result.xorb_hash.to_hex();
         let xorb_key = format!("xorbs/{}", xorb_hash);
 
         // 5. Store xorb (skip if exists — content-addressed)
-        let xorb_exists = self.storage.exists(&xorb_key).await
+        let xorb_exists = self
+            .storage
+            .exists(&xorb_key)
+            .await
             .map_err(|e| ConversionError::StorageError(e.to_string()))?;
 
         if !xorb_exists {
-            self.storage.put(&xorb_key, bytes::Bytes::from(xorb_result.data)).await
-                .map_err(|e| ConversionError::StorageError(format!("Failed to store xorb: {}", e)))?;
-            info!("Stored xorb: {} ({} bytes)", xorb_hash, xorb_result.total_compressed_size);
+            self.storage
+                .put(&xorb_key, bytes::Bytes::from(xorb_result.data))
+                .await
+                .map_err(|e| {
+                    ConversionError::StorageError(format!("Failed to store xorb: {}", e))
+                })?;
+            info!(
+                "Stored xorb: {} ({} bytes)",
+                xorb_hash, xorb_result.total_compressed_size
+            );
         }
 
         // 6. Build shard
-        let file_hash = MerkleHash::from_hex(oid)
-            .map_err(|e| ConversionError::BuildError(format!("Invalid OID as MerkleHash: {}", e)))?;
+        let file_hash = MerkleHash::from_hex(oid).map_err(|e| {
+            ConversionError::BuildError(format!("Invalid OID as MerkleHash: {}", e))
+        })?;
 
         let mut shard_builder = ShardBuilder::new();
 
@@ -302,7 +330,8 @@ impl ConversionPipeline {
 
         shard_builder.add_file(file_hash, vec![segment]);
 
-        let shard_data = shard_builder.build()
+        let shard_data = shard_builder
+            .build()
             .map_err(|e| ConversionError::BuildError(format!("Shard build failed: {}", e)))?;
 
         // Compute shard hash using BLAKE3
@@ -312,17 +341,16 @@ impl ConversionPipeline {
 
         // 7. Store shard
         let shard_size = shard_data.len();
-        self.storage.put(&shard_key, bytes::Bytes::from(shard_data)).await
+        self.storage
+            .put(&shard_key, bytes::Bytes::from(shard_data))
+            .await
             .map_err(|e| ConversionError::StorageError(format!("Failed to store shard: {}", e)))?;
 
         info!("Stored shard: {} ({} bytes)", shard_hash, shard_size);
 
         // 8. Register in MetadataIndex
-        self.index.register_shard(
-            shard_hash.clone(),
-            vec![oid.to_string()],
-            chunk_mappings,
-        );
+        self.index
+            .register_shard(shard_hash.clone(), vec![oid.to_string()], chunk_mappings);
 
         // 10. Delete raw blob (if configured)
         if self.config.delete_raw_after_conversion {
@@ -368,8 +396,9 @@ impl ConversionPipeline {
         // buffered the entire blob in memory before writing.
         // M5 fix: Use app-specific directory instead of system /tmp for security.
         let temp_dir = std::env::temp_dir().join("xet-conversion");
-        tokio::fs::create_dir_all(&temp_dir).await
-            .map_err(|e| ConversionError::StorageError(format!("Failed to create temp dir: {}", e)))?;
+        tokio::fs::create_dir_all(&temp_dir).await.map_err(|e| {
+            ConversionError::StorageError(format!("Failed to create temp dir: {}", e))
+        })?;
 
         // Generate unique filename to avoid conflicts
         let unique_id = format!(
@@ -390,10 +419,15 @@ impl ConversionPipeline {
         // I1 fix: Use download_to_path for streaming download.
         // S3 backend overrides this with ByteStream::write_to_path (bounded memory).
         // Default implementation falls back to get() + write() with a warning.
-        self.storage.download_to_path(object_key, &temp_path).await
-            .map_err(|e| ConversionError::StorageError(
-                format!("Failed to download blob to temp file: {}", e)
-            ))?;
+        self.storage
+            .download_to_path(object_key, &temp_path)
+            .await
+            .map_err(|e| {
+                ConversionError::StorageError(format!(
+                    "Failed to download blob to temp file: {}",
+                    e
+                ))
+            })?;
 
         // I2: Return a RAII guard that will delete the temp file when dropped
         let guard = PathGuard::new(temp_path.clone());

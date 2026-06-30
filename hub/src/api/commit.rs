@@ -1,10 +1,10 @@
-use actix_web::{web, HttpResponse};
 use crate::auth::extract::{AuthUser, AuthWrite};
 use crate::auth::xet_signer::XetSigner;
 use crate::cas_client::CasClientTrait;
 use crate::metadata::{FileEntry, MetadataStore, RepoType, Revision};
-use sha2::{Sha256, Digest};
+use actix_web::{HttpResponse, web};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Maximum size for inline file content (10MB)
@@ -70,15 +70,24 @@ fn now_timestamp() -> i64 {
 /// Generate a commit ID from repo_id, parent, message, timestamp, and UUID nonce
 fn generate_commit_id(repo_id: i64, parent: Option<&str>, message: &str, timestamp: i64) -> String {
     let nonce = uuid::Uuid::new_v4().to_string();
-    let input = format!("{}:{}:{}:{}:{}", repo_id, parent.unwrap_or(""), message, timestamp, nonce);
+    let input = format!(
+        "{}:{}:{}:{}:{}",
+        repo_id,
+        parent.unwrap_or(""),
+        message,
+        timestamp,
+        nonce
+    );
     hex::encode(Sha256::digest(input.as_bytes()))
 }
 
 /// Decode base64 content (handles "base64:" prefix or raw base64)
 fn decode_base64_content(content: &str) -> Result<Vec<u8>, String> {
     let content_to_decode = content.strip_prefix("base64:").unwrap_or(content);
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
-    STANDARD.decode(content_to_decode).map_err(|e| format!("Base64 decode error: {}", e))
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    STANDARD
+        .decode(content_to_decode)
+        .map_err(|e| format!("Base64 decode error: {}", e))
 }
 
 /// I1 fix: Validate file path to prevent path traversal and other injection attacks.
@@ -125,11 +134,13 @@ fn validate_file_path(path: &str) -> Result<(), String> {
     // Reject Windows reserved names (defense-in-depth)
     let first_component = path.split(['/', '\\']).next().unwrap_or("");
     let reserved = [
-        "CON", "PRN", "AUX", "NUL",
-        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
     ];
-    if reserved.iter().any(|r| r.eq_ignore_ascii_case(first_component)) {
+    if reserved
+        .iter()
+        .any(|r| r.eq_ignore_ascii_case(first_component))
+    {
         return Err(format!("File path uses reserved name: {}", first_component));
     }
 
@@ -168,7 +179,10 @@ async fn handle_commit(
     // Users can write to their own namespace. Organization/team namespace support
     // can be added via metadata.is_namespace_member() when multi-user collaboration is needed.
     if namespace != auth.info.username {
-        let has_access = metadata.is_namespace_member(&auth.info.username, &namespace).await.unwrap_or(false);
+        let has_access = metadata
+            .is_namespace_member(&auth.info.username, &namespace)
+            .await
+            .unwrap_or(false);
         if !has_access {
             return HttpResponse::Forbidden().json(serde_json::json!({
                 "error": format!("User '{}' cannot commit to namespace '{}'", auth.info.username, namespace),
@@ -201,7 +215,7 @@ async fn handle_commit(
                 _ => HttpResponse::InternalServerError().json(serde_json::json!({
                     "error": e.to_string(),
                     "error_type": "InternalError"
-                }))
+                })),
             };
         }
     };
@@ -301,7 +315,8 @@ async fn handle_commit(
 
     // Generate new commit ID
     let timestamp = now_timestamp();
-    let commit_id = generate_commit_id(repo.id, current_head.as_deref(), &header.summary, timestamp);
+    let commit_id =
+        generate_commit_id(repo.id, current_head.as_deref(), &header.summary, timestamp);
 
     // Build file entries
     let mut file_entries: Vec<FileEntry> = Vec::new();
@@ -339,9 +354,17 @@ async fn handle_commit(
         let size = decoded_content.len() as u64;
 
         // Store inline file content in CAS (C1)
-        if let Err(e) = cas_client.proxy_lfs_upload(&oid, bytes::Bytes::from(decoded_content), &internal_token).await {
-            tracing::error!("Failed to store inline file in CAS: status={}, error={}", e.status, e.message);
-            let status_code = actix_web::http::StatusCode::from_u16(e.status).unwrap_or(actix_web::http::StatusCode::BAD_GATEWAY);
+        if let Err(e) = cas_client
+            .proxy_lfs_upload(&oid, bytes::Bytes::from(decoded_content), &internal_token)
+            .await
+        {
+            tracing::error!(
+                "Failed to store inline file in CAS: status={}, error={}",
+                e.status,
+                e.message
+            );
+            let status_code = actix_web::http::StatusCode::from_u16(e.status)
+                .unwrap_or(actix_web::http::StatusCode::BAD_GATEWAY);
             return HttpResponse::build(status_code).json(serde_json::json!({
                 "error": format!("Failed to store inline file in CAS: {}", e.message),
                 "error_type": "CasError"
@@ -405,13 +428,18 @@ async fn handle_commit(
 
     // Copy parent's file tree (if parent exists) and apply changes
     let parent_entries: Vec<FileEntry> = if let Some(parent_commit) = &current_head {
-        metadata.get_file_tree(repo.id, parent_commit).await.ok().unwrap_or_default()
+        metadata
+            .get_file_tree(repo.id, parent_commit)
+            .await
+            .ok()
+            .unwrap_or_default()
     } else {
         Vec::new()
     };
 
     // Start from parent's tree, apply additions/deletions
-    let mut final_entries: std::collections::HashMap<String, FileEntry> = std::collections::HashMap::new();
+    let mut final_entries: std::collections::HashMap<String, FileEntry> =
+        std::collections::HashMap::new();
     for entry in parent_entries {
         final_entries.insert(entry.path.clone(), entry);
     }
@@ -430,14 +458,17 @@ async fn handle_commit(
 
     // Apply additions/updates (copy entries but update commit_id)
     for entry in file_entries {
-        final_entries.insert(entry.path.clone(), FileEntry {
-            path: entry.path,
-            repo_id: repo.id,
-            commit_id: commit_id.clone(),
-            size: entry.size,
-            cas_hash: entry.cas_hash,
-            is_lfs: entry.is_lfs,
-        });
+        final_entries.insert(
+            entry.path.clone(),
+            FileEntry {
+                path: entry.path,
+                repo_id: repo.id,
+                commit_id: commit_id.clone(),
+                size: entry.size,
+                cas_hash: entry.cas_hash,
+                is_lfs: entry.is_lfs,
+            },
+        );
     }
 
     // Convert to vector for storage
@@ -454,7 +485,10 @@ async fn handle_commit(
     };
 
     // Atomically commit: check OCC + add revision + add file entries + set HEAD (C3)
-    match metadata.commit_atomic(&revision, &final_entries_vec, parent_revision.as_deref()).await {
+    match metadata
+        .commit_atomic(&revision, &final_entries_vec, parent_revision.as_deref())
+        .await
+    {
         Ok(_) => {}
         Err(crate::metadata::MetadataError::Conflict(actual_head)) => {
             return HttpResponse::Conflict().json(serde_json::json!({
@@ -488,7 +522,16 @@ pub async fn commit_model(
     cas_client: web::Data<std::sync::Arc<dyn CasClientTrait>>,
     signer: web::Data<std::sync::Arc<XetSigner>>,
 ) -> HttpResponse {
-    handle_commit(auth, path, body, RepoType::Model, metadata, cas_client, signer).await
+    handle_commit(
+        auth,
+        path,
+        body,
+        RepoType::Model,
+        metadata,
+        cas_client,
+        signer,
+    )
+    .await
 }
 
 // Dataset commit handler
@@ -500,7 +543,16 @@ pub async fn commit_dataset(
     cas_client: web::Data<std::sync::Arc<dyn CasClientTrait>>,
     signer: web::Data<std::sync::Arc<XetSigner>>,
 ) -> HttpResponse {
-    handle_commit(auth, path, body, RepoType::Dataset, metadata, cas_client, signer).await
+    handle_commit(
+        auth,
+        path,
+        body,
+        RepoType::Dataset,
+        metadata,
+        cas_client,
+        signer,
+    )
+    .await
 }
 
 // Space commit handler
@@ -512,17 +564,26 @@ pub async fn commit_space(
     cas_client: web::Data<std::sync::Arc<dyn CasClientTrait>>,
     signer: web::Data<std::sync::Arc<XetSigner>>,
 ) -> HttpResponse {
-    handle_commit(auth, path, body, RepoType::Space, metadata, cas_client, signer).await
+    handle_commit(
+        auth,
+        path,
+        body,
+        RepoType::Space,
+        metadata,
+        cas_client,
+        signer,
+    )
+    .await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use actix_web::{test as actix_test, App};
     use crate::auth::token_store::TokenStore;
-    use crate::metadata::SqliteMetadataStore;
     use crate::cas_client::{BlobState, CasUploadError};
     use crate::error::HubError;
+    use crate::metadata::SqliteMetadataStore;
+    use actix_web::{App, test as actix_test};
     use ed25519_dalek::SigningKey;
     use rand::rngs::OsRng;
 
@@ -558,7 +619,12 @@ mod tests {
             }
         }
 
-        async fn proxy_lfs_upload(&self, _oid: &str, _data: bytes::Bytes, _token: &str) -> Result<(), CasUploadError> {
+        async fn proxy_lfs_upload(
+            &self,
+            _oid: &str,
+            _data: bytes::Bytes,
+            _token: &str,
+        ) -> Result<(), CasUploadError> {
             if self.allow_uploads {
                 Ok(())
             } else {
@@ -570,11 +636,17 @@ mod tests {
         }
     }
 
-    async fn setup_test_env_with_mock(mock_cas: MockCasClient) -> (std::sync::Arc<TokenStore>, std::sync::Arc<dyn MetadataStore>, std::sync::Arc<dyn CasClientTrait>, std::sync::Arc<XetSigner>) {
+    async fn setup_test_env_with_mock(
+        mock_cas: MockCasClient,
+    ) -> (
+        std::sync::Arc<TokenStore>,
+        std::sync::Arc<dyn MetadataStore>,
+        std::sync::Arc<dyn CasClientTrait>,
+        std::sync::Arc<XetSigner>,
+    ) {
         let token_store = std::sync::Arc::new(TokenStore::in_memory().await.unwrap());
-        let metadata: std::sync::Arc<dyn MetadataStore> = std::sync::Arc::new(
-            SqliteMetadataStore::in_memory().await.unwrap()
-        );
+        let metadata: std::sync::Arc<dyn MetadataStore> =
+            std::sync::Arc::new(SqliteMetadataStore::in_memory().await.unwrap());
         let cas_client: std::sync::Arc<dyn CasClientTrait> = std::sync::Arc::new(mock_cas);
         let signing_key = SigningKey::generate(&mut OsRng);
         let signer = std::sync::Arc::new(XetSigner::new(signing_key, "test-key", 3600, 300));
@@ -586,10 +658,16 @@ mod tests {
     async fn test_commit_with_inline_file() {
         let mock_cas = MockCasClient::new();
         let (token_store, metadata, cas_client, signer) = setup_test_env_with_mock(mock_cas).await;
-        let token = token_store.create_token("testuser", "test-token", "write").await.unwrap();
+        let token = token_store
+            .create_token("testuser", "test-token", "write")
+            .await
+            .unwrap();
 
         // Create repo
-        metadata.create_repo("testuser", "my-model", RepoType::Model, false).await.unwrap();
+        metadata
+            .create_repo("testuser", "my-model", RepoType::Model, false)
+            .await
+            .unwrap();
 
         let app = actix_test::init_service(
             App::new()
@@ -597,11 +675,15 @@ mod tests {
                 .app_data(web::Data::new(metadata.clone()))
                 .app_data(web::Data::new(cas_client.clone()))
                 .app_data(web::Data::new(signer.clone()))
-                .route("/api/models/{ns}/{repo}/commit/{revision}", web::post().to(commit_model))
-        ).await;
+                .route(
+                    "/api/models/{ns}/{repo}/commit/{revision}",
+                    web::post().to(commit_model),
+                ),
+        )
+        .await;
 
         // NDJSON body with inline file
-        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
         let content = STANDARD.encode("{\"test\": true}");
         let body = format!(
             "{{\"key\":\"header\",\"value\":{{\"summary\":\"Add config\",\"parentRevision\":null}}}}\n\
@@ -626,10 +708,16 @@ mod tests {
     async fn test_commit_with_lfs_file_not_in_cas() {
         let mock_cas = MockCasClient::new(); // No existing OIDs
         let (token_store, metadata, cas_client, signer) = setup_test_env_with_mock(mock_cas).await;
-        let token = token_store.create_token("testuser", "test-token", "write").await.unwrap();
+        let token = token_store
+            .create_token("testuser", "test-token", "write")
+            .await
+            .unwrap();
 
         // Create repo
-        metadata.create_repo("testuser", "my-model", RepoType::Model, false).await.unwrap();
+        metadata
+            .create_repo("testuser", "my-model", RepoType::Model, false)
+            .await
+            .unwrap();
 
         let app = actix_test::init_service(
             App::new()
@@ -637,8 +725,12 @@ mod tests {
                 .app_data(web::Data::new(metadata.clone()))
                 .app_data(web::Data::new(cas_client.clone()))
                 .app_data(web::Data::new(signer.clone()))
-                .route("/api/models/{ns}/{repo}/commit/{revision}", web::post().to(commit_model))
-        ).await;
+                .route(
+                    "/api/models/{ns}/{repo}/commit/{revision}",
+                    web::post().to(commit_model),
+                ),
+        )
+        .await;
 
         // NDJSON body with LFS file that doesn't exist in CAS
         let oid = "a".repeat(64);
@@ -657,7 +749,10 @@ mod tests {
 
         let resp = actix_test::call_service(&app, req).await;
         // Mock CAS will return NotFound for the LFS file, so we expect UnprocessableEntity (422)
-        assert_eq!(resp.status(), actix_web::http::StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            resp.status(),
+            actix_web::http::StatusCode::UNPROCESSABLE_ENTITY
+        );
     }
 
     // Test commit with invalid LFS OID format (defense-in-depth validation)
@@ -665,10 +760,16 @@ mod tests {
     async fn test_commit_with_invalid_lfs_oid_format() {
         let mock_cas = MockCasClient::new();
         let (token_store, metadata, cas_client, signer) = setup_test_env_with_mock(mock_cas).await;
-        let token = token_store.create_token("testuser", "test-token", "write").await.unwrap();
+        let token = token_store
+            .create_token("testuser", "test-token", "write")
+            .await
+            .unwrap();
 
         // Create repo
-        metadata.create_repo("testuser", "my-model", RepoType::Model, false).await.unwrap();
+        metadata
+            .create_repo("testuser", "my-model", RepoType::Model, false)
+            .await
+            .unwrap();
 
         let app = actix_test::init_service(
             App::new()
@@ -676,8 +777,12 @@ mod tests {
                 .app_data(web::Data::new(metadata.clone()))
                 .app_data(web::Data::new(cas_client.clone()))
                 .app_data(web::Data::new(signer.clone()))
-                .route("/api/models/{ns}/{repo}/commit/{revision}", web::post().to(commit_model))
-        ).await;
+                .route(
+                    "/api/models/{ns}/{repo}/commit/{revision}",
+                    web::post().to(commit_model),
+                ),
+        )
+        .await;
 
         // NDJSON body with LFS file that has invalid OID format (too short, not 64 chars)
         let body = "{\"key\":\"header\",\"value\":{\"summary\":\"Add model\",\"parentRevision\":null}}\n\
@@ -699,10 +804,16 @@ mod tests {
     async fn test_commit_atomic_rejects_mismatched_parent() {
         let mock_cas = MockCasClient::new();
         let (token_store, metadata, cas_client, signer) = setup_test_env_with_mock(mock_cas).await;
-        let token = token_store.create_token("testuser", "test-token", "write").await.unwrap();
+        let token = token_store
+            .create_token("testuser", "test-token", "write")
+            .await
+            .unwrap();
 
         // Create repo and initial commit
-        let repo = metadata.create_repo("testuser", "my-model", RepoType::Model, false).await.unwrap();
+        let repo = metadata
+            .create_repo("testuser", "my-model", RepoType::Model, false)
+            .await
+            .unwrap();
         let initial_commit = Revision {
             commit_id: "initial123".to_string(),
             repo_id: repo.id,
@@ -720,8 +831,12 @@ mod tests {
                 .app_data(web::Data::new(metadata.clone()))
                 .app_data(web::Data::new(cas_client.clone()))
                 .app_data(web::Data::new(signer.clone()))
-                .route("/api/models/{ns}/{repo}/commit/{revision}", web::post().to(commit_model))
-        ).await;
+                .route(
+                    "/api/models/{ns}/{repo}/commit/{revision}",
+                    web::post().to(commit_model),
+                ),
+        )
+        .await;
 
         // Try to commit with wrong parent
         let body = "{\"key\":\"header\",\"value\":{\"summary\":\"Update\",\"parentRevision\":\"wrong_parent\"}}";
@@ -744,10 +859,16 @@ mod tests {
     async fn test_commit_read_only_token() {
         let mock_cas = MockCasClient::new();
         let (token_store, metadata, cas_client, signer) = setup_test_env_with_mock(mock_cas).await;
-        let token = token_store.create_token("testuser", "test-token", "read").await.unwrap();
+        let token = token_store
+            .create_token("testuser", "test-token", "read")
+            .await
+            .unwrap();
 
         // Create repo
-        metadata.create_repo("testuser", "my-model", RepoType::Model, false).await.unwrap();
+        metadata
+            .create_repo("testuser", "my-model", RepoType::Model, false)
+            .await
+            .unwrap();
 
         let app = actix_test::init_service(
             App::new()
@@ -755,8 +876,12 @@ mod tests {
                 .app_data(web::Data::new(metadata.clone()))
                 .app_data(web::Data::new(cas_client.clone()))
                 .app_data(web::Data::new(signer.clone()))
-                .route("/api/models/{ns}/{repo}/commit/{revision}", web::post().to(commit_model))
-        ).await;
+                .route(
+                    "/api/models/{ns}/{repo}/commit/{revision}",
+                    web::post().to(commit_model),
+                ),
+        )
+        .await;
 
         let body = "{\"key\":\"header\",\"value\":{\"summary\":\"Add config\"}}";
 
@@ -775,10 +900,16 @@ mod tests {
     async fn test_commit_inline_file_too_large() {
         let mock_cas = MockCasClient::new();
         let (token_store, metadata, cas_client, signer) = setup_test_env_with_mock(mock_cas).await;
-        let token = token_store.create_token("testuser", "test-token", "write").await.unwrap();
+        let token = token_store
+            .create_token("testuser", "test-token", "write")
+            .await
+            .unwrap();
 
         // Create repo
-        metadata.create_repo("testuser", "my-model", RepoType::Model, false).await.unwrap();
+        metadata
+            .create_repo("testuser", "my-model", RepoType::Model, false)
+            .await
+            .unwrap();
 
         // Configure actix-web to accept larger payloads for testing
         let payload_config = web::PayloadConfig::default().limit(20 * 1024 * 1024);
@@ -790,12 +921,16 @@ mod tests {
                 .app_data(web::Data::new(metadata.clone()))
                 .app_data(web::Data::new(cas_client.clone()))
                 .app_data(web::Data::new(signer.clone()))
-                .route("/api/models/{ns}/{repo}/commit/{revision}", web::post().to(commit_model))
-        ).await;
+                .route(
+                    "/api/models/{ns}/{repo}/commit/{revision}",
+                    web::post().to(commit_model),
+                ),
+        )
+        .await;
 
         // Create a large content (> 10MB)
         let large_content = vec![0u8; MAX_INLINE_SIZE + 1];
-        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
         let encoded = STANDARD.encode(&large_content);
         let body = format!(
             "{{\"key\":\"header\",\"value\":{{\"summary\":\"Add large file\",\"parentRevision\":null}}}}\n\
@@ -814,7 +949,12 @@ mod tests {
         assert_eq!(resp.status(), actix_web::http::StatusCode::BAD_REQUEST);
 
         let resp_body: serde_json::Value = actix_test::read_body_json(resp).await;
-        assert!(resp_body["error"].as_str().unwrap().contains("Inline file too large"));
+        assert!(
+            resp_body["error"]
+                .as_str()
+                .unwrap()
+                .contains("Inline file too large")
+        );
     }
 
     #[test]

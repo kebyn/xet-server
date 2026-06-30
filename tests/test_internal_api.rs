@@ -6,15 +6,15 @@
 
 mod common;
 
-use actix_web::{test, web, App, http::Method};
+use actix_web::{App, http::Method, test, web};
 use bytes::Bytes;
 use tempfile::tempdir;
 
-use common::{test_token_for_keypair, TestContext};
+use common::{TestContext, test_token_for_keypair};
 use xet_server::hash::compute_data_hash;
 use xet_server::index::MetadataIndex;
-use xet_server::storage::local::LocalStorage;
 use xet_server::storage::StorageBackend;
+use xet_server::storage::local::LocalStorage;
 
 fn create_test_context() -> TestContext {
     common::test_config_with_new_key()
@@ -28,9 +28,8 @@ async fn test_internal_get_state_raw() {
     let ctx = create_test_context();
     let token = test_token_for_keypair(&ctx.keypair, "internal");
 
-    let storage: Box<dyn StorageBackend> = Box::new(
-        LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap(),
-    );
+    let storage: Box<dyn StorageBackend> =
+        Box::new(LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap());
 
     let index = MetadataIndex::new();
 
@@ -38,7 +37,10 @@ async fn test_internal_get_state_raw() {
     let content = b"test content for state query";
     let oid = compute_data_hash(content).to_hex();
     let object_key = format!("lfs/objects/{}", oid);
-    storage.put(&object_key, Bytes::from(content.to_vec())).await.unwrap();
+    storage
+        .put(&object_key, Bytes::from(content.to_vec()))
+        .await
+        .unwrap();
 
     let app = test::init_service(
         App::new()
@@ -46,7 +48,10 @@ async fn test_internal_get_state_raw() {
             .app_data(web::Data::new(index))
             .app_data(web::Data::new(ctx.auth_verifier.clone()))
             .app_data(web::Data::new(ctx.config.clone()))
-            .route("/internal/state/{oid}", web::get().to(xet_server::api::internal::get_blob_state)),
+            .route(
+                "/internal/state/{oid}",
+                web::get().to(xet_server::api::internal::get_blob_state),
+            ),
     )
     .await;
 
@@ -72,9 +77,8 @@ async fn test_internal_get_state_not_found() {
     let ctx = create_test_context();
     let token = test_token_for_keypair(&ctx.keypair, "internal");
 
-    let storage: Box<dyn StorageBackend> = Box::new(
-        LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap(),
-    );
+    let storage: Box<dyn StorageBackend> =
+        Box::new(LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap());
 
     let index = MetadataIndex::new();
 
@@ -84,7 +88,10 @@ async fn test_internal_get_state_not_found() {
             .app_data(web::Data::new(index))
             .app_data(web::Data::new(ctx.auth_verifier.clone()))
             .app_data(web::Data::new(ctx.config.clone()))
-            .route("/internal/state/{oid}", web::get().to(xet_server::api::internal::get_blob_state)),
+            .route(
+                "/internal/state/{oid}",
+                web::get().to(xet_server::api::internal::get_blob_state),
+            ),
     )
     .await;
 
@@ -111,9 +118,8 @@ async fn test_internal_head_blob_raw() {
     let ctx = create_test_context();
     let token = test_token_for_keypair(&ctx.keypair, "internal");
 
-    let storage: Box<dyn StorageBackend> = Box::new(
-        LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap(),
-    );
+    let storage: Box<dyn StorageBackend> =
+        Box::new(LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap());
 
     let index = MetadataIndex::new();
 
@@ -121,7 +127,10 @@ async fn test_internal_head_blob_raw() {
     let content = b"test content for head";
     let oid = compute_data_hash(content).to_hex();
     let object_key = format!("lfs/objects/{}", oid);
-    storage.put(&object_key, Bytes::from(content.to_vec())).await.unwrap();
+    storage
+        .put(&object_key, Bytes::from(content.to_vec()))
+        .await
+        .unwrap();
 
     let app = test::init_service(
         App::new()
@@ -129,7 +138,10 @@ async fn test_internal_head_blob_raw() {
             .app_data(web::Data::new(index))
             .app_data(web::Data::new(ctx.auth_verifier.clone()))
             .app_data(web::Data::new(ctx.config.clone()))
-            .route("/internal/blob/{oid}", web::head().to(xet_server::api::internal::head_blob)),
+            .route(
+                "/internal/blob/{oid}",
+                web::head().to(xet_server::api::internal::head_blob),
+            ),
     )
     .await;
 
@@ -155,19 +167,14 @@ async fn test_internal_head_blob_xet() {
     let ctx = create_test_context();
     let token = test_token_for_keypair(&ctx.keypair, "internal");
 
-    let storage: Box<dyn StorageBackend> = Box::new(
-        LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap(),
-    );
+    let storage: Box<dyn StorageBackend> =
+        Box::new(LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap());
 
     let index = MetadataIndex::new();
 
     // Register a xet_only blob in MetadataIndex
     let oid = "b".repeat(64);
-    index.register_shard(
-        "shard-test".to_string(),
-        vec![oid.clone()],
-        vec![],
-    );
+    index.register_shard("shard-test".to_string(), vec![oid.clone()], vec![]);
 
     let app = test::init_service(
         App::new()
@@ -175,7 +182,10 @@ async fn test_internal_head_blob_xet() {
             .app_data(web::Data::new(index))
             .app_data(web::Data::new(ctx.auth_verifier.clone()))
             .app_data(web::Data::new(ctx.config.clone()))
-            .route("/internal/blob/{oid}", web::head().to(xet_server::api::internal::head_blob)),
+            .route(
+                "/internal/blob/{oid}",
+                web::head().to(xet_server::api::internal::head_blob),
+            ),
     )
     .await;
 
@@ -205,9 +215,8 @@ async fn test_internal_rejects_non_internal_scope() {
     // Use "read" scope instead of "internal"
     let token = test_token_for_keypair(&ctx.keypair, "read");
 
-    let storage: Box<dyn StorageBackend> = Box::new(
-        LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap(),
-    );
+    let storage: Box<dyn StorageBackend> =
+        Box::new(LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap());
 
     let index = MetadataIndex::new();
 
@@ -217,8 +226,14 @@ async fn test_internal_rejects_non_internal_scope() {
             .app_data(web::Data::new(index))
             .app_data(web::Data::new(ctx.auth_verifier.clone()))
             .app_data(web::Data::new(ctx.config.clone()))
-            .route("/internal/state/{oid}", web::get().to(xet_server::api::internal::get_blob_state))
-            .route("/internal/blob/{oid}", web::head().to(xet_server::api::internal::head_blob)),
+            .route(
+                "/internal/state/{oid}",
+                web::get().to(xet_server::api::internal::get_blob_state),
+            )
+            .route(
+                "/internal/blob/{oid}",
+                web::head().to(xet_server::api::internal::head_blob),
+            ),
     )
     .await;
 
@@ -255,9 +270,8 @@ async fn test_internal_head_blob_not_found() {
     let ctx = create_test_context();
     let token = test_token_for_keypair(&ctx.keypair, "internal");
 
-    let storage: Box<dyn StorageBackend> = Box::new(
-        LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap(),
-    );
+    let storage: Box<dyn StorageBackend> =
+        Box::new(LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap());
 
     let index = MetadataIndex::new();
 
@@ -267,7 +281,10 @@ async fn test_internal_head_blob_not_found() {
             .app_data(web::Data::new(index))
             .app_data(web::Data::new(ctx.auth_verifier.clone()))
             .app_data(web::Data::new(ctx.config.clone()))
-            .route("/internal/blob/{oid}", web::head().to(xet_server::api::internal::head_blob)),
+            .route(
+                "/internal/blob/{oid}",
+                web::head().to(xet_server::api::internal::head_blob),
+            ),
     )
     .await;
 
@@ -293,9 +310,8 @@ async fn test_lfs_upload_stores_blob() {
     let ctx = create_test_context();
     let token = test_token_for_keypair(&ctx.keypair, "read write");
 
-    let storage: Box<dyn StorageBackend> = Box::new(
-        LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap(),
-    );
+    let storage: Box<dyn StorageBackend> =
+        Box::new(LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap());
 
     // Create config with upload temp dir
     let config = xet_server::config::ServerConfig {
@@ -311,7 +327,10 @@ async fn test_lfs_upload_stores_blob() {
             .app_data(web::Data::new(storage))
             .app_data(web::Data::new(ctx.auth_verifier.clone()))
             .app_data(web::Data::new(config))
-            .route("/lfs/objects/{oid}", web::put().to(xet_server::api::lfs::upload_lfs_object)),
+            .route(
+                "/lfs/objects/{oid}",
+                web::put().to(xet_server::api::lfs::upload_lfs_object),
+            ),
     )
     .await;
 
@@ -328,9 +347,8 @@ async fn test_lfs_upload_stores_blob() {
     assert_eq!(resp.status(), 200);
 
     // Verify blob was stored
-    let verify_storage: Box<dyn StorageBackend> = Box::new(
-        LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap(),
-    );
+    let verify_storage: Box<dyn StorageBackend> =
+        Box::new(LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap());
     let object_key = format!("lfs/objects/{}", oid);
     assert!(verify_storage.exists(&object_key).await.unwrap());
 }
@@ -344,9 +362,8 @@ async fn test_lfs_download_raw_only() {
     let ctx = create_test_context();
     let token = test_token_for_keypair(&ctx.keypair, "read write");
 
-    let storage: Box<dyn StorageBackend> = Box::new(
-        LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap(),
-    );
+    let storage: Box<dyn StorageBackend> =
+        Box::new(LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap());
     let storage_arc: std::sync::Arc<Box<dyn StorageBackend>> = std::sync::Arc::new(storage);
 
     let index = MetadataIndex::new();
@@ -371,8 +388,14 @@ async fn test_lfs_download_raw_only() {
             .app_data(web::Data::new(conversion_config))
             .app_data(web::Data::new(ctx.auth_verifier.clone()))
             .app_data(web::Data::new(config))
-            .route("/lfs/objects/{oid}", web::put().to(xet_server::api::lfs::upload_lfs_object))
-            .route("/lfs/objects/{oid}", web::get().to(xet_server::api::lfs::download_lfs_object)),
+            .route(
+                "/lfs/objects/{oid}",
+                web::put().to(xet_server::api::lfs::upload_lfs_object),
+            )
+            .route(
+                "/lfs/objects/{oid}",
+                web::get().to(xet_server::api::lfs::download_lfs_object),
+            ),
     )
     .await;
 

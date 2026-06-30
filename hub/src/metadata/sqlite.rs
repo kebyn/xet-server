@@ -5,8 +5,8 @@
 
 use super::{FileEntry, MetadataError, MetadataStore, Repo, RepoType, Revision};
 use async_trait::async_trait;
-use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 use sqlx::Row;
+use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 
 // Schema version tracking for future migrations
 // Current version: 1 (initial schema)
@@ -92,43 +92,85 @@ fn is_unique_violation(err: &sqlx::Error) -> bool {
 
 /// Map a `sqlx::Row` to a `Repo` value.
 fn row_to_repo(row: &sqlx::sqlite::SqliteRow) -> Result<Repo, MetadataError> {
-    let repo_type_str: String = row.try_get(3)
+    let repo_type_str: String = row
+        .try_get(3)
         .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
-    let repo_type = repo_type_str.parse::<RepoType>()
+    let repo_type = repo_type_str
+        .parse::<RepoType>()
         .map_err(|e| MetadataError::DatabaseError(format!("Invalid repo_type: {}", e)))?;
     Ok(Repo {
-        id: row.try_get(0).map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
-        name: row.try_get(1).map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
-        namespace: row.try_get(2).map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
+        id: row
+            .try_get(0)
+            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
+        name: row
+            .try_get(1)
+            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
+        namespace: row
+            .try_get(2)
+            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
         repo_type,
-        sha: row.try_get(4).map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
-        private: row.try_get::<i64, _>(5).map_err(|e| MetadataError::DatabaseError(e.to_string()))? != 0,
-        created_at: row.try_get(6).map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
-        updated_at: row.try_get(7).map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
+        sha: row
+            .try_get(4)
+            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
+        private: row
+            .try_get::<i64, _>(5)
+            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?
+            != 0,
+        created_at: row
+            .try_get(6)
+            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
+        updated_at: row
+            .try_get(7)
+            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
     })
 }
 
 /// Map a `sqlx::Row` to a `Revision` value.
 fn row_to_revision(row: &sqlx::sqlite::SqliteRow) -> Result<Revision, MetadataError> {
     Ok(Revision {
-        commit_id: row.try_get(0).map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
-        repo_id: row.try_get(1).map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
-        parent: row.try_get(2).map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
-        message: row.try_get(3).map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
-        author: row.try_get(4).map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
-        created_at: row.try_get(5).map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
+        commit_id: row
+            .try_get(0)
+            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
+        repo_id: row
+            .try_get(1)
+            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
+        parent: row
+            .try_get(2)
+            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
+        message: row
+            .try_get(3)
+            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
+        author: row
+            .try_get(4)
+            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
+        created_at: row
+            .try_get(5)
+            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
     })
 }
 
 /// Map a `sqlx::Row` to a `FileEntry` value.
 fn row_to_file_entry(row: &sqlx::sqlite::SqliteRow) -> Result<FileEntry, MetadataError> {
     Ok(FileEntry {
-        path: row.try_get(0).map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
-        repo_id: row.try_get(1).map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
-        commit_id: row.try_get(2).map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
-        size: row.try_get::<i64, _>(3).map_err(|e| MetadataError::DatabaseError(e.to_string()))? as u64,
-        cas_hash: row.try_get(4).map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
-        is_lfs: row.try_get::<i64, _>(5).map_err(|e| MetadataError::DatabaseError(e.to_string()))? != 0,
+        path: row
+            .try_get(0)
+            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
+        repo_id: row
+            .try_get(1)
+            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
+        commit_id: row
+            .try_get(2)
+            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
+        size: row
+            .try_get::<i64, _>(3)
+            .map_err(|e| MetadataError::DatabaseError(e.to_string()))? as u64,
+        cas_hash: row
+            .try_get(4)
+            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
+        is_lfs: row
+            .try_get::<i64, _>(5)
+            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?
+            != 0,
     })
 }
 
@@ -141,14 +183,22 @@ impl SqliteMetadataStore {
             .max_connections(pool_size)
             .min_connections(1)
             .acquire_timeout(std::time::Duration::from_secs(5))
-            .after_connect(|conn, _| Box::pin(async move {
-                sqlx::query("PRAGMA journal_mode = WAL;").execute(&mut *conn).await?;
-                sqlx::query("PRAGMA foreign_keys = ON;").execute(&mut *conn).await?;
-                // M4 fix: Wait up to 5 seconds for lock release instead of failing immediately
-                // with SQLITE_BUSY. Critical for concurrent write workloads.
-                sqlx::query("PRAGMA busy_timeout = 5000;").execute(&mut *conn).await?;
-                Ok(())
-            }))
+            .after_connect(|conn, _| {
+                Box::pin(async move {
+                    sqlx::query("PRAGMA journal_mode = WAL;")
+                        .execute(&mut *conn)
+                        .await?;
+                    sqlx::query("PRAGMA foreign_keys = ON;")
+                        .execute(&mut *conn)
+                        .await?;
+                    // M4 fix: Wait up to 5 seconds for lock release instead of failing immediately
+                    // with SQLITE_BUSY. Critical for concurrent write workloads.
+                    sqlx::query("PRAGMA busy_timeout = 5000;")
+                        .execute(&mut *conn)
+                        .await?;
+                    Ok(())
+                })
+            })
             .connect(path)
             .await
             .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
@@ -175,10 +225,14 @@ impl SqliteMetadataStore {
         // S1 FIX: Use after_connect to ensure PRAGMA settings persist.
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
-            .after_connect(|conn, _| Box::pin(async move {
-                sqlx::query("PRAGMA foreign_keys = ON;").execute(&mut *conn).await?;
-                Ok(())
-            }))
+            .after_connect(|conn, _| {
+                Box::pin(async move {
+                    sqlx::query("PRAGMA foreign_keys = ON;")
+                        .execute(&mut *conn)
+                        .await?;
+                    Ok(())
+                })
+            })
             .connect("sqlite::memory:")
             .await
             .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
@@ -256,11 +310,10 @@ impl MetadataStore for SqliteMetadataStore {
                     updated_at: now,
                 })
             }
-            Err(e) if is_unique_violation(&e) => {
-                Err(MetadataError::RepoAlreadyExists(format!(
-                    "{}/{}/{}", namespace, name, repo_type_str
-                )))
-            }
+            Err(e) if is_unique_violation(&e) => Err(MetadataError::RepoAlreadyExists(format!(
+                "{}/{}/{}",
+                namespace, name, repo_type_str
+            ))),
             Err(e) => Err(MetadataError::DatabaseError(e.to_string())),
         }
     }
@@ -286,7 +339,8 @@ impl MetadataStore for SqliteMetadataStore {
         match row {
             Some(row) => row_to_repo(&row),
             None => Err(MetadataError::RepoNotFound(format!(
-                "{}/{}/{}", namespace, name, repo_type_str
+                "{}/{}/{}",
+                namespace, name, repo_type_str
             ))),
         }
     }
@@ -298,7 +352,10 @@ impl MetadataStore for SqliteMetadataStore {
     /// GC job could clean up orphaned blobs in the future if storage efficiency becomes a concern.
     async fn delete_repo(&self, repo_id: i64) -> Result<(), MetadataError> {
         // I5: Wrap deletion in a transaction for atomicity
-        let mut tx = self.pool.begin().await
+        let mut tx = self
+            .pool
+            .begin()
+            .await
             .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
         let result = async {
@@ -332,11 +389,13 @@ impl MetadataStore for SqliteMetadataStore {
             } else {
                 Ok(())
             }
-        }.await;
+        }
+        .await;
 
         match result {
             Ok(()) => {
-                tx.commit().await
+                tx.commit()
+                    .await
                     .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
                 Ok(())
             }
@@ -366,11 +425,7 @@ impl MetadataStore for SqliteMetadataStore {
         Ok(())
     }
 
-    async fn get_revision(
-        &self,
-        repo_id: i64,
-        commit_id: &str,
-    ) -> Result<Revision, MetadataError> {
+    async fn get_revision(&self, repo_id: i64, commit_id: &str) -> Result<Revision, MetadataError> {
         let row = sqlx::query(
             "SELECT commit_id, repo_id, parent, message, author, created_at FROM revisions WHERE repo_id = ?1 AND commit_id = ?2"
         )
@@ -394,7 +449,11 @@ impl MetadataStore for SqliteMetadataStore {
             .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
         match row {
-            Some(r) => Ok(Some(r.try_get(0).map_err(|e| MetadataError::DatabaseError(e.to_string()))?)),
+            Some(r) => {
+                Ok(Some(r.try_get(0).map_err(|e| {
+                    MetadataError::DatabaseError(e.to_string())
+                })?))
+            }
             None => Ok(None),
         }
     }
@@ -418,9 +477,7 @@ impl MetadataStore for SqliteMetadataStore {
         // M3 fix: Use recursive CTE instead of N+1 queries.
         // Single SQL query walks the entire parent chain from HEAD.
         // Use i64::MAX - 1 to avoid overflow when casting from usize.
-        let effective_limit = limit
-            .map(|l| l as i64)
-            .unwrap_or(i64::MAX - 1);
+        let effective_limit = limit.map(|l| l as i64).unwrap_or(i64::MAX - 1);
 
         // The recursive step condition uses (ch.depth + 1 < ?2) so that
         // the base case (depth=0) plus (limit-1) recursive steps yields
@@ -451,7 +508,10 @@ impl MetadataStore for SqliteMetadataStore {
     }
 
     async fn add_file_entries(&self, entries: Vec<FileEntry>) -> Result<(), MetadataError> {
-        let mut tx = self.pool.begin().await
+        let mut tx = self
+            .pool
+            .begin()
+            .await
             .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
         for entry in &entries {
@@ -470,7 +530,8 @@ impl MetadataStore for SqliteMetadataStore {
             .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
         }
 
-        tx.commit().await
+        tx.commit()
+            .await
             .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
         Ok(())
@@ -535,7 +596,8 @@ impl MetadataStore for SqliteMetadataStore {
         match row {
             Some(r) => row_to_file_entry(&r),
             None => Err(MetadataError::FileNotFound(format!(
-                "{}/{}", commit_id, path
+                "{}/{}",
+                commit_id, path
             ))),
         }
     }
@@ -551,7 +613,10 @@ impl MetadataStore for SqliteMetadataStore {
         // Tradeoff: If panic occurs between BEGIN and COMMIT/ROLLBACK, the connection
         // may return to pool with an open transaction. However, sqlx will discard
         // connections that error, and SQLite will auto-rollback when connection closes.
-        let mut conn = self.pool.acquire().await
+        let mut conn = self
+            .pool
+            .acquire()
+            .await
             .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
         // Use IMMEDIATE to acquire write lock upfront (SQLite only supports one writer)
@@ -625,7 +690,9 @@ impl MetadataStore for SqliteMetadataStore {
 
         match result {
             Ok(()) => {
-                sqlx::query("COMMIT").execute(&mut *conn).await
+                sqlx::query("COMMIT")
+                    .execute(&mut *conn)
+                    .await
                     .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
                 Ok(())
             }

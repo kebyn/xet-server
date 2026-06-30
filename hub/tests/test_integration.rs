@@ -1,10 +1,12 @@
-use actix_web::{test, App, web};
+use actix_web::{App, test, web};
+use ed25519_dalek::SigningKey;
 use hub_api::auth::token_store::TokenStore;
 use hub_api::auth::xet_signer::XetSigner;
 use hub_api::cas_client::{CasClient, CasClientTrait};
-use hub_api::config::{HubConfig, CasSettings, ServerSettings, AuthSettings, MetadataSettings, StorageSettings};
-use hub_api::metadata::{MetadataStore, SqliteMetadataStore, RepoType, Revision, FileEntry};
-use ed25519_dalek::SigningKey;
+use hub_api::config::{
+    AuthSettings, CasSettings, HubConfig, MetadataSettings, ServerSettings, StorageSettings,
+};
+use hub_api::metadata::{FileEntry, MetadataStore, RepoType, Revision, SqliteMetadataStore};
 use rand::rngs::OsRng;
 use std::sync::Arc;
 
@@ -29,7 +31,8 @@ async fn setup_test_env() -> TestEnv {
     let xet_signer = Arc::new(XetSigner::new(signing_key, "test-key", 3600, 300));
 
     // Create in-memory metadata store
-    let metadata: Arc<dyn MetadataStore> = Arc::new(SqliteMetadataStore::in_memory().await.unwrap());
+    let metadata: Arc<dyn MetadataStore> =
+        Arc::new(SqliteMetadataStore::in_memory().await.unwrap());
 
     // Create CAS client
     let cas_client: Arc<dyn CasClientTrait> = Arc::new(CasClient::new(&CasSettings::default()));
@@ -44,7 +47,10 @@ async fn setup_test_env() -> TestEnv {
     };
 
     // Create test user and token
-    let token = token_store.create_token("testuser", "test-token", "write").await.unwrap();
+    let token = token_store
+        .create_token("testuser", "test-token", "write")
+        .await
+        .unwrap();
 
     (token_store, xet_signer, metadata, cas_client, config, token)
 }
@@ -56,8 +62,12 @@ async fn test_whoami_endpoint() {
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(token_store.clone()))
-            .route("/api/whoami-v2", web::get().to(hub_api::api::whoami::whoami))
-    ).await;
+            .route(
+                "/api/whoami-v2",
+                web::get().to(hub_api::api::whoami::whoami),
+            ),
+    )
+    .await;
 
     let req = test::TestRequest::get()
         .uri("/api/whoami-v2")
@@ -81,8 +91,12 @@ async fn test_create_repo_endpoint() {
         App::new()
             .app_data(web::Data::new(token_store.clone()))
             .app_data(web::Data::new(metadata.clone()))
-            .route("/api/models", web::post().to(hub_api::api::repo::create_model))
-    ).await;
+            .route(
+                "/api/models",
+                web::post().to(hub_api::api::repo::create_model),
+            ),
+    )
+    .await;
 
     // Create a model repo
     let req = test::TestRequest::post()
@@ -107,14 +121,21 @@ async fn test_get_repo_endpoint() {
     let (token_store, _, metadata, _, _, token) = setup_test_env().await;
 
     // Create repo directly in metadata
-    metadata.create_repo("testuser", "existing-model", RepoType::Model, false).await.unwrap();
+    metadata
+        .create_repo("testuser", "existing-model", RepoType::Model, false)
+        .await
+        .unwrap();
 
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(token_store.clone()))
             .app_data(web::Data::new(metadata.clone()))
-            .route("/api/models/{ns}/{repo}", web::get().to(hub_api::api::repo::get_repo_model))
-    ).await;
+            .route(
+                "/api/models/{ns}/{repo}",
+                web::get().to(hub_api::api::repo::get_repo_model),
+            ),
+    )
+    .await;
 
     let req = test::TestRequest::get()
         .uri("/api/models/testuser/existing-model")
@@ -134,7 +155,10 @@ async fn test_commit_with_inline_file() {
     let (token_store, xet_signer, metadata, cas_client, _, token) = setup_test_env().await;
 
     // Create repo
-    metadata.create_repo("testuser", "commit-test-model", RepoType::Model, false).await.unwrap();
+    metadata
+        .create_repo("testuser", "commit-test-model", RepoType::Model, false)
+        .await
+        .unwrap();
 
     let app = test::init_service(
         App::new()
@@ -142,11 +166,15 @@ async fn test_commit_with_inline_file() {
             .app_data(web::Data::new(metadata.clone()))
             .app_data(web::Data::new(cas_client.clone()))
             .app_data(web::Data::new(xet_signer.clone()))
-            .route("/api/models/{ns}/{repo}/commit/{rev}", web::post().to(hub_api::api::commit::commit_model))
-    ).await;
+            .route(
+                "/api/models/{ns}/{repo}/commit/{rev}",
+                web::post().to(hub_api::api::commit::commit_model),
+            ),
+    )
+    .await;
 
     // NDJSON body with inline file
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
     let content = STANDARD.encode("{\"hello\": \"world\"}");
     let body = format!(
         "{{\"key\":\"header\",\"value\":{{\"summary\":\"Add config\",\"parentRevision\":null}}}}\n\
@@ -172,7 +200,10 @@ async fn test_tree_listing() {
     let (token_store, _, metadata, _, _, token) = setup_test_env().await;
 
     // Create repo and add files
-    let repo = metadata.create_repo("testuser", "tree-test-model", RepoType::Model, false).await.unwrap();
+    let repo = metadata
+        .create_repo("testuser", "tree-test-model", RepoType::Model, false)
+        .await
+        .unwrap();
     let commit_id = "testcommit123";
 
     // Add revision
@@ -212,8 +243,12 @@ async fn test_tree_listing() {
         App::new()
             .app_data(web::Data::new(token_store.clone()))
             .app_data(web::Data::new(metadata.clone()))
-            .route("/api/models/{ns}/{repo}/tree/{rev}/{path:.*}", web::get().to(hub_api::api::tree::tree_model))
-    ).await;
+            .route(
+                "/api/models/{ns}/{repo}/tree/{rev}/{path:.*}",
+                web::get().to(hub_api::api::tree::tree_model),
+            ),
+    )
+    .await;
 
     let req = test::TestRequest::get()
         .uri("/api/models/testuser/tree-test-model/tree/main/")
@@ -237,7 +272,10 @@ async fn test_token_exchange() {
     let (token_store, xet_signer, metadata, _, config, token) = setup_test_env().await;
 
     // Create repo for token exchange
-    metadata.create_repo("testuser", "token-test-model", RepoType::Model, false).await.unwrap();
+    metadata
+        .create_repo("testuser", "token-test-model", RepoType::Model, false)
+        .await
+        .unwrap();
 
     let app = test::init_service(
         App::new()
@@ -245,8 +283,12 @@ async fn test_token_exchange() {
             .app_data(web::Data::new(xet_signer.clone()))
             .app_data(web::Data::new(metadata.clone()))
             .app_data(web::Data::new(config.clone()))
-            .route("/api/models/{ns}/{repo}/xet-read-token/{rev}", web::get().to(hub_api::api::token_exchange::exchange_model_read))
-    ).await;
+            .route(
+                "/api/models/{ns}/{repo}/xet-read-token/{rev}",
+                web::get().to(hub_api::api::token_exchange::exchange_model_read),
+            ),
+    )
+    .await;
 
     let req = test::TestRequest::get()
         .uri("/api/models/testuser/token-test-model/xet-read-token/main")
@@ -266,15 +308,22 @@ async fn test_preupload_endpoint() {
     let (token_store, _, metadata, _, _, token) = setup_test_env().await;
 
     // Create repo
-    metadata.create_repo("testuser", "preupload-test-model", RepoType::Model, false).await.unwrap();
+    metadata
+        .create_repo("testuser", "preupload-test-model", RepoType::Model, false)
+        .await
+        .unwrap();
 
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(token_store.clone()))
             .app_data(web::Data::new(metadata.clone()))
             .app_data(web::Data::new(hub_api::config::HubConfig::default()))
-            .route("/api/models/{ns}/{repo}/preupload/{rev}", web::post().to(hub_api::api::preupload::preupload_model))
-    ).await;
+            .route(
+                "/api/models/{ns}/{repo}/preupload/{rev}",
+                web::post().to(hub_api::api::preupload::preupload_model),
+            ),
+    )
+    .await;
 
     // Small file (< 1MB) should be regular mode
     let req = test::TestRequest::post()
@@ -297,16 +346,15 @@ async fn test_preupload_endpoint() {
 
 #[actix_web::test]
 async fn test_health_endpoint() {
-    let app = test::init_service(
-        App::new()
-            .route("/health", web::get().to(|| async {
-                actix_web::HttpResponse::Ok().json(serde_json::json!({"status": "ok"}))
-            }))
-    ).await;
+    let app = test::init_service(App::new().route(
+        "/health",
+        web::get().to(|| async {
+            actix_web::HttpResponse::Ok().json(serde_json::json!({"status": "ok"}))
+        }),
+    ))
+    .await;
 
-    let req = test::TestRequest::get()
-        .uri("/health")
-        .to_request();
+    let req = test::TestRequest::get().uri("/health").to_request();
 
     let resp = test::call_service(&app, req).await;
     assert!(resp.status().is_success());
@@ -320,14 +368,21 @@ async fn test_delete_repo_endpoint() {
     let (token_store, _, metadata, _, _, token) = setup_test_env().await;
 
     // Create repo directly
-    metadata.create_repo("testuser", "delete-test-model", RepoType::Model, false).await.unwrap();
+    metadata
+        .create_repo("testuser", "delete-test-model", RepoType::Model, false)
+        .await
+        .unwrap();
 
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(token_store.clone()))
             .app_data(web::Data::new(metadata.clone()))
-            .route("/api/models/{ns}/{repo}", web::delete().to(hub_api::api::repo::delete_repo_model))
-    ).await;
+            .route(
+                "/api/models/{ns}/{repo}",
+                web::delete().to(hub_api::api::repo::delete_repo_model),
+            ),
+    )
+    .await;
 
     let req = test::TestRequest::delete()
         .uri("/api/models/testuser/delete-test-model")
@@ -338,7 +393,9 @@ async fn test_delete_repo_endpoint() {
     assert!(resp.status().is_success());
 
     // Verify repo is deleted
-    let result = metadata.get_repo("testuser", "delete-test-model", RepoType::Model).await;
+    let result = metadata
+        .get_repo("testuser", "delete-test-model", RepoType::Model)
+        .await;
     assert!(result.is_err());
 }
 
@@ -353,13 +410,32 @@ async fn test_full_workflow() {
             .app_data(web::Data::new(metadata.clone()))
             .app_data(web::Data::new(cas_client.clone()))
             .app_data(web::Data::new(config.clone()))
-            .route("/api/whoami-v2", web::get().to(hub_api::api::whoami::whoami))
-            .route("/api/models", web::post().to(hub_api::api::repo::create_model))
-            .route("/api/models/{ns}/{repo}", web::get().to(hub_api::api::repo::get_repo_model))
-            .route("/api/models/{ns}/{repo}/commit/{rev}", web::post().to(hub_api::api::commit::commit_model))
-            .route("/api/models/{ns}/{repo}/tree/{rev}/{path:.*}", web::get().to(hub_api::api::tree::tree_model))
-            .route("/api/models/{ns}/{repo}/xet-read-token/{rev}", web::get().to(hub_api::api::token_exchange::exchange_model_read))
-    ).await;
+            .route(
+                "/api/whoami-v2",
+                web::get().to(hub_api::api::whoami::whoami),
+            )
+            .route(
+                "/api/models",
+                web::post().to(hub_api::api::repo::create_model),
+            )
+            .route(
+                "/api/models/{ns}/{repo}",
+                web::get().to(hub_api::api::repo::get_repo_model),
+            )
+            .route(
+                "/api/models/{ns}/{repo}/commit/{rev}",
+                web::post().to(hub_api::api::commit::commit_model),
+            )
+            .route(
+                "/api/models/{ns}/{repo}/tree/{rev}/{path:.*}",
+                web::get().to(hub_api::api::tree::tree_model),
+            )
+            .route(
+                "/api/models/{ns}/{repo}/xet-read-token/{rev}",
+                web::get().to(hub_api::api::token_exchange::exchange_model_read),
+            ),
+    )
+    .await;
 
     // 1. Test whoami
     let req = test::TestRequest::get()
@@ -417,14 +493,17 @@ async fn test_full_workflow() {
 async fn test_hub_config_no_dead_fields() {
     let config = HubConfig::from_env();
     assert_eq!(config.storage.inline_threshold_bytes, 1024 * 1024);
-    assert_eq!(config.storage.upload_temp_dir, "./data/hub-uploads");  // I1 fix: Use app-specific dir instead of /tmp
+    assert_eq!(config.storage.upload_temp_dir, "./data/hub-uploads"); // I1 fix: Use app-specific dir instead of /tmp
     assert_eq!(config.storage.max_upload_size, 512 * 1024 * 1024);
 }
 
 #[actix_web::test]
 async fn test_hub_config_rate_limit_default() {
     let config = HubConfig::default();
-    assert_eq!(config.server.rate_limit_rpm, 120, "Default Hub rate limit should be 120 RPM");
+    assert_eq!(
+        config.server.rate_limit_rpm, 120,
+        "Default Hub rate limit should be 120 RPM"
+    );
 }
 
 #[actix_web::test]
@@ -442,19 +521,24 @@ async fn test_cas_settings_max_download_size_default() {
 #[actix_web::test]
 async fn test_sign_proxy_uses_configured_ttl() {
     use ed25519_dalek::SigningKey;
-    use rand::rngs::OsRng;
     use hub_api::auth::xet_signer::XetSigner;
+    use rand::rngs::OsRng;
 
     let mut csprng = OsRng;
     let signing_key = SigningKey::generate(&mut csprng);
     let signer = XetSigner::new(signing_key, "test-key", 3600, 600);
 
-    let (_token, exp) = signer.sign_proxy("user", "oid123", "upload", "repo", "model").unwrap();
+    let (_token, exp) = signer
+        .sign_proxy("user", "oid123", "upload", "repo", "model")
+        .unwrap();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    assert!(exp >= now + 598 && exp <= now + 602, "Proxy token TTL should use configured 600s value");
+    assert!(
+        exp >= now + 598 && exp <= now + 602,
+        "Proxy token TTL should use configured 600s value"
+    );
 }
 
 #[actix_web::test]

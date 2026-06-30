@@ -64,7 +64,11 @@ impl Chunker {
 
         // Compute mask: hash & mask == 0 with probability ~1/target
         // Shift (target-1) left to the highest bits
-        assert!(target.is_power_of_two(), "chunk target size must be a power of two, got {}", target);
+        assert!(
+            target.is_power_of_two(),
+            "chunk target size must be a power of two, got {}",
+            target
+        );
         let mask = ((target - 1) as u64) << ((target - 1) as u64).leading_zeros();
 
         Self {
@@ -171,7 +175,11 @@ impl StreamingChunker {
         let min_chunk = config.min_chunk_size();
         let max_chunk = config.max_chunk_size();
 
-        assert!(target.is_power_of_two(), "chunk target size must be a power of two, got {}", target);
+        assert!(
+            target.is_power_of_two(),
+            "chunk target size must be a power of two, got {}",
+            target
+        );
         let mask = ((target - 1) as u64) << ((target - 1) as u64).leading_zeros();
 
         Self {
@@ -224,10 +232,12 @@ impl StreamingChunker {
                 break;
             }
 
-            let search_start_in_buf = buf_offset + self.min_chunk.saturating_sub(hasher_window_size + 1);
+            let search_start_in_buf =
+                buf_offset + self.min_chunk.saturating_sub(hasher_window_size + 1);
             let search_end_in_buf = (buf_offset + self.max_chunk).min(self.buffer.len());
 
-            if search_start_in_buf >= self.buffer.len() || search_start_in_buf >= search_end_in_buf {
+            if search_start_in_buf >= self.buffer.len() || search_start_in_buf >= search_end_in_buf
+            {
                 // Can't search — emit rest as one chunk
                 chunks.push(Chunk {
                     offset: self.total_offset + buf_offset,

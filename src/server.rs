@@ -1,31 +1,34 @@
 //! HTTP server implementation
 
-use actix_web::{web, App, HttpServer, HttpResponse, middleware::{Logger, from_fn}};
 use actix_governor::{Governor, GovernorConfigBuilder};
+use actix_web::{
+    App, HttpResponse, HttpServer,
+    middleware::{Logger, from_fn},
+    web,
+};
 use std::sync::Arc;
 
 use crate::api::auth::AuthVerifier;
-use crate::api::guard::{require_auth, AuthNeed};
+use crate::api::guard::{AuthNeed, require_auth};
 use crate::config::ServerConfig;
 use crate::conversion::ConvertingOids;
-use crate::storage::{create_storage, StorageBackend};
 use crate::middleware::metrics_middleware;
+use crate::storage::{StorageBackend, create_storage};
 
 pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
     // Load auth keys once at startup (avoid per-request file I/O)
-    let auth_verifier = Arc::new(
-        AuthVerifier::from_config(&config.auth)
-            .expect("Failed to load auth public key")
-    );
+    let auth_verifier =
+        Arc::new(AuthVerifier::from_config(&config.auth).expect("Failed to load auth public key"));
 
     // Check public key file permissions for security
-    if let Some(warning) = crate::config::check_public_key_permissions(&config.auth.public_key_path) {
+    if let Some(warning) = crate::config::check_public_key_permissions(&config.auth.public_key_path)
+    {
         tracing::warn!("{}", warning);
     }
 
     // Validate storage backend
     match config.storage.backend.as_str() {
-        "local" | "s3" => {},
+        "local" | "s3" => {}
         invalid => {
             return Err(std::io::Error::other(format!(
                 "Invalid XET_STORAGE_BACKEND '{}'. Must be 'local' or 's3'.",
@@ -34,8 +37,11 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
         }
     }
 
-    let storage: Arc<Box<dyn StorageBackend>> = Arc::new(create_storage(&config.storage).await
-        .expect("Failed to create storage backend"));
+    let storage: Arc<Box<dyn StorageBackend>> = Arc::new(
+        create_storage(&config.storage)
+            .await
+            .expect("Failed to create storage backend"),
+    );
 
     let index = Arc::new(crate::index::MetadataIndex::new());
 
@@ -64,7 +70,14 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
 
     tracing::info!("Storage backend: {}", config.storage.backend);
     tracing::info!("Max upload size: {} MB", config.server.max_body_size_mb);
-    tracing::info!("Conversion: {}", if config.conversion.enabled { "enabled" } else { "disabled" });
+    tracing::info!(
+        "Conversion: {}",
+        if config.conversion.enabled {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
 
     // Configure rate limiting for public endpoints only.
     // Internal endpoints (/internal/*) bypass rate limiting to avoid
@@ -95,7 +108,7 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
     // trusted proxies feature, set the appropriate trust configuration.
     let rpm = config.server.rate_limit_rpm;
     let governor_conf = GovernorConfigBuilder::default()
-        .per_second(60)  // 60-second refill window
+        .per_second(60) // 60-second refill window
         .burst_size(rpm) // rpm requests per window
         .finish()
         .expect("Failed to configure rate limiter");
@@ -103,7 +116,9 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
     tracing::info!(
         "Rate limiting: {} requests per 60-second window per IP for public endpoints \
          (internal endpoints excluded). Burst: {}, refill: {} tokens/second",
-        rpm, rpm, rpm
+        rpm,
+        rpm,
+        rpm
     );
 
     HttpServer::new(move || {
@@ -129,8 +144,14 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
             // These are registered at App level, BEFORE the public scope,
             // so they match first and bypass the Governor middleware.
             // =============================================================
-            .route("/internal/state/{oid}", web::get().to(crate::api::internal::get_blob_state))
-            .route("/internal/blob/{oid}", web::head().to(crate::api::internal::head_blob))
+            .route(
+                "/internal/state/{oid}",
+                web::get().to(crate::api::internal::get_blob_state),
+            )
+            .route(
+                "/internal/blob/{oid}",
+                web::head().to(crate::api::internal::head_blob),
+            )
             // Health and metrics endpoints - no rate limiting
             .route("/health", web::get().to(health_check))
             .route("/metrics", web::get().to(metrics_endpoint))
@@ -141,17 +162,50 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
             .service(
                 web::scope("")
                     .wrap(Governor::new(&governor_conf))
-                    .route("/v1/xorbs/{prefix}/{hash}", web::post().to(crate::api::xorb::upload_xorb))
-                    .route("/v1/xorbs/{prefix}/{hash}", web::put().to(crate::api::xorb::upload_xorb))
-                    .route("/v1/xorbs/{prefix}/{hash}/download", web::get().to(crate::api::xorb::download_xorb))
-                    .route("/lfs/objects/{oid}", web::put().to(crate::api::lfs::upload_lfs_object))
-                    .route("/lfs/objects/{oid}", web::get().to(crate::api::lfs::download_lfs_object))
-                    .route("/v1/shards", web::post().to(crate::api::shard::upload_shard))
-                    .route("/v1/reconstructions/{file_id}", web::get().to(crate::api::reconstruction::get_reconstruction_v1))
-                    .route("/v2/reconstructions/{file_id}", web::get().to(crate::api::reconstruction::get_reconstruction))
-                    .route("/v1/chunks/{prefix}/{hash}", web::get().to(crate::api::global_dedup::query_chunk_dedup))
-                    .route("/objects/batch", web::post().to(crate::api::batch::batch_operation))
-                    .route("/lfs/objects/batch", web::post().to(crate::api::batch::batch_operation))
+                    .route(
+                        "/v1/xorbs/{prefix}/{hash}",
+                        web::post().to(crate::api::xorb::upload_xorb),
+                    )
+                    .route(
+                        "/v1/xorbs/{prefix}/{hash}",
+                        web::put().to(crate::api::xorb::upload_xorb),
+                    )
+                    .route(
+                        "/v1/xorbs/{prefix}/{hash}/download",
+                        web::get().to(crate::api::xorb::download_xorb),
+                    )
+                    .route(
+                        "/lfs/objects/{oid}",
+                        web::put().to(crate::api::lfs::upload_lfs_object),
+                    )
+                    .route(
+                        "/lfs/objects/{oid}",
+                        web::get().to(crate::api::lfs::download_lfs_object),
+                    )
+                    .route(
+                        "/v1/shards",
+                        web::post().to(crate::api::shard::upload_shard),
+                    )
+                    .route(
+                        "/v1/reconstructions/{file_id}",
+                        web::get().to(crate::api::reconstruction::get_reconstruction_v1),
+                    )
+                    .route(
+                        "/v2/reconstructions/{file_id}",
+                        web::get().to(crate::api::reconstruction::get_reconstruction),
+                    )
+                    .route(
+                        "/v1/chunks/{prefix}/{hash}",
+                        web::get().to(crate::api::global_dedup::query_chunk_dedup),
+                    )
+                    .route(
+                        "/objects/batch",
+                        web::post().to(crate::api::batch::batch_operation),
+                    )
+                    .route(
+                        "/lfs/objects/batch",
+                        web::post().to(crate::api::batch::batch_operation),
+                    ),
             )
     })
     .bind(&bind_addr)?

@@ -42,7 +42,8 @@ impl ServerSettings {
     /// This method performs no validation — it trusts that the URL was validated on load.
     /// This avoids redundant parsing on every call (e.g., in batch API URL construction).
     pub fn base_url(&self) -> String {
-        self.public_base_url.clone()
+        self.public_base_url
+            .clone()
             .unwrap_or_else(|| format!("http://{}:{}", self.host, self.port))
             .trim_end_matches('/')
             .to_string()
@@ -71,7 +72,8 @@ impl ServerSettings {
                         tracing::warn!(
                             "public_base_url '{}' uses non-HTTP scheme '{}'. \
                             This may cause issues with client URLs.",
-                            url, parsed.scheme()
+                            url,
+                            parsed.scheme()
                         );
                     }
                 }
@@ -198,7 +200,7 @@ impl Default for ConversionConfig {
             enabled: true,
             compression_scheme: "lz4".to_string(),
             delete_raw_after_conversion: true,
-            min_conversion_size: 65536,          // 64KB — skip tiny files (1KB conversions waste CPU/IO for near-zero dedup value)
+            min_conversion_size: 65536, // 64KB — skip tiny files (1KB conversions waste CPU/IO for near-zero dedup value)
             max_conversion_size: 512 * 1024 * 1024, // 512MB — match Hub max_upload_size
         }
     }
@@ -216,13 +218,12 @@ impl ConversionConfig {
     }
 }
 
-
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             server: ServerSettings {
                 host: "127.0.0.1".to_string(),
-                port: 8081,  // Changed from 8080 to avoid conflict with Hub API
+                port: 8081, // Changed from 8080 to avoid conflict with Hub API
                 public_base_url: None,
                 max_body_size_mb: 2048,
                 rate_limit_rpm: 60,
@@ -240,8 +241,8 @@ impl Default for ServerConfig {
             auth: AuthConfig {
                 // M2 fix: Use /etc/xet instead of /tmp for better security
                 // /tmp is world-writable and vulnerable to symlink attacks
-                public_key_path: "/etc/xet/public-key.pem".to_string(),  // Production default
-                trusted_kids: vec!["hub-key-1".to_string()],  // Changed from "test-kid" to match Hub default
+                public_key_path: "/etc/xet/public-key.pem".to_string(), // Production default
+                trusted_kids: vec!["hub-key-1".to_string()], // Changed from "test-kid" to match Hub default
                 private_key_path: None, // I5 fix: Optional, set CAS_PRIVATE_KEY_PATH to enable proxy token generation
                 signing_kid: None,
             },
@@ -259,14 +260,20 @@ impl ServerConfig {
         self.server.validate_base_url();
 
         if self.server.rate_limit_rpm == 0 {
-            return Err("XET_RATE_LIMIT_RPM must be > 0 (got 0). This would disable rate limiting.".to_string());
+            return Err(
+                "XET_RATE_LIMIT_RPM must be > 0 (got 0). This would disable rate limiting."
+                    .to_string(),
+            );
         }
         if self.server.max_body_size_mb == 0 {
-            return Err("XET_MAX_BODY_SIZE_MB must be > 0 (got 0). This would prevent all uploads.".to_string());
+            return Err(
+                "XET_MAX_BODY_SIZE_MB must be > 0 (got 0). This would prevent all uploads."
+                    .to_string(),
+            );
         }
         // M6 fix: Warn on invalid compression_scheme instead of silently falling back to LZ4.
         match self.conversion.compression_scheme.to_lowercase().as_str() {
-            "none" | "lz4" | "bg4lz4" => {},
+            "none" | "lz4" | "bg4lz4" => {}
             invalid => {
                 tracing::warn!(
                     "XET_CONVERSION_SCHEME '{}' is not a valid compression scheme. \
@@ -291,22 +298,31 @@ impl ServerConfig {
         let host = std::env::var("XET_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
         let port = match std::env::var("XET_PORT") {
             Ok(val) => val.parse().unwrap_or_else(|_| {
-                tracing::warn!("XET_PORT '{}' is not a valid port number, using default 8081", val);
+                tracing::warn!(
+                    "XET_PORT '{}' is not a valid port number, using default 8081",
+                    val
+                );
                 8081
             }),
-            Err(_) => 8081,  // Changed from 8080 to avoid conflict with Hub API
+            Err(_) => 8081, // Changed from 8080 to avoid conflict with Hub API
         };
         let public_base_url = std::env::var("XET_PUBLIC_BASE_URL").ok();
         let max_body_size_mb = match std::env::var("XET_MAX_BODY_SIZE_MB") {
             Ok(val) => val.parse().unwrap_or_else(|_| {
-                tracing::warn!("XET_MAX_BODY_SIZE_MB '{}' is not a valid number, using default 2048", val);
+                tracing::warn!(
+                    "XET_MAX_BODY_SIZE_MB '{}' is not a valid number, using default 2048",
+                    val
+                );
                 2048
             }),
             Err(_) => 2048,
         };
         let rate_limit_rpm = match std::env::var("XET_RATE_LIMIT_RPM") {
             Ok(val) => val.parse().unwrap_or_else(|_| {
-                tracing::warn!("XET_RATE_LIMIT_RPM '{}' is not a valid number, using default 60", val);
+                tracing::warn!(
+                    "XET_RATE_LIMIT_RPM '{}' is not a valid number, using default 60",
+                    val
+                );
                 60
             }),
             Err(_) => 60,
@@ -344,29 +360,41 @@ impl ServerConfig {
             .ok()
             .map(|v| v.to_lowercase() != "false" && v != "0")
             .unwrap_or(true);
-        let conversion_scheme = std::env::var("XET_CONVERSION_SCHEME")
-            .unwrap_or_else(|_| "lz4".to_string());
+        let conversion_scheme =
+            std::env::var("XET_CONVERSION_SCHEME").unwrap_or_else(|_| "lz4".to_string());
         let delete_raw = std::env::var("XET_DELETE_RAW_AFTER_CONVERSION")
             .ok()
             .map(|v| v.to_lowercase() != "false" && v != "0")
             .unwrap_or(true);
         let min_conversion_size = match std::env::var("XET_MIN_CONVERSION_SIZE") {
             Ok(val) => val.parse().unwrap_or_else(|_| {
-                tracing::warn!("XET_MIN_CONVERSION_SIZE '{}' is not a valid number, using default 65536", val);
+                tracing::warn!(
+                    "XET_MIN_CONVERSION_SIZE '{}' is not a valid number, using default 65536",
+                    val
+                );
                 65536
             }),
             Err(_) => 65536,
         };
         let max_conversion_size = match std::env::var("XET_MAX_CONVERSION_SIZE") {
             Ok(val) => val.parse().unwrap_or_else(|_| {
-                tracing::warn!("XET_MAX_CONVERSION_SIZE '{}' is not a valid number, using default 512MB", val);
+                tracing::warn!(
+                    "XET_MAX_CONVERSION_SIZE '{}' is not a valid number, using default 512MB",
+                    val
+                );
                 512 * 1024 * 1024
             }),
-            Err(_) => 512 * 1024 * 1024,  // 512MB — match Hub max_upload_size
+            Err(_) => 512 * 1024 * 1024, // 512MB — match Hub max_upload_size
         };
 
         let config = Self {
-            server: ServerSettings { host, port, public_base_url, max_body_size_mb, rate_limit_rpm },
+            server: ServerSettings {
+                host,
+                port,
+                public_base_url,
+                max_body_size_mb,
+                rate_limit_rpm,
+            },
             storage: StorageConfig {
                 backend,
                 s3_bucket,
