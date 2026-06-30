@@ -959,10 +959,13 @@ impl<S> MetricsRecordingStream<S> {
         }
     }
 
-    fn record_metrics(&mut self) {
+    fn record_metrics(&mut self, status_code: u16, record_error: bool) {
         if !self.completed {
             self.completed = true;
-            GLOBAL_METRICS.record_request(200);
+            GLOBAL_METRICS.record_request(status_code);
+            if record_error {
+                GLOBAL_METRICS.record_error();
+            }
             GLOBAL_METRICS.record_download_bytes(self.total_bytes);
             GLOBAL_METRICS.record_latency(self.start);
         }
@@ -971,8 +974,8 @@ impl<S> MetricsRecordingStream<S> {
 
 impl<S> Drop for MetricsRecordingStream<S> {
     fn drop(&mut self) {
-        // Ensure metrics are recorded even if stream is dropped before completion
-        self.record_metrics();
+        // The client likely disconnected before consuming the stream.
+        self.record_metrics(499, true);
     }
 }
 
@@ -991,12 +994,12 @@ where
             }
             Poll::Ready(Some(Err(e))) => {
                 // Record metrics on error
-                self.record_metrics();
+                self.record_metrics(500, true);
                 Poll::Ready(Some(Err(e)))
             }
             Poll::Ready(None) => {
                 // Stream completed successfully - record metrics
-                self.record_metrics();
+                self.record_metrics(200, false);
                 Poll::Ready(None)
             }
             Poll::Pending => Poll::Pending,

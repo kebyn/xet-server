@@ -317,12 +317,15 @@ impl ConversionPipeline {
             chunk_mappings.push((chunk_hash.to_hex(), xorb_hash.clone(), i as u32));
         }
 
-        let xorb_index = shard_builder.add_xorb(
-            xorb_result.xorb_hash,
-            xorb_result.total_uncompressed_size as u32,
-            xorb_result.total_compressed_size as u32,
-            chunk_entries,
-        );
+        let xorb_index = shard_builder
+            .add_xorb_with_raw_chunk_hashes(
+                xorb_result.xorb_hash,
+                xorb_result.total_uncompressed_size as u32,
+                xorb_result.total_compressed_size as u32,
+                chunk_entries,
+                raw_chunk_hashes.clone(),
+            )
+            .map_err(|e| ConversionError::BuildError(format!("Add xorb to shard failed: {}", e)))?;
 
         // Add file mapping — all chunks belong to one segment
         let segment = FileSegment {

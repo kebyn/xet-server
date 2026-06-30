@@ -323,6 +323,47 @@ impl XorbChunkSequenceEntry {
     }
 }
 
+/// Chunk lookup entry (68 bytes)
+///
+/// Persists the raw content chunk hash used by global deduplication. The
+/// xorb chunk sequence continues to store the serialized chunk hash used for
+/// xorb integrity verification.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChunkLookupEntry {
+    pub chunk_hash: MerkleHash,
+    pub xorb_hash: MerkleHash,
+    pub chunk_index: u32,
+}
+
+impl ChunkLookupEntry {
+    pub const SIZE: usize = 68;
+
+    pub fn serialize<W: Write>(&self, writer: &mut W) -> Result<()> {
+        writer.write_all(&self.chunk_hash.as_bytes())?;
+        writer.write_all(&self.xorb_hash.as_bytes())?;
+        writer.write_all(&self.chunk_index.to_le_bytes())?;
+        Ok(())
+    }
+
+    pub fn deserialize<R: Read>(reader: &mut R) -> XetResult<Self> {
+        let mut chunk_hash_bytes = [0u8; 32];
+        reader.read_exact(&mut chunk_hash_bytes)?;
+        let chunk_hash = MerkleHash::from(chunk_hash_bytes);
+
+        let mut xorb_hash_bytes = [0u8; 32];
+        reader.read_exact(&mut xorb_hash_bytes)?;
+        let xorb_hash = MerkleHash::from(xorb_hash_bytes);
+
+        let chunk_index = read_u32(reader)?;
+
+        Ok(Self {
+            chunk_hash,
+            xorb_hash,
+            chunk_index,
+        })
+    }
+}
+
 /// High-level shard file representation
 ///
 /// Contains parsed metadata from a shard file for indexing and querying.
@@ -334,6 +375,7 @@ pub struct MDBShardFile {
     pub file_data_entries: Vec<FileDataSequenceEntry>,
     pub xorb_entries: Vec<XorbChunkSequenceHeader>,
     pub xorb_chunk_entries: Vec<XorbChunkSequenceEntry>,
+    pub chunk_lookup_entries: Vec<ChunkLookupEntry>,
     pub file_hashes: Vec<MerkleHash>,
     pub chunk_mappings: Vec<(MerkleHash, MerkleHash, u32)>, // (chunk_hash, xorb_hash, chunk_index)
     raw_data: Vec<u8>,
@@ -438,7 +480,6 @@ impl MDBShardFile {
         // Parse xorb info section
         let mut xorb_entries = Vec::new();
         let mut xorb_chunk_entries = Vec::new();
-        let mut chunk_mappings = Vec::new();
         if footer.xorb_info_offset > 0 && footer.xorb_info_offset < data.len() as u64 {
             let mut xorb_cursor = Cursor::new(&data[footer.xorb_info_offset as usize..]);
 
@@ -467,15 +508,9 @@ impl MDBShardFile {
                         // I6 fix: Track parsed entries and warn on truncation.
                         let mut parsed_chunks = 0u32;
                         // Parse chunk entries for this xorb
-                        for chunk_index in 0..num_chunks {
+                        for _ in 0..num_chunks {
                             match XorbChunkSequenceEntry::deserialize(&mut xorb_cursor) {
                                 Ok(chunk_entry) => {
-                                    // Add to chunk mappings: (chunk_hash, xorb_hash, chunk_index)
-                                    chunk_mappings.push((
-                                        chunk_entry.chunk_hash,
-                                        xorb_hash,
-                                        chunk_index,
-                                    ));
                                     xorb_chunk_entries.push(chunk_entry);
                                     parsed_chunks += 1;
                                 }
@@ -499,6 +534,70 @@ impl MDBShardFile {
             }
         }
 
+        if !xorb_chunk_entries.is_empty()
+            && (footer.chunk_lookup_offset == 0 || footer.chunk_lookup_num_entry == 0)
+        {
+            return Err(crate::error::XetError::ParseError(
+                "Shard missing required raw chunk lookup section".to_string(),
+            ));
+        }
+
+        let mut chunk_lookup_entries = Vec::new();
+        if footer.chunk_lookup_offset > 0
+            && footer.chunk_lookup_offset < data.len() as u64
+            && footer.chunk_lookup_num_entry > 0
+        {
+            let chunk_lookup_start = footer.chunk_lookup_offset as usize;
+            let footer_start = footer.footer_offset as usize;
+            let chunk_lookup_end = if footer.footer_offset > footer.chunk_lookup_offset
+                && footer_start <= data.len()
+            {
+                footer_start
+            } else {
+                data.len().saturating_sub(208)
+            };
+
+            let max_entries =
+                (chunk_lookup_end.saturating_sub(chunk_lookup_start)) / ChunkLookupEntry::SIZE;
+            let entries_to_parse = (footer.chunk_lookup_num_entry as usize).min(max_entries);
+
+            if entries_to_parse < footer.chunk_lookup_num_entry as usize {
+                tracing::warn!(
+                    "Shard parse: truncated chunk lookup entries: expected {}, got {}",
+                    footer.chunk_lookup_num_entry,
+                    entries_to_parse
+                );
+            }
+
+            let mut chunk_lookup_cursor = Cursor::new(&data[chunk_lookup_start..chunk_lookup_end]);
+            for entry_idx in 0..entries_to_parse {
+                match ChunkLookupEntry::deserialize(&mut chunk_lookup_cursor) {
+                    Ok(entry) => chunk_lookup_entries.push(entry),
+                    Err(e) => {
+                        tracing::warn!(
+                            "Shard parse: failed to parse chunk lookup entry {}: {}",
+                            entry_idx,
+                            e
+                        );
+                        break;
+                    }
+                }
+            }
+        }
+
+        if chunk_lookup_entries.len() != xorb_chunk_entries.len() {
+            return Err(crate::error::XetError::ParseError(format!(
+                "Shard chunk lookup count mismatch: got {}, expected {}",
+                chunk_lookup_entries.len(),
+                xorb_chunk_entries.len()
+            )));
+        }
+
+        let chunk_mappings = chunk_lookup_entries
+            .iter()
+            .map(|entry| (entry.chunk_hash, entry.xorb_hash, entry.chunk_index))
+            .collect();
+
         Ok(Self {
             header,
             footer,
@@ -506,6 +605,7 @@ impl MDBShardFile {
             file_data_entries,
             xorb_entries,
             xorb_chunk_entries,
+            chunk_lookup_entries,
             file_hashes,
             chunk_mappings,
             raw_data: data.to_vec(),
@@ -602,6 +702,7 @@ impl MDBShardFile {
         let file_data_entries = Vec::new();
         let xorb_entries = Vec::new();
         let xorb_chunk_entries = Vec::new();
+        let chunk_lookup_entries = Vec::new();
 
         Ok(Self {
             header,
@@ -610,6 +711,7 @@ impl MDBShardFile {
             file_data_entries,
             xorb_entries,
             xorb_chunk_entries,
+            chunk_lookup_entries,
             file_hashes,
             chunk_mappings,
             raw_data: Vec::new(), // Hash computed externally via streaming
