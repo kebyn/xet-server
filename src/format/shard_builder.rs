@@ -8,6 +8,7 @@
 //! [MDBShardFileHeader: 48 bytes]
 //! [File Info Section: per-file FileDataSequenceHeader + FileDataSequenceEntry entries]
 //! [Xorb Info Section: per-xorb XorbChunkSequenceHeader + XorbChunkSequenceEntry entries]
+//! [Chunk Lookup Section: optional ChunkLookupEntry entries for raw chunk hashes]
 //! [MDBShardFileFooter: 208 bytes]
 //! ```
 
@@ -15,8 +16,8 @@ use std::io::Cursor;
 
 use crate::error::{Result, XetError};
 use crate::format::shard::{
-    FileDataSequenceEntry, FileDataSequenceHeader, MDBShardFile, MDBShardFileFooter,
-    MDBShardFileHeader, XorbChunkSequenceEntry, XorbChunkSequenceHeader,
+    ChunkLookupEntry, FileDataSequenceEntry, FileDataSequenceHeader, MDBShardFile,
+    MDBShardFileFooter, MDBShardFileHeader, XorbChunkSequenceEntry, XorbChunkSequenceHeader,
 };
 use crate::types::MerkleHash;
 
@@ -27,6 +28,7 @@ const FILE_HEADER_SIZE: usize = 48;
 const FILE_ENTRY_SIZE: usize = 48;
 const XORB_HEADER_SIZE: usize = 48;
 const XORB_ENTRY_SIZE: usize = 48;
+const CHUNK_LOOKUP_ENTRY_SIZE: usize = ChunkLookupEntry::SIZE;
 
 // ---------------------------------------------------------------------------
 // Public builder types
@@ -42,6 +44,7 @@ const XORB_ENTRY_SIZE: usize = 48;
 pub struct ShardBuilder {
     files: Vec<FileBuildEntry>,
     xorbs: Vec<XorbBuildEntry>,
+    chunk_lookup_entries: Vec<ChunkLookupEntry>,
 }
 
 /// A file registered with the builder, consisting of one or more segments
@@ -92,14 +95,11 @@ impl ShardBuilder {
         Self {
             files: Vec::new(),
             xorbs: Vec::new(),
+            chunk_lookup_entries: Vec::new(),
         }
     }
 
-    /// Register a xorb and its chunks.
-    ///
-    /// Returns the xorb index for use in [`FileSegment::xorb_index`] when calling
-    /// [`add_file`](Self::add_file).
-    pub fn add_xorb(
+    fn add_xorb_unchecked(
         &mut self,
         xorb_hash: MerkleHash,
         num_bytes_in_xorb: u32,
@@ -114,6 +114,42 @@ impl ShardBuilder {
             chunks,
         });
         index
+    }
+
+    /// Register a xorb and persist raw chunk hashes for global deduplication.
+    ///
+    /// `XorbChunkBuildEntry::chunk_hash` is the serialized chunk hash used by
+    /// xorb integrity verification. `raw_chunk_hashes` are hashes of the
+    /// original uncompressed chunk bytes and are stored in the shard's chunk
+    /// lookup section so the metadata index can be rebuilt with the same dedup
+    /// keys after restart.
+    pub fn add_xorb_with_raw_chunk_hashes(
+        &mut self,
+        xorb_hash: MerkleHash,
+        num_bytes_in_xorb: u32,
+        num_bytes_on_disk: u32,
+        chunks: Vec<XorbChunkBuildEntry>,
+        raw_chunk_hashes: Vec<MerkleHash>,
+    ) -> Result<usize> {
+        if chunks.len() != raw_chunk_hashes.len() {
+            return Err(XetError::ParseError(format!(
+                "raw chunk hash count mismatch: got {}, expected {}",
+                raw_chunk_hashes.len(),
+                chunks.len()
+            )));
+        }
+
+        let index =
+            self.add_xorb_unchecked(xorb_hash, num_bytes_in_xorb, num_bytes_on_disk, chunks);
+        for (chunk_index, chunk_hash) in raw_chunk_hashes.into_iter().enumerate() {
+            self.chunk_lookup_entries.push(ChunkLookupEntry {
+                chunk_hash,
+                xorb_hash,
+                chunk_index: chunk_index as u32,
+            });
+        }
+
+        Ok(index)
     }
 
     /// Register a file and its xorb-to-segment mapping.
@@ -141,12 +177,20 @@ impl ShardBuilder {
             .iter()
             .map(|x| XORB_HEADER_SIZE + x.chunks.len() * XORB_ENTRY_SIZE)
             .sum();
+        let chunk_lookup_section_size = self.chunk_lookup_entries.len() * CHUNK_LOOKUP_ENTRY_SIZE;
 
         // ---- section offsets ----
         let file_info_offset: u64 = HEADER_SIZE as u64;
         let xorb_info_offset: u64 = (HEADER_SIZE + file_section_size) as u64;
-        let footer_offset: u64 = (HEADER_SIZE + file_section_size + xorb_section_size) as u64;
-        let total_size: usize = HEADER_SIZE + file_section_size + xorb_section_size + FOOTER_SIZE;
+        let chunk_lookup_offset: u64 = (HEADER_SIZE + file_section_size + xorb_section_size) as u64;
+        let footer_offset: u64 =
+            (HEADER_SIZE + file_section_size + xorb_section_size + chunk_lookup_section_size)
+                as u64;
+        let total_size: usize = HEADER_SIZE
+            + file_section_size
+            + xorb_section_size
+            + chunk_lookup_section_size
+            + FOOTER_SIZE;
 
         let mut buf: Vec<u8> = Vec::with_capacity(total_size);
 
@@ -197,13 +241,18 @@ impl ShardBuilder {
             }
         }
 
-        // ---- (d) footer ----
+        // ---- (d) optional chunk lookup section ----
+        for entry in &self.chunk_lookup_entries {
+            entry.serialize(&mut buf).map_err(XetError::IoError)?;
+        }
+
+        // ---- (e) footer ----
         //
         // The file_info parse loop in MDBShardFile::parse() uses file_lookup_offset
         // as the file-section boundary.  Setting it to xorb_info_offset tells the
         // parser where file data ends and xorb data begins.
         //
-        // Similarly, the xorb_info parse loop uses file_lookup_offset (the start of
+        // Similarly, the xorb_info parse loop uses xorb_lookup_offset (the start of
         // the next section) as its upper boundary, so the xorb parser stops before
         // reading past the xorb section.
         let total_stored_bytes_on_disk: u64 =
@@ -236,12 +285,18 @@ impl ShardBuilder {
             file_lookup_num_entry: self.files.len() as u64,
             xorb_lookup_offset: if self.xorbs.is_empty() {
                 0
-            } else {
+            } else if self.chunk_lookup_entries.is_empty() {
                 footer_offset
+            } else {
+                chunk_lookup_offset
             },
             xorb_lookup_num_entry: self.xorbs.len() as u64,
-            chunk_lookup_offset: 0,
-            chunk_lookup_num_entry: 0,
+            chunk_lookup_offset: if self.chunk_lookup_entries.is_empty() {
+                0
+            } else {
+                chunk_lookup_offset
+            },
+            chunk_lookup_num_entry: self.chunk_lookup_entries.len() as u64,
             chunk_hash_hmac_key: [0u8; 32],
             shard_creation_timestamp: 0,
             shard_key_expiry: 0,
@@ -316,6 +371,12 @@ mod tests {
             .collect()
     }
 
+    fn make_hashes(n: usize, hash_start: u8) -> Vec<MerkleHash> {
+        (0..n)
+            .map(|i| test_hash(hash_start.wrapping_add(i as u8)))
+            .collect()
+    }
+
     // ---- test 1: single file, single xorb, single chunk ----
 
     #[test]
@@ -324,17 +385,21 @@ mod tests {
 
         let xorb_hash = test_hash(1);
         let chunk_hash = test_hash(10);
+        let raw_chunk_hash = test_hash(20);
 
-        let xi = builder.add_xorb(
-            xorb_hash,
-            256, // num_bytes_in_xorb
-            128, // num_bytes_on_disk
-            vec![XorbChunkBuildEntry {
-                chunk_hash,
-                chunk_byte_range_start: 0,
-                unpacked_segment_bytes: 256,
-            }],
-        );
+        let xi = builder
+            .add_xorb_with_raw_chunk_hashes(
+                xorb_hash,
+                256, // num_bytes_in_xorb
+                128, // num_bytes_on_disk
+                vec![XorbChunkBuildEntry {
+                    chunk_hash,
+                    chunk_byte_range_start: 0,
+                    unpacked_segment_bytes: 256,
+                }],
+                vec![raw_chunk_hash],
+            )
+            .unwrap();
 
         let file_hash = test_hash(100);
         builder.add_file(
@@ -354,6 +419,7 @@ mod tests {
         let expected_size = HEADER_SIZE
             + (FILE_HEADER_SIZE + FILE_ENTRY_SIZE)
             + (XORB_HEADER_SIZE + XORB_ENTRY_SIZE)
+            + CHUNK_LOOKUP_ENTRY_SIZE
             + FOOTER_SIZE;
         assert_eq!(data.len(), expected_size);
 
@@ -388,7 +454,9 @@ mod tests {
 
         // Verify chunk mappings
         assert_eq!(parsed.chunk_mappings.len(), 1);
-        assert_eq!(parsed.chunk_mappings[0], (chunk_hash, xorb_hash, 0));
+        assert_eq!(parsed.chunk_mappings[0], (raw_chunk_hash, xorb_hash, 0));
+        assert_eq!(parsed.chunk_lookup_entries.len(), 1);
+        assert_eq!(parsed.chunk_lookup_entries[0].chunk_hash, raw_chunk_hash);
 
         // Verify footer
         assert_eq!(parsed.footer.file_info_offset, HEADER_SIZE as u64);
@@ -396,6 +464,12 @@ mod tests {
             parsed.footer.xorb_info_offset,
             (HEADER_SIZE + FILE_HEADER_SIZE + FILE_ENTRY_SIZE) as u64
         );
+        assert_eq!(
+            parsed.footer.chunk_lookup_offset,
+            (HEADER_SIZE + FILE_HEADER_SIZE + FILE_ENTRY_SIZE + XORB_HEADER_SIZE + XORB_ENTRY_SIZE)
+                as u64
+        );
+        assert_eq!(parsed.footer.chunk_lookup_num_entry, 1);
         assert_eq!(parsed.footer.stored_bytes_on_disk, 128);
         assert_eq!(parsed.footer.materialized_bytes, 256);
         assert_eq!(parsed.footer.stored_bytes, 256);
@@ -409,8 +483,11 @@ mod tests {
 
         let xorb_hash = test_hash(1);
         let chunks = make_chunks(3, 10);
+        let raw_hashes = make_hashes(3, 110);
 
-        let xi = builder.add_xorb(xorb_hash, 768, 384, chunks.clone());
+        let xi = builder
+            .add_xorb_with_raw_chunk_hashes(xorb_hash, 768, 384, chunks.clone(), raw_hashes.clone())
+            .unwrap();
 
         let file_hash_a = test_hash(100);
         let file_hash_b = test_hash(101);
@@ -476,10 +553,11 @@ mod tests {
         // 3 chunk mappings
         assert_eq!(parsed.chunk_mappings.len(), 3);
         for (i, &(ch, xh, idx)) in parsed.chunk_mappings.iter().enumerate() {
-            assert_eq!(ch, chunks[i].chunk_hash);
+            assert_eq!(ch, raw_hashes[i]);
             assert_eq!(xh, xorb_hash);
             assert_eq!(idx, i as u32);
         }
+        assert_eq!(parsed.chunk_lookup_entries.len(), 3);
 
         // Footer totals
         assert_eq!(parsed.footer.stored_bytes_on_disk, 384);
@@ -498,9 +576,27 @@ mod tests {
 
         let chunks_1 = make_chunks(2, 10);
         let chunks_2 = make_chunks(3, 20);
+        let raw_hashes_1 = make_hashes(2, 110);
+        let raw_hashes_2 = make_hashes(3, 120);
 
-        let xi1 = builder.add_xorb(xorb_hash_1, 512, 256, chunks_1.clone());
-        let xi2 = builder.add_xorb(xorb_hash_2, 768, 400, chunks_2.clone());
+        let xi1 = builder
+            .add_xorb_with_raw_chunk_hashes(
+                xorb_hash_1,
+                512,
+                256,
+                chunks_1.clone(),
+                raw_hashes_1.clone(),
+            )
+            .unwrap();
+        let xi2 = builder
+            .add_xorb_with_raw_chunk_hashes(
+                xorb_hash_2,
+                768,
+                400,
+                chunks_2.clone(),
+                raw_hashes_2.clone(),
+            )
+            .unwrap();
 
         let file_hash = test_hash(50);
         builder.add_file(
@@ -544,13 +640,19 @@ mod tests {
             + XORB_HEADER_SIZE
             + 2 * XORB_ENTRY_SIZE
             + XORB_HEADER_SIZE
-            + 3 * XORB_ENTRY_SIZE) as u64;
+            + 3 * XORB_ENTRY_SIZE
+            + 5 * CHUNK_LOOKUP_ENTRY_SIZE) as u64;
         assert_eq!(parsed.footer.footer_offset, expected_footer_offset);
         assert_eq!(data.len(), expected_footer_offset as usize + FOOTER_SIZE);
 
         // -- Footer lookup fields --
         assert_eq!(parsed.footer.file_lookup_num_entry, 1);
         assert_eq!(parsed.footer.xorb_lookup_num_entry, 2);
+        assert_eq!(
+            parsed.footer.chunk_lookup_offset,
+            expected_footer_offset - 5 * CHUNK_LOOKUP_ENTRY_SIZE as u64
+        );
+        assert_eq!(parsed.footer.chunk_lookup_num_entry, 5);
 
         // -- Footer byte totals --
         assert_eq!(parsed.footer.stored_bytes_on_disk, 256 + 400);
@@ -609,13 +711,14 @@ mod tests {
 
         // -- Chunk mappings --
         assert_eq!(parsed.chunk_mappings.len(), 5);
+        assert_eq!(parsed.chunk_lookup_entries.len(), 5);
         for (i, (ch, xh, idx)) in parsed.chunk_mappings[..2].iter().enumerate() {
-            assert_eq!(*ch, chunks_1[i].chunk_hash);
+            assert_eq!(*ch, raw_hashes_1[i]);
             assert_eq!(*xh, xorb_hash_1);
             assert_eq!(*idx, i as u32);
         }
         for (i, (ch, xh, idx)) in parsed.chunk_mappings[2..].iter().enumerate() {
-            assert_eq!(*ch, chunks_2[i].chunk_hash);
+            assert_eq!(*ch, raw_hashes_2[i]);
             assert_eq!(*xh, xorb_hash_2);
             assert_eq!(*idx, i as u32);
         }
@@ -634,10 +737,19 @@ mod tests {
         let chunks_a = make_chunks(2, 10);
         let chunks_b = make_chunks(1, 20);
         let chunks_c = make_chunks(4, 30);
+        let raw_hashes_a = make_hashes(2, 110);
+        let raw_hashes_b = make_hashes(1, 120);
+        let raw_hashes_c = make_hashes(4, 130);
 
-        let xa = builder.add_xorb(xorb_hash_a, 512, 200, chunks_a.clone());
-        let xb = builder.add_xorb(xorb_hash_b, 256, 100, chunks_b.clone());
-        let xc = builder.add_xorb(xorb_hash_c, 1024, 500, chunks_c.clone());
+        let xa = builder
+            .add_xorb_with_raw_chunk_hashes(xorb_hash_a, 512, 200, chunks_a.clone(), raw_hashes_a)
+            .unwrap();
+        let xb = builder
+            .add_xorb_with_raw_chunk_hashes(xorb_hash_b, 256, 100, chunks_b.clone(), raw_hashes_b)
+            .unwrap();
+        let xc = builder
+            .add_xorb_with_raw_chunk_hashes(xorb_hash_c, 1024, 500, chunks_c.clone(), raw_hashes_c)
+            .unwrap();
 
         let file_hash = test_hash(99);
         builder.add_file(
@@ -696,6 +808,7 @@ mod tests {
         // 7 total chunk entries (2 + 1 + 4)
         assert_eq!(parsed.xorb_chunk_entries.len(), 7);
         assert_eq!(parsed.chunk_mappings.len(), 7);
+        assert_eq!(parsed.chunk_lookup_entries.len(), 7);
 
         // Verify all chunks belong to the correct xorbs
         let expected_xorbs: Vec<MerkleHash> = vec![

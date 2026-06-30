@@ -11,11 +11,13 @@ use rand::{Rng, SeedableRng};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
+use xet_server::chunking::{ChunkConfig, Chunker};
 use xet_server::config::ConversionConfig;
 use xet_server::conversion::{ConversionError, ConversionPipeline, ConvertingOids};
 use xet_server::format::compression;
 use xet_server::format::shard::MDBShardFile;
 use xet_server::format::xorb::{XorbChunkHeader, XorbObjectInfoV1};
+use xet_server::hash::compute_data_hash;
 use xet_server::index::MetadataIndex;
 use xet_server::storage::StorageBackend;
 use xet_server::storage::local::LocalStorage;
@@ -60,6 +62,15 @@ fn make_test_data(seed: u64, size: usize) -> Vec<u8> {
     let mut data = vec![0u8; size];
     rng.fill(&mut data[..]);
     data
+}
+
+fn raw_chunk_hashes(data: &[u8]) -> Vec<String> {
+    let mut chunker = Chunker::new(ChunkConfig::default());
+    chunker
+        .chunk_data(data)
+        .iter()
+        .map(|chunk| compute_data_hash(&data[chunk.offset..chunk.offset + chunk.size]).to_hex())
+        .collect()
 }
 
 /// Upload `data` as a raw LFS blob and return its SHA-256 OID.
@@ -330,11 +341,20 @@ async fn test_rebuild_from_storage() {
     let (storage, index, config, _tempdir) = setup_test_env();
 
     let data = make_test_data(123, 16 * 1024);
+    let raw_chunk_hashes = raw_chunk_hashes(&data);
     let oid = upload_raw_blob(&storage, &data).await;
 
     // Convert — this writes xorbs + shards and updates `index`.
     let pipeline = ConversionPipeline::new(storage.clone(), index.clone(), config);
     let result = pipeline.convert(&oid).await.unwrap();
+    assert_eq!(raw_chunk_hashes.len(), result.num_chunks);
+    for chunk_hash in &raw_chunk_hashes {
+        assert!(
+            index.chunk_exists(chunk_hash),
+            "live index should use raw chunk hash {}",
+            chunk_hash
+        );
+    }
 
     // Create a fresh, empty index and rebuild it from storage.
     let fresh_index = MetadataIndex::new();
@@ -355,6 +375,13 @@ async fn test_rebuild_from_storage() {
         shards.contains(&result.shard_hash),
         "rebuilt index shard list should match the original"
     );
+    for chunk_hash in &raw_chunk_hashes {
+        assert!(
+            fresh_index.chunk_exists(chunk_hash),
+            "rebuilt index should preserve raw chunk hash {}",
+            chunk_hash
+        );
+    }
 }
 
 #[tokio::test]

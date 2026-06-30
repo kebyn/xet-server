@@ -489,9 +489,16 @@ impl StorageBackend for S3Storage {
                 }
             })?;
 
-        // C1 fix: Write to a temp file in the same directory, then rename on success.
-        // This ensures dest is never left as a partial/corrupted file.
-        let temp_dest = dest.with_extension("part");
+        // C1 fix: Write to a unique temp file in the same directory, then rename on success.
+        // This ensures dest is never left as a partial/corrupted file and avoids
+        // collisions between concurrent downloads to the same destination.
+        let temp_dest = {
+            let file_name = dest
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("download");
+            dest.with_file_name(format!("{}.{}.part", file_name, uuid::Uuid::new_v4()))
+        };
 
         let mut file = File::create(&temp_dest).await.map_err(|e| {
             StorageError::Internal(format!(
