@@ -1,3 +1,4 @@
+use crate::auth::extract::scope_allows;
 use crate::auth::token_store::TokenStore;
 use crate::auth::xet_signer::XetSigner;
 use crate::cas_client::CasClient;
@@ -436,14 +437,7 @@ pub async fn lfs_batch(
 
     // C5 fix: Check scope using exact match or split-based matching instead of contains()
     // "write" implies "read" — a user with write access can always download
-    let has_scope = token_info.scope == required_scope
-        || token_info.scope == "read write"
-        || token_info
-            .scope
-            .split_whitespace()
-            .any(|s| s == required_scope)
-        || (required_scope == "read" && token_info.scope.split_whitespace().any(|s| s == "write"));
-    if !has_scope {
+    if !scope_allows(&token_info.scope, required_scope) {
         return HttpResponse::Forbidden().json(serde_json::json!({
             "error": format!("Token scope '{}' insufficient for {} operation (requires '{}')",
                 token_info.scope, operation, required_scope),
