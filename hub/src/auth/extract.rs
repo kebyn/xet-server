@@ -5,6 +5,18 @@ use std::sync::Arc;
 
 use crate::auth::token_store::{TokenInfo, TokenStore};
 
+/// Return whether a token scope string grants the required scope.
+///
+/// Scopes are stored as whitespace-separated words (for example, "read write").
+/// A write token also grants read access.
+pub fn scope_allows(scope: &str, required_scope: &str) -> bool {
+    let has_required = scope.split_whitespace().any(|s| s == required_scope);
+    let write_implies_read =
+        required_scope == "read" && scope.split_whitespace().any(|s| s == "write");
+
+    has_required || write_implies_read
+}
+
 /// Marker trait for scope requirements.
 /// Implemented by AuthAny, AuthRead, AuthWrite to enforce scope at compile time.
 pub trait ScopeRequirement {
@@ -27,7 +39,7 @@ impl ScopeRequirement for AuthAny {
 pub struct AuthRead;
 impl ScopeRequirement for AuthRead {
     fn check(info: &TokenInfo) -> bool {
-        info.scope == "read" || info.scope == "write"
+        scope_allows(&info.scope, "read")
     }
     fn description() -> &'static str {
         "read access"
@@ -38,7 +50,7 @@ impl ScopeRequirement for AuthRead {
 pub struct AuthWrite;
 impl ScopeRequirement for AuthWrite {
     fn check(info: &TokenInfo) -> bool {
-        info.scope == "write"
+        scope_allows(&info.scope, "write")
     }
     fn description() -> &'static str {
         "write access"
@@ -296,10 +308,64 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn test_auth_read_with_multi_scope_token() {
+        let token_store = Arc::new(TokenStore::in_memory().await.unwrap());
+        let token = token_store
+            .create_token("testuser", "multi-token", "read write")
+            .await
+            .unwrap();
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(token_store.clone()))
+                .route(
+                    "/test",
+                    web::get().to(|_auth: AuthUser<AuthRead>| async { "ok" }),
+                ),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri("/test")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert!(resp.status().is_success());
+    }
+
+    #[actix_web::test]
     async fn test_auth_write_with_write_token() {
         let token_store = Arc::new(TokenStore::in_memory().await.unwrap());
         let token = token_store
             .create_token("testuser", "write-token", "write")
+            .await
+            .unwrap();
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(token_store.clone()))
+                .route(
+                    "/test",
+                    web::get().to(|_auth: AuthUser<AuthWrite>| async { "ok" }),
+                ),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri("/test")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert!(resp.status().is_success());
+    }
+
+    #[actix_web::test]
+    async fn test_auth_write_with_multi_scope_token() {
+        let token_store = Arc::new(TokenStore::in_memory().await.unwrap());
+        let token = token_store
+            .create_token("testuser", "multi-token", "read write")
             .await
             .unwrap();
 
