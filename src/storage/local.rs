@@ -9,7 +9,7 @@ use tokio::fs;
 /// 跨文件系统安全拷贝:先 copy 到临时文件,再原子 rename 到最终路径。
 /// 避免中断时在最终 key 留下截断文件。
 async fn copy_then_rename(source: &Path, dest: &Path) -> StorageResult<()> {
-    let temp_dest = dest.with_extension("tmp");
+    let temp_dest = unique_temp_path(dest);
     fs::copy(source, &temp_dest).await.map_err(|e| {
         StorageError::Internal(format!(
             "Failed to copy {} → {}: {}",
@@ -28,6 +28,10 @@ async fn copy_then_rename(source: &Path, dest: &Path) -> StorageResult<()> {
         ))
     })?;
     Ok(())
+}
+
+fn unique_temp_path(dest: &Path) -> PathBuf {
+    dest.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()))
 }
 
 pub struct LocalStorage {
@@ -86,7 +90,7 @@ impl StorageBackend for LocalStorage {
     async fn put(&self, key: &str, data: Bytes) -> StorageResult<()> {
         // 原子写:先写入临时文件,再 rename 到最终路径,避免崩溃时留下截断文件。
         let path = self.object_path(key)?;
-        let temp_path = path.with_extension("tmp");
+        let temp_path = unique_temp_path(&path);
 
         // Create parent directories
         if let Some(parent) = path.parent() {
@@ -252,7 +256,7 @@ mod tests {
 
         assert_eq!(tokio::fs::read(&dest).await.unwrap(), b"payload");
         // 不留下 .tmp 中间文件
-        assert!(!dest.with_extension("tmp").exists());
+        assert_no_tmp_files(dest.parent().unwrap());
     }
 
     #[tokio::test]
@@ -268,6 +272,37 @@ mod tests {
             Bytes::from_static(b"data")
         );
         // 原子写不应残留 .tmp
-        assert!(!dir.path().join("xorbs/abc.tmp").exists());
+        assert_no_tmp_files(&dir.path().join("xorbs"));
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_put_same_key_uses_independent_temp_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(LocalStorage::new(dir.path().to_str().unwrap()).unwrap());
+        let key = "objects/shared.bin";
+        let data = Bytes::from_static(b"same content");
+
+        let mut handles = Vec::new();
+        for _ in 0..16 {
+            let store = store.clone();
+            let data = data.clone();
+            handles.push(tokio::spawn(async move { store.put(key, data).await }));
+        }
+
+        for handle in handles {
+            handle.await.unwrap().unwrap();
+        }
+
+        assert_eq!(store.get(key).await.unwrap(), data);
+        assert_no_tmp_files(&dir.path().join("objects"));
+    }
+
+    fn assert_no_tmp_files(dir: &Path) {
+        let leftovers: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty());
     }
 }
