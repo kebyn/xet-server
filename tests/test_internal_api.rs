@@ -8,9 +8,13 @@ mod common;
 
 use actix_web::{App, http::Method, test, web};
 use bytes::Bytes;
+use sha2::{Digest, Sha256};
+use std::sync::Arc;
 use tempfile::tempdir;
 
 use common::{TestContext, test_token_for_keypair};
+use xet_server::config::ConversionConfig;
+use xet_server::conversion::{ConversionPipeline, ConvertingOids};
 use xet_server::hash::compute_data_hash;
 use xet_server::index::MetadataIndex;
 use xet_server::storage::StorageBackend;
@@ -18,6 +22,12 @@ use xet_server::storage::local::LocalStorage;
 
 fn create_test_context() -> TestContext {
     common::test_config_with_new_key()
+}
+
+fn sha256_hex(data: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hex::encode(hasher.finalize())
 }
 
 /// Test that GET /internal/state/{oid} returns raw_only for a blob in storage.
@@ -423,4 +433,89 @@ async fn test_lfs_download_raw_only() {
 
     let body = test::read_body(download_resp).await;
     assert_eq!(body.as_ref(), content);
+}
+
+/// Test that LFS download can reconstruct from xet-only storage.
+#[actix_web::test]
+async fn test_lfs_download_xet_only_reconstructs() {
+    let storage_dir = tempdir().unwrap();
+    let upload_temp_dir = tempdir().unwrap();
+    let reconstruction_temp_dir = tempdir().unwrap();
+
+    let ctx = create_test_context();
+    let token = test_token_for_keypair(&ctx.keypair, "read write");
+
+    let storage: Arc<Box<dyn StorageBackend>> = Arc::new(Box::new(
+        LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap(),
+    ));
+    let index = Arc::new(MetadataIndex::new());
+
+    let config = xet_server::config::ServerConfig {
+        storage: xet_server::config::StorageConfig {
+            upload_temp_dir: Some(upload_temp_dir.path().to_str().unwrap().to_string()),
+            reconstruction_temp_dir: Some(
+                reconstruction_temp_dir.path().to_str().unwrap().to_string(),
+            ),
+            ..ctx.config.storage
+        },
+        ..ctx.config
+    };
+
+    let conversion_config = ConversionConfig {
+        min_conversion_size: 0,
+        ..Default::default()
+    };
+
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::from(storage.clone()))
+            .app_data(web::Data::from(index.clone()))
+            .app_data(web::Data::new(Arc::new(ConvertingOids::new())))
+            .app_data(web::Data::new(conversion_config.clone()))
+            .app_data(web::Data::new(ctx.auth_verifier.clone()))
+            .app_data(web::Data::new(config))
+            .route(
+                "/lfs/objects/{oid}",
+                web::put().to(xet_server::api::lfs::upload_lfs_object),
+            )
+            .route(
+                "/lfs/objects/{oid}",
+                web::get().to(xet_server::api::lfs::download_lfs_object),
+            ),
+    )
+    .await;
+
+    let content: Vec<u8> = (0..(300 * 1024)).map(|i| (i % 251) as u8).collect();
+    let oid = sha256_hex(&content);
+
+    let upload_req = test::TestRequest::put()
+        .uri(&format!("/lfs/objects/{}", oid))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_payload(Bytes::from(content.clone()))
+        .to_request();
+
+    let upload_resp = test::call_service(&app, upload_req).await;
+    assert_eq!(upload_resp.status(), 200);
+
+    let pipeline = ConversionPipeline::new(storage.clone(), index.clone(), conversion_config);
+    pipeline.convert(&oid).await.unwrap();
+
+    assert!(
+        !storage
+            .exists(&format!("lfs/objects/{}", oid))
+            .await
+            .unwrap(),
+        "conversion should delete the raw LFS blob so download uses xet reconstruction"
+    );
+
+    let download_req = test::TestRequest::get()
+        .uri(&format!("/lfs/objects/{}", oid))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .to_request();
+
+    let download_resp = test::call_service(&app, download_req).await;
+    assert_eq!(download_resp.status(), 200);
+
+    let body = test::read_body(download_resp).await;
+    assert_eq!(body.as_ref(), content.as_slice());
 }

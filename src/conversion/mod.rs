@@ -163,6 +163,9 @@ impl ConversionPipeline {
         let mut num_deduped: usize = 0;
         let mut num_chunks: usize = 0;
         let mut chunk_entries: Vec<XorbChunkBuildEntry> = Vec::new();
+        // Raw chunk hashes back MetadataIndex dedup queries. Shard chunk entries
+        // store serialized chunk hashes for xorb reconstruction integrity checks.
+        let mut raw_chunk_hashes: Vec<MerkleHash> = Vec::new();
         let mut cumulative_uncompressed: u32 = 0;
         let mut xorb_offset: u32 = 0;
 
@@ -208,14 +211,15 @@ impl ConversionPipeline {
                 if self.index.chunk_exists(&chunk_hash_hex) {
                     num_deduped += 1;
                 }
+                raw_chunk_hashes.push(chunk_hash);
 
                 // Add to xorb builder
-                let (_hash, compressed_len) = xorb_builder
+                let (serialized_chunk_hash, compressed_len) = xorb_builder
                     .add_chunk(chunk_data)
                     .map_err(|e| ConversionError::BuildError(format!("Add chunk failed: {}", e)))?;
 
                 chunk_entries.push(XorbChunkBuildEntry {
-                    chunk_hash,
+                    chunk_hash: serialized_chunk_hash,
                     chunk_byte_range_start: xorb_offset,
                     unpacked_segment_bytes: unpacked_size,
                 });
@@ -240,13 +244,14 @@ impl ConversionPipeline {
             if self.index.chunk_exists(&chunk_hash_hex) {
                 num_deduped += 1;
             }
+            raw_chunk_hashes.push(chunk_hash);
 
-            let (_hash, compressed_len) = xorb_builder
+            let (serialized_chunk_hash, compressed_len) = xorb_builder
                 .add_chunk(chunk_data)
                 .map_err(|e| ConversionError::BuildError(format!("Add chunk failed: {}", e)))?;
 
             chunk_entries.push(XorbChunkBuildEntry {
-                chunk_hash,
+                chunk_hash: serialized_chunk_hash,
                 chunk_byte_range_start: xorb_offset,
                 unpacked_segment_bytes: unpacked_size,
             });
@@ -308,8 +313,8 @@ impl ConversionPipeline {
 
         // Build chunk mappings for index registration BEFORE add_xorb consumes chunk_entries
         let mut chunk_mappings: Vec<(String, String, u32)> = Vec::new();
-        for (i, entry) in chunk_entries.iter().enumerate() {
-            chunk_mappings.push((entry.chunk_hash.to_hex(), xorb_hash.clone(), i as u32));
+        for (i, chunk_hash) in raw_chunk_hashes.iter().enumerate() {
+            chunk_mappings.push((chunk_hash.to_hex(), xorb_hash.clone(), i as u32));
         }
 
         let xorb_index = shard_builder.add_xorb(
