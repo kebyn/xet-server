@@ -1,6 +1,6 @@
-use xet_server::format::xorb::XorbChunkHeader;
-use xet_server::format::compression::CompressionScheme;
 use std::io::Cursor;
+use xet_server::format::compression::CompressionScheme;
+use xet_server::format::xorb::XorbChunkHeader;
 
 #[test]
 fn test_xorb_chunk_header_size() {
@@ -97,10 +97,7 @@ fn test_xorb_footer_idents() {
 fn test_xorb_footer_roundtrip() {
     let footer = XorbObjectInfoV1 {
         xorb_hash: MerkleHash::from([0xAB; 32]),
-        chunk_hashes: vec![
-            MerkleHash::from([0x11; 32]),
-            MerkleHash::from([0x22; 32]),
-        ],
+        chunk_hashes: vec![MerkleHash::from([0x11; 32]), MerkleHash::from([0x22; 32])],
         chunk_boundary_offsets: vec![1000, 2000],
         unpacked_chunk_offsets: vec![65536, 131072],
     };
@@ -140,7 +137,9 @@ fn test_xorb_footer_many_chunks() {
     let num_chunks = 100;
     let footer = XorbObjectInfoV1 {
         xorb_hash: MerkleHash::from([0xFF; 32]),
-        chunk_hashes: (0..num_chunks).map(|i| MerkleHash::from([i as u8; 32])).collect(),
+        chunk_hashes: (0..num_chunks)
+            .map(|i| MerkleHash::from([i as u8; 32]))
+            .collect(),
         chunk_boundary_offsets: (1..=num_chunks).map(|i| i * 1000).collect(),
         unpacked_chunk_offsets: (1..=num_chunks).map(|i| i * 65536).collect(),
     };

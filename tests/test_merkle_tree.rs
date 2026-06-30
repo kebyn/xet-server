@@ -60,9 +60,7 @@ fn test_file_hash_empty() {
 
 #[test]
 fn test_file_hash_with_salt() {
-    let chunks: Vec<(MerkleHash, u64)> = vec![
-        (compute_data_hash(b"chunk1"), 6u64),
-    ];
+    let chunks: Vec<(MerkleHash, u64)> = vec![(compute_data_hash(b"chunk1"), 6u64)];
 
     let hash1 = file_hash(&chunks); // default salt = [0; 32]
     let hash2 = xorb_hash(&chunks); // xorb hash has no salt

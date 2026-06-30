@@ -1,9 +1,9 @@
-use actix_web::{web, HttpResponse};
-use crate::auth::extract::{AuthUser, AuthRead, AuthWrite};
-use crate::metadata::{MetadataStore, Repo, RepoType};
 use super::shared::can_access_repo;
-use serde::{Deserialize, Serialize};
+use crate::auth::extract::{AuthRead, AuthUser, AuthWrite};
+use crate::metadata::{MetadataStore, Repo, RepoType};
+use actix_web::{HttpResponse, web};
 use chrono::DateTime;
+use serde::{Deserialize, Serialize};
 
 /// Request body for creating a repo
 #[derive(Debug, Deserialize, Serialize)]
@@ -19,13 +19,25 @@ fn validate_repo_name(name: &str) -> Result<(), String> {
         return Err("Repository name cannot be empty".to_string());
     }
     if name.len() > 96 {
-        return Err(format!("Repository name too long ({} chars, max 96)", name.len()));
+        return Err(format!(
+            "Repository name too long ({} chars, max 96)",
+            name.len()
+        ));
     }
-    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-') {
-        return Err(format!("Repository name '{}' contains invalid characters. Only alphanumeric, '.', '_', '-' are allowed", name));
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+    {
+        return Err(format!(
+            "Repository name '{}' contains invalid characters. Only alphanumeric, '.', '_', '-' are allowed",
+            name
+        ));
     }
     if name.starts_with('.') || name.starts_with('-') {
-        return Err(format!("Repository name '{}' cannot start with '.' or '-'", name));
+        return Err(format!(
+            "Repository name '{}' cannot start with '.' or '-'",
+            name
+        ));
     }
     if name.ends_with('.') {
         return Err(format!("Repository name '{}' cannot end with '.'", name));
@@ -57,7 +69,10 @@ fn chrono_datetime(timestamp: i64) -> String {
     match DateTime::from_timestamp(timestamp, 0) {
         Some(dt) => dt.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
         None => {
-            tracing::warn!("Invalid Unix timestamp: {} (out of range for DateTime)", timestamp);
+            tracing::warn!(
+                "Invalid Unix timestamp: {} (out of range for DateTime)",
+                timestamp
+            );
             "1970-01-01T00:00:00Z".to_string()
         }
     }
@@ -84,20 +99,22 @@ async fn create_repo(
     }
 
     // Create the repo
-    let repo = match metadata.create_repo(&namespace, &name, repo_type, private).await {
+    let repo = match metadata
+        .create_repo(&namespace, &name, repo_type, private)
+        .await
+    {
         Ok(r) => r,
         Err(e) => {
             return match e {
-                crate::metadata::MetadataError::RepoAlreadyExists(_) => {
-                    HttpResponse::Conflict().json(serde_json::json!({
+                crate::metadata::MetadataError::RepoAlreadyExists(_) => HttpResponse::Conflict()
+                    .json(serde_json::json!({
                         "error": e.to_string(),
                         "error_type": "ConflictError"
-                    }))
-                }
+                    })),
                 _ => HttpResponse::InternalServerError().json(serde_json::json!({
                     "error": e.to_string(),
                     "error_type": "InternalError"
-                }))
+                })),
             };
         }
     };
@@ -123,7 +140,10 @@ pub async fn create_repo_unified(
     body: web::Json<CreateRepoUnifiedRequest>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
-    let namespace = body.organization.clone().unwrap_or_else(|| auth.info.username.clone());
+    let namespace = body
+        .organization
+        .clone()
+        .unwrap_or_else(|| auth.info.username.clone());
 
     // Security: Only allow creating repos in own namespace (no org membership yet)
     if namespace != auth.info.username {
@@ -151,7 +171,10 @@ pub async fn create_repo_unified(
     };
 
     // If repo already exists, return success (hf upload expects idempotent creation)
-    let repo = match metadata.create_repo(&namespace, &name, repo_type, private).await {
+    let repo = match metadata
+        .create_repo(&namespace, &name, repo_type, private)
+        .await
+    {
         Ok(r) => r,
         Err(crate::metadata::MetadataError::RepoAlreadyExists(_)) => {
             // Return existing repo info
@@ -199,7 +222,7 @@ async fn get_repo_info(
                 _ => HttpResponse::InternalServerError().json(serde_json::json!({
                     "error": e.to_string(),
                     "error_type": "InternalError"
-                }))
+                })),
             };
         }
     };
@@ -238,7 +261,7 @@ async fn delete_repo_info(
                 _ => HttpResponse::InternalServerError().json(serde_json::json!({
                     "error": e.to_string(),
                     "error_type": "InternalError"
-                }))
+                })),
             };
         }
     };
@@ -393,21 +416,19 @@ async fn get_revision_handler(
 
     // Try to get the revision
     match metadata.get_revision(repo.id, &revision).await {
-        Ok(rev) => {
-            HttpResponse::Ok().json(serde_json::json!({
-                "id": format!("{}/{}", namespace, repo_name),
-                "sha": rev.commit_id,
-                "title": rev.message,
-                "author": rev.author,
-                "createdAt": chrono_datetime(rev.created_at),
-                "siblings": [],
-                "tags": [],
-                "private": repo.private,
-                "downloads": 0,
-                "likes": 0,
-                "shaRemote": null
-            }))
-        }
+        Ok(rev) => HttpResponse::Ok().json(serde_json::json!({
+            "id": format!("{}/{}", namespace, repo_name),
+            "sha": rev.commit_id,
+            "title": rev.message,
+            "author": rev.author,
+            "createdAt": chrono_datetime(rev.created_at),
+            "siblings": [],
+            "tags": [],
+            "private": repo.private,
+            "downloads": 0,
+            "likes": 0,
+            "shaRemote": null
+        })),
         Err(_) => {
             if revision == "main" {
                 // Get the actual HEAD commit hash; null if repo has no commits
@@ -440,34 +461,43 @@ async fn get_revision_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use actix_web::{test as actix_test, App};
     use crate::auth::token_store::TokenStore;
     use crate::metadata::SqliteMetadataStore;
+    use actix_web::{App, test as actix_test};
 
-    async fn setup_test_env() -> (std::sync::Arc<TokenStore>, std::sync::Arc<dyn MetadataStore>) {
+    async fn setup_test_env() -> (
+        std::sync::Arc<TokenStore>,
+        std::sync::Arc<dyn MetadataStore>,
+    ) {
         let token_store = std::sync::Arc::new(TokenStore::in_memory().await.unwrap());
-        let metadata: std::sync::Arc<dyn MetadataStore> = std::sync::Arc::new(
-            SqliteMetadataStore::in_memory().await.unwrap()
-        );
+        let metadata: std::sync::Arc<dyn MetadataStore> =
+            std::sync::Arc::new(SqliteMetadataStore::in_memory().await.unwrap());
         (token_store, metadata)
     }
 
     #[actix_web::test]
     async fn test_create_repo() {
         let (token_store, metadata) = setup_test_env().await;
-        let token = token_store.create_token("testuser", "test-token", "write").await.unwrap();
+        let token = token_store
+            .create_token("testuser", "test-token", "write")
+            .await
+            .unwrap();
 
         let app = actix_test::init_service(
             App::new()
                 .app_data(web::Data::new(token_store.clone()))
                 .app_data(web::Data::new(metadata.clone()))
-                .route("/api/models", web::post().to(create_model))
-        ).await;
+                .route("/api/models", web::post().to(create_model)),
+        )
+        .await;
 
         let req = actix_test::TestRequest::post()
             .uri("/api/models")
             .insert_header(("Authorization", format!("Bearer {}", token)))
-            .set_json(&CreateRepoRequest { name: "my-model".to_string(), private: true })
+            .set_json(&CreateRepoRequest {
+                name: "my-model".to_string(),
+                private: true,
+            })
             .to_request();
 
         let resp = actix_test::call_service(&app, req).await;
@@ -482,20 +512,27 @@ mod tests {
     #[actix_web::test]
     async fn test_create_duplicate_repo() {
         let (token_store, metadata) = setup_test_env().await;
-        let token = token_store.create_token("testuser", "test-token", "write").await.unwrap();
+        let token = token_store
+            .create_token("testuser", "test-token", "write")
+            .await
+            .unwrap();
 
         let app = actix_test::init_service(
             App::new()
                 .app_data(web::Data::new(token_store.clone()))
                 .app_data(web::Data::new(metadata.clone()))
-                .route("/api/models", web::post().to(create_model))
-        ).await;
+                .route("/api/models", web::post().to(create_model)),
+        )
+        .await;
 
         // Create first repo
         let req = actix_test::TestRequest::post()
             .uri("/api/models")
             .insert_header(("Authorization", format!("Bearer {}", token)))
-            .set_json(&CreateRepoRequest { name: "my-model".to_string(), private: false })
+            .set_json(&CreateRepoRequest {
+                name: "my-model".to_string(),
+                private: false,
+            })
             .to_request();
         let resp = actix_test::call_service(&app, req).await;
         assert!(resp.status().is_success());
@@ -504,7 +541,10 @@ mod tests {
         let req = actix_test::TestRequest::post()
             .uri("/api/models")
             .insert_header(("Authorization", format!("Bearer {}", token)))
-            .set_json(&CreateRepoRequest { name: "my-model".to_string(), private: false })
+            .set_json(&CreateRepoRequest {
+                name: "my-model".to_string(),
+                private: false,
+            })
             .to_request();
         let resp = actix_test::call_service(&app, req).await;
         assert_eq!(resp.status(), actix_web::http::StatusCode::CONFLICT);
@@ -513,17 +553,24 @@ mod tests {
     #[actix_web::test]
     async fn test_get_repo() {
         let (token_store, metadata) = setup_test_env().await;
-        let token = token_store.create_token("testuser", "test-token", "read").await.unwrap();
+        let token = token_store
+            .create_token("testuser", "test-token", "read")
+            .await
+            .unwrap();
 
         // Create repo directly
-        metadata.create_repo("testuser", "my-model", RepoType::Model, false).await.unwrap();
+        metadata
+            .create_repo("testuser", "my-model", RepoType::Model, false)
+            .await
+            .unwrap();
 
         let app = actix_test::init_service(
             App::new()
                 .app_data(web::Data::new(token_store.clone()))
                 .app_data(web::Data::new(metadata.clone()))
-                .route("/api/models/{ns}/{repo}", web::get().to(get_repo_model))
-        ).await;
+                .route("/api/models/{ns}/{repo}", web::get().to(get_repo_model)),
+        )
+        .await;
 
         let req = actix_test::TestRequest::get()
             .uri("/api/models/testuser/my-model")
@@ -541,16 +588,23 @@ mod tests {
     #[actix_web::test]
     async fn test_get_repo_info_private_denies_non_owner() {
         let (token_store, metadata) = setup_test_env().await;
-        let token = token_store.create_token("attacker", "t", "read").await.unwrap();
+        let token = token_store
+            .create_token("attacker", "t", "read")
+            .await
+            .unwrap();
         // 私有 repo,owner 是别人
-        metadata.create_repo("owner", "secret", RepoType::Model, true).await.unwrap();
+        metadata
+            .create_repo("owner", "secret", RepoType::Model, true)
+            .await
+            .unwrap();
 
         let app = actix_test::init_service(
             App::new()
                 .app_data(web::Data::new(token_store.clone()))
                 .app_data(web::Data::new(metadata.clone()))
-                .route("/api/models/{ns}/{repo}", web::get().to(get_repo_model))
-        ).await;
+                .route("/api/models/{ns}/{repo}", web::get().to(get_repo_model)),
+        )
+        .await;
 
         let req = actix_test::TestRequest::get()
             .uri("/api/models/owner/secret")
@@ -564,16 +618,26 @@ mod tests {
     #[actix_web::test]
     async fn test_get_revision_private_denies_non_owner() {
         let (token_store, metadata) = setup_test_env().await;
-        let token = token_store.create_token("attacker", "t", "read").await.unwrap();
+        let token = token_store
+            .create_token("attacker", "t", "read")
+            .await
+            .unwrap();
         // 私有 repo;访问校验在 repo 加载后、revision 解析前触发,无需 HEAD。
-        metadata.create_repo("owner", "secret", RepoType::Model, true).await.unwrap();
+        metadata
+            .create_repo("owner", "secret", RepoType::Model, true)
+            .await
+            .unwrap();
 
         let app = actix_test::init_service(
             App::new()
                 .app_data(web::Data::new(token_store.clone()))
                 .app_data(web::Data::new(metadata.clone()))
-                .route("/api/models/{ns}/{repo}/revision/{revision}", web::get().to(get_revision_model))
-        ).await;
+                .route(
+                    "/api/models/{ns}/{repo}/revision/{revision}",
+                    web::get().to(get_revision_model),
+                ),
+        )
+        .await;
 
         let req = actix_test::TestRequest::get()
             .uri("/api/models/owner/secret/revision/main")
@@ -587,14 +651,18 @@ mod tests {
     #[actix_web::test]
     async fn test_get_nonexistent_repo() {
         let (token_store, metadata) = setup_test_env().await;
-        let token = token_store.create_token("testuser", "test-token", "read").await.unwrap();
+        let token = token_store
+            .create_token("testuser", "test-token", "read")
+            .await
+            .unwrap();
 
         let app = actix_test::init_service(
             App::new()
                 .app_data(web::Data::new(token_store.clone()))
                 .app_data(web::Data::new(metadata.clone()))
-                .route("/api/models/{ns}/{repo}", web::get().to(get_repo_model))
-        ).await;
+                .route("/api/models/{ns}/{repo}", web::get().to(get_repo_model)),
+        )
+        .await;
 
         let req = actix_test::TestRequest::get()
             .uri("/api/models/testuser/nonexistent")
@@ -608,17 +676,27 @@ mod tests {
     #[actix_web::test]
     async fn test_delete_repo() {
         let (token_store, metadata) = setup_test_env().await;
-        let token = token_store.create_token("testuser", "test-token", "write").await.unwrap();
+        let token = token_store
+            .create_token("testuser", "test-token", "write")
+            .await
+            .unwrap();
 
         // Create repo directly
-        metadata.create_repo("testuser", "my-model", RepoType::Model, false).await.unwrap();
+        metadata
+            .create_repo("testuser", "my-model", RepoType::Model, false)
+            .await
+            .unwrap();
 
         let app = actix_test::init_service(
             App::new()
                 .app_data(web::Data::new(token_store.clone()))
                 .app_data(web::Data::new(metadata.clone()))
-                .route("/api/models/{ns}/{repo}", web::delete().to(delete_repo_model))
-        ).await;
+                .route(
+                    "/api/models/{ns}/{repo}",
+                    web::delete().to(delete_repo_model),
+                ),
+        )
+        .await;
 
         let req = actix_test::TestRequest::delete()
             .uri("/api/models/testuser/my-model")
@@ -629,25 +707,40 @@ mod tests {
         assert!(resp.status().is_success());
 
         // Verify repo is deleted
-        let result = metadata.get_repo("testuser", "my-model", RepoType::Model).await;
+        let result = metadata
+            .get_repo("testuser", "my-model", RepoType::Model)
+            .await;
         assert!(result.is_err());
     }
 
     #[actix_web::test]
     async fn test_delete_repo_not_owner() {
         let (token_store, metadata) = setup_test_env().await;
-        let _token1 = token_store.create_token("user1", "token1", "write").await.unwrap();
-        let token2 = token_store.create_token("user2", "token2", "write").await.unwrap();
+        let _token1 = token_store
+            .create_token("user1", "token1", "write")
+            .await
+            .unwrap();
+        let token2 = token_store
+            .create_token("user2", "token2", "write")
+            .await
+            .unwrap();
 
         // Create repo with user1
-        metadata.create_repo("user1", "my-model", RepoType::Model, false).await.unwrap();
+        metadata
+            .create_repo("user1", "my-model", RepoType::Model, false)
+            .await
+            .unwrap();
 
         let app = actix_test::init_service(
             App::new()
                 .app_data(web::Data::new(token_store.clone()))
                 .app_data(web::Data::new(metadata.clone()))
-                .route("/api/models/{ns}/{repo}", web::delete().to(delete_repo_model))
-        ).await;
+                .route(
+                    "/api/models/{ns}/{repo}",
+                    web::delete().to(delete_repo_model),
+                ),
+        )
+        .await;
 
         // Try to delete with user2's token
         let req = actix_test::TestRequest::delete()

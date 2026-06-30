@@ -2,13 +2,13 @@
 //!
 //! POST /v1/shards - Upload metadata shards (streaming)
 
-use actix_web::{web, HttpResponse};
+use actix_web::{HttpResponse, web};
 use futures_util::StreamExt;
 use serde::Serialize;
 use tracing::{error, info};
 
 use crate::api::auth::AuthVerifier;
-use crate::api::guard::{require_auth, AuthNeed};
+use crate::api::guard::{AuthNeed, require_auth};
 use crate::config::ServerConfig;
 use crate::format::shard::MDBShardFile;
 use crate::index::MetadataIndex;
@@ -185,7 +185,8 @@ pub async fn upload_shard(
 
     index.register_shard(shard_id.clone(), file_hashes.clone(), chunk_mappings);
 
-    info!("Uploaded shard {} with {} files and {} chunks",
+    info!(
+        "Uploaded shard {} with {} files and {} chunks",
         shard_id,
         file_hashes.len(),
         shard.chunk_mappings().len()
@@ -205,13 +206,13 @@ pub async fn upload_shard(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::auth::{KeyPair, XetClaims, sign_xet_token, AuthVerifier};
+    use crate::api::auth::{AuthVerifier, KeyPair, XetClaims, sign_xet_token};
     use crate::config::AuthConfig;
     use crate::storage::local::LocalStorage;
-    use actix_web::{test, web, App};
-    use tempfile::tempdir;
+    use actix_web::{App, test, web};
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
+    use tempfile::tempdir;
 
     fn create_test_config() -> (KeyPair, AuthVerifier, ServerConfig) {
         let kp = KeyPair::generate();
@@ -267,9 +268,8 @@ mod tests {
     #[actix_web::test]
     async fn test_upload_shard_unauthorized() {
         let dir = tempdir().unwrap();
-        let storage: Box<dyn StorageBackend> = Box::new(
-            LocalStorage::new(dir.path().to_str().unwrap()).unwrap()
-        );
+        let storage: Box<dyn StorageBackend> =
+            Box::new(LocalStorage::new(dir.path().to_str().unwrap()).unwrap());
         let storage_arc: Arc<Box<dyn StorageBackend>> = Arc::new(storage);
 
         let (_, auth, config) = create_test_config();
@@ -282,8 +282,9 @@ mod tests {
                 .app_data(web::Data::new(index))
                 .app_data(web::Data::new(auth))
                 .app_data(web::Data::new(config))
-                .route("/v1/shards", web::post().to(upload_shard))
-        ).await;
+                .route("/v1/shards", web::post().to(upload_shard)),
+        )
+        .await;
 
         let req = test::TestRequest::post()
             .uri("/v1/shards")
@@ -297,9 +298,8 @@ mod tests {
     #[actix_web::test]
     async fn test_upload_shard_invalid_format() {
         let dir = tempdir().unwrap();
-        let storage: Box<dyn StorageBackend> = Box::new(
-            LocalStorage::new(dir.path().to_str().unwrap()).unwrap()
-        );
+        let storage: Box<dyn StorageBackend> =
+            Box::new(LocalStorage::new(dir.path().to_str().unwrap()).unwrap());
         let storage_arc: Arc<Box<dyn StorageBackend>> = Arc::new(storage);
 
         let (kp, auth, config) = create_test_config();
@@ -313,13 +313,14 @@ mod tests {
                 .app_data(web::Data::new(index))
                 .app_data(web::Data::new(auth))
                 .app_data(web::Data::new(config))
-                .route("/v1/shards", web::post().to(upload_shard))
-        ).await;
+                .route("/v1/shards", web::post().to(upload_shard)),
+        )
+        .await;
 
         let req = test::TestRequest::post()
             .uri("/v1/shards")
             .insert_header(("Authorization", format!("Bearer {}", token)))
-            .set_payload(vec![0u8; 100])  // Invalid shard data
+            .set_payload(vec![0u8; 100]) // Invalid shard data
             .to_request();
 
         let resp = test::call_service(&app, req).await;

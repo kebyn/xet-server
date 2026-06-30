@@ -47,9 +47,8 @@ impl MerkleHash {
             )));
         }
 
-        let bytes = hex::decode(hex_str).map_err(|e| {
-            XetError::InvalidHashFormat(format!("Invalid hex: {}", e))
-        })?;
+        let bytes = hex::decode(hex_str)
+            .map_err(|e| XetError::InvalidHashFormat(format!("Invalid hex: {}", e)))?;
 
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&bytes);

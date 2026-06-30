@@ -2,17 +2,17 @@
 //!
 //! POST /v1/xorbs/{prefix}/{hash} - Upload xorb objects (streaming)
 
-use actix_web::{web, HttpResponse};
+use actix_web::{HttpResponse, web};
 use futures_util::StreamExt;
 use serde::Serialize;
 use tracing::{error, info};
 
 use crate::api::auth::AuthVerifier;
-use crate::api::guard::{require_auth, AuthNeed};
+use crate::api::guard::{AuthNeed, require_auth};
 use crate::config::ServerConfig;
+use crate::metrics::GLOBAL_METRICS;
 use crate::storage::{StorageBackend, StorageError};
 use crate::types::MerkleHash;
-use crate::metrics::GLOBAL_METRICS;
 use crate::util::{StreamingHasher, TempFile};
 
 #[derive(Serialize)]
@@ -66,7 +66,10 @@ pub async fn upload_xorb(
     // on disks with limited (but sufficient) space. Use min(max_body_size, 100MB) as a
     // practical minimum: enough for most uploads, without being overly conservative.
     let temp_dir = config.storage.resolve_upload_temp_dir();
-    let check_bytes = std::cmp::min(config.server.max_body_size_bytes() as u64, 100 * 1024 * 1024);
+    let check_bytes = std::cmp::min(
+        config.server.max_body_size_bytes() as u64,
+        100 * 1024 * 1024,
+    );
     if let Err(e) = check_disk_space(&temp_dir, check_bytes) {
         error!("Insufficient disk space: {}", e);
         GLOBAL_METRICS.record_request(507);
@@ -212,9 +215,7 @@ pub async fn upload_xorb(
     GLOBAL_METRICS.record_upload_bytes(total_bytes);
     GLOBAL_METRICS.record_latency(start);
 
-    HttpResponse::Ok().json(XorbUploadResponse {
-        was_inserted: true,
-    })
+    HttpResponse::Ok().json(XorbUploadResponse { was_inserted: true })
 }
 
 /// Download a xorb object
@@ -262,7 +263,11 @@ pub async fn download_xorb(
             let file = match tokio::fs::File::open(&path).await {
                 Ok(f) => f,
                 Err(e) => {
-                    error!("Failed to open xorb file for streaming {}: {}", path.display(), e);
+                    error!(
+                        "Failed to open xorb file for streaming {}: {}",
+                        path.display(),
+                        e
+                    );
                     GLOBAL_METRICS.record_request(500);
                     GLOBAL_METRICS.record_error();
                     GLOBAL_METRICS.record_latency(start);
@@ -365,12 +370,12 @@ fn check_disk_space(path: &std::path::Path, required_bytes: u64) -> Result<(), S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::auth::{KeyPair, XetClaims, sign_xet_token, AuthVerifier};
+    use crate::api::auth::{AuthVerifier, KeyPair, XetClaims, sign_xet_token};
     use crate::config::AuthConfig;
     use crate::storage::local::LocalStorage;
-    use actix_web::{test, web, App};
-    use tempfile::tempdir;
+    use actix_web::{App, test, web};
     use std::time::{SystemTime, UNIX_EPOCH};
+    use tempfile::tempdir;
 
     fn create_test_config() -> (KeyPair, AuthVerifier, ServerConfig) {
         let kp = KeyPair::generate();
@@ -426,9 +431,8 @@ mod tests {
     #[actix_web::test]
     async fn test_upload_xorb_unauthorized() {
         let dir = tempdir().unwrap();
-        let storage: Box<dyn StorageBackend> = Box::new(
-            LocalStorage::new(dir.path().to_str().unwrap()).unwrap()
-        );
+        let storage: Box<dyn StorageBackend> =
+            Box::new(LocalStorage::new(dir.path().to_str().unwrap()).unwrap());
 
         let (_, auth, config) = create_test_config();
 
@@ -437,8 +441,9 @@ mod tests {
                 .app_data(web::Data::new(storage))
                 .app_data(web::Data::new(auth))
                 .app_data(web::Data::new(config))
-                .route("/v1/xorbs/{prefix}/{hash}", web::post().to(upload_xorb))
-        ).await;
+                .route("/v1/xorbs/{prefix}/{hash}", web::post().to(upload_xorb)),
+        )
+        .await;
 
         let hash = "a".repeat(64);
         let req = test::TestRequest::post()
@@ -453,9 +458,8 @@ mod tests {
     #[actix_web::test]
     async fn test_upload_xorb_invalid_prefix() {
         let dir = tempdir().unwrap();
-        let storage: Box<dyn StorageBackend> = Box::new(
-            LocalStorage::new(dir.path().to_str().unwrap()).unwrap()
-        );
+        let storage: Box<dyn StorageBackend> =
+            Box::new(LocalStorage::new(dir.path().to_str().unwrap()).unwrap());
 
         let (kp, auth, config) = create_test_config();
         let token = create_test_token(&kp, "read write");
@@ -465,8 +469,9 @@ mod tests {
                 .app_data(web::Data::new(storage))
                 .app_data(web::Data::new(auth))
                 .app_data(web::Data::new(config))
-                .route("/v1/xorbs/{prefix}/{hash}", web::post().to(upload_xorb))
-        ).await;
+                .route("/v1/xorbs/{prefix}/{hash}", web::post().to(upload_xorb)),
+        )
+        .await;
 
         let hash = "a".repeat(64);
         let req = test::TestRequest::post()

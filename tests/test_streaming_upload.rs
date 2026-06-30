@@ -5,17 +5,17 @@
 
 mod common;
 
-use actix_web::{test, web, App};
+use actix_web::{App, test, web};
 use bytes::Bytes;
 use tempfile::tempdir;
 
-use common::{test_token_for_keypair, TestContext};
+use common::{TestContext, test_token_for_keypair};
 use xet_server::api::auth::{AuthVerifier, KeyPair};
 use xet_server::format::xorb::XorbObjectInfoV1;
 use xet_server::hash::compute_data_hash;
 use xet_server::index::MetadataIndex;
-use xet_server::storage::local::LocalStorage;
 use xet_server::storage::StorageBackend;
+use xet_server::storage::local::LocalStorage;
 
 fn create_test_config_with_temp_dir(temp_dir: &str) -> TestContext {
     // Generate a key pair first
@@ -111,9 +111,8 @@ async fn test_streaming_lfs_upload() {
     let ctx = create_test_config_with_temp_dir(temp_dir.path().to_str().unwrap());
     let token = test_token_for_keypair(&ctx.keypair, "read write");
 
-    let storage: Box<dyn StorageBackend> = Box::new(
-        LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap(),
-    );
+    let storage: Box<dyn StorageBackend> =
+        Box::new(LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap());
 
     let content = b"hello streaming world";
     let oid = compute_data_hash(content).to_hex();
@@ -151,14 +150,13 @@ async fn test_streaming_lfs_upload_sha256_oid() {
     let ctx = create_test_config_with_temp_dir(temp_dir.path().to_str().unwrap());
     let token = test_token_for_keypair(&ctx.keypair, "read write");
 
-    let storage: Box<dyn StorageBackend> = Box::new(
-        LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap(),
-    );
+    let storage: Box<dyn StorageBackend> =
+        Box::new(LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap());
 
     let content = b"hello git lfs sha256 world";
 
     // Compute SHA-256 hash (what Git LFS clients send as OID)
-    use sha2::{Sha256, Digest};
+    use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(content);
     let sha256_oid = format!("{:x}", hasher.finalize());
@@ -183,7 +181,8 @@ async fn test_streaming_lfs_upload_sha256_oid() {
 
     let resp = test::call_service(&app, req).await;
     assert_eq!(
-        resp.status(), 200,
+        resp.status(),
+        200,
         "LFS upload with SHA-256 OID should succeed (Git LFS client compatibility)"
     );
 }
@@ -196,9 +195,8 @@ async fn test_streaming_lfs_hash_mismatch() {
     let ctx = create_test_config_with_temp_dir(temp_dir.path().to_str().unwrap());
     let token = test_token_for_keypair(&ctx.keypair, "read write");
 
-    let storage: Box<dyn StorageBackend> = Box::new(
-        LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap(),
-    );
+    let storage: Box<dyn StorageBackend> =
+        Box::new(LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap());
 
     // Use a random valid-looking oid that doesn't match the content
     let wrong_oid = "a".repeat(64);
@@ -218,7 +216,9 @@ async fn test_streaming_lfs_hash_mismatch() {
     let req = test::TestRequest::put()
         .uri(&format!("/lfs/objects/{}", wrong_oid))
         .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_payload(Bytes::from(b"some content that doesn't match the oid".to_vec()))
+        .set_payload(Bytes::from(
+            b"some content that doesn't match the oid".to_vec(),
+        ))
         .to_request();
 
     let resp = test::call_service(&app, req).await;
@@ -247,9 +247,8 @@ async fn test_streaming_lfs_oversized_rejected() {
     let ctx = create_test_config_small_limit(temp_dir.path().to_str().unwrap());
     let token = test_token_for_keypair(&ctx.keypair, "read write");
 
-    let storage: Box<dyn StorageBackend> = Box::new(
-        LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap(),
-    );
+    let storage: Box<dyn StorageBackend> =
+        Box::new(LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap());
 
     // Create content larger than 1MB
     let large_content = vec![0u8; 2 * 1024 * 1024]; // 2 MB
@@ -289,9 +288,8 @@ async fn test_streaming_xorb_upload() {
     let ctx = create_test_config_with_temp_dir(temp_dir.path().to_str().unwrap());
     let token = test_token_for_keypair(&ctx.keypair, "read write");
 
-    let storage: Box<dyn StorageBackend> = Box::new(
-        LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap(),
-    );
+    let storage: Box<dyn StorageBackend> =
+        Box::new(LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap());
 
     let content = b"xorb streaming test data";
     let (xorb_data, xorb_hash) = create_valid_xorb(content);
@@ -326,9 +324,8 @@ async fn test_streaming_xorb_invalid_structure() {
     let ctx = create_test_config_with_temp_dir(temp_dir.path().to_str().unwrap());
     let token = test_token_for_keypair(&ctx.keypair, "read write");
 
-    let storage: Box<dyn StorageBackend> = Box::new(
-        LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap(),
-    );
+    let storage: Box<dyn StorageBackend> =
+        Box::new(LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap());
 
     // Create data whose overall hash matches but has no valid footer
     let bogus_data = b"this is not a valid xorb at all, just some bytes";
@@ -368,9 +365,8 @@ async fn test_streaming_shard_upload() {
     let ctx = create_test_config_with_temp_dir(temp_dir.path().to_str().unwrap());
     let token = test_token_for_keypair(&ctx.keypair, "read write");
 
-    let storage: Box<dyn StorageBackend> = Box::new(
-        LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap(),
-    );
+    let storage: Box<dyn StorageBackend> =
+        Box::new(LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap());
     let storage_arc: std::sync::Arc<Box<dyn StorageBackend>> = std::sync::Arc::new(storage);
 
     let index = MetadataIndex::new();
@@ -430,7 +426,12 @@ async fn test_streaming_shard_upload() {
         .to_request();
 
     let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), 200, "Shard upload should succeed: {:?}", resp);
+    assert_eq!(
+        resp.status(),
+        200,
+        "Shard upload should succeed: {:?}",
+        resp
+    );
 }
 
 #[actix_web::test]
@@ -441,9 +442,8 @@ async fn test_streaming_lfs_idempotent() {
     let ctx = create_test_config_with_temp_dir(temp_dir.path().to_str().unwrap());
     let token = test_token_for_keypair(&ctx.keypair, "read write");
 
-    let storage: Box<dyn StorageBackend> = Box::new(
-        LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap(),
-    );
+    let storage: Box<dyn StorageBackend> =
+        Box::new(LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap());
 
     let content = b"idempotent upload test";
     let oid = compute_data_hash(content).to_hex();
@@ -476,7 +476,11 @@ async fn test_streaming_lfs_idempotent() {
         .set_payload(Bytes::from(content.to_vec()))
         .to_request();
     let resp2 = test::call_service(&app, req2).await;
-    assert_eq!(resp2.status(), 200, "Duplicate upload should return 200 (idempotent)");
+    assert_eq!(
+        resp2.status(),
+        200,
+        "Duplicate upload should return 200 (idempotent)"
+    );
 
     let body: serde_json::Value = test::read_body_json(resp2).await;
     assert_eq!(body["message"], "Object already exists");

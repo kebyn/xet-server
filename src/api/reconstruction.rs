@@ -3,18 +3,18 @@
 //! GET /v1/reconstructions/{file_id} - Get file reconstruction information (V1 format)
 //! GET /v2/reconstructions/{file_id} - Get file reconstruction information (V2 format)
 
-use actix_web::{web, HttpResponse};
+use actix_web::{HttpResponse, web};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use tracing::error;
 
 use crate::api::auth::AuthVerifier;
-use crate::api::guard::{require_auth, AuthNeed};
+use crate::api::guard::{AuthNeed, require_auth};
 use crate::config::ServerConfig;
+use crate::format::shard::MDBShardFile;
 use crate::index::MetadataIndex;
 use crate::metrics::GLOBAL_METRICS;
 use crate::storage::StorageBackend;
-use crate::format::shard::MDBShardFile;
 
 // V1 Response structures
 #[derive(Serialize)]
@@ -178,14 +178,9 @@ pub async fn get_reconstruction_v1(
     }
 
     // Calculate total download bytes (sum of all xorb sizes)
-    let total_download_bytes: u64 = xorbs.iter()
-        .map(|x| x.size)
-        .sum();
+    let total_download_bytes: u64 = xorbs.iter().map(|x| x.size).sum();
 
-    let response = ReconstructionResponseV1 {
-        file_id,
-        xorbs,
-    };
+    let response = ReconstructionResponseV1 { file_id, xorbs };
 
     GLOBAL_METRICS.record_request(200);
     GLOBAL_METRICS.record_download_bytes(total_download_bytes);
@@ -273,18 +268,19 @@ pub async fn get_reconstruction(
                     size: xorb_size,
                 });
 
-                fetch_info.insert(xorb_hash, XorbFetchInfo {
-                    storage_path,
-                    size: xorb_size,
-                });
+                fetch_info.insert(
+                    xorb_hash,
+                    XorbFetchInfo {
+                        storage_path,
+                        size: xorb_size,
+                    },
+                );
             }
         }
     }
 
     // Calculate total download bytes (sum of all xorb sizes)
-    let total_download_bytes: u64 = xorbs.iter()
-        .map(|x| x.size)
-        .sum();
+    let total_download_bytes: u64 = xorbs.iter().map(|x| x.size).sum();
 
     let response = ReconstructionResponseV2 {
         file_id,
@@ -302,12 +298,12 @@ pub async fn get_reconstruction(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use actix_web::{test, web, App};
     use crate::api::auth::{AuthVerifier, KeyPair, XetClaims, sign_xet_token};
     use crate::config::AuthConfig;
     use crate::storage::local::LocalStorage;
-    use tempfile::tempdir;
+    use actix_web::{App, test, web};
     use std::time::{SystemTime, UNIX_EPOCH};
+    use tempfile::tempdir;
 
     fn create_test_config() -> (KeyPair, AuthVerifier, ServerConfig) {
         let kp = KeyPair::generate();
@@ -359,9 +355,8 @@ mod tests {
     #[actix_web::test]
     async fn test_reconstruction_not_found() {
         let dir = tempdir().unwrap();
-        let storage: Box<dyn StorageBackend> = Box::new(
-            LocalStorage::new(dir.path().to_str().unwrap()).unwrap()
-        );
+        let storage: Box<dyn StorageBackend> =
+            Box::new(LocalStorage::new(dir.path().to_str().unwrap()).unwrap());
 
         let (kp, auth, config) = create_test_config();
         let token = create_test_token(&kp, "read");
@@ -374,8 +369,12 @@ mod tests {
                 .app_data(web::Data::new(storage))
                 .app_data(web::Data::new(config))
                 .app_data(web::Data::new(auth))
-                .route("/v2/reconstructions/{file_id}", web::get().to(get_reconstruction))
-        ).await;
+                .route(
+                    "/v2/reconstructions/{file_id}",
+                    web::get().to(get_reconstruction),
+                ),
+        )
+        .await;
 
         let file_id = "a".repeat(64);
         let req = test::TestRequest::get()
@@ -390,9 +389,8 @@ mod tests {
     #[actix_web::test]
     async fn test_reconstruction_invalid_file_id() {
         let dir = tempdir().unwrap();
-        let storage: Box<dyn StorageBackend> = Box::new(
-            LocalStorage::new(dir.path().to_str().unwrap()).unwrap()
-        );
+        let storage: Box<dyn StorageBackend> =
+            Box::new(LocalStorage::new(dir.path().to_str().unwrap()).unwrap());
 
         let (kp, auth, config) = create_test_config();
         let token = create_test_token(&kp, "read");
@@ -405,8 +403,12 @@ mod tests {
                 .app_data(web::Data::new(storage))
                 .app_data(web::Data::new(config))
                 .app_data(web::Data::new(auth))
-                .route("/v2/reconstructions/{file_id}", web::get().to(get_reconstruction))
-        ).await;
+                .route(
+                    "/v2/reconstructions/{file_id}",
+                    web::get().to(get_reconstruction),
+                ),
+        )
+        .await;
 
         let req = test::TestRequest::get()
             .uri("/v2/reconstructions/invalid")
@@ -420,9 +422,8 @@ mod tests {
     #[actix_web::test]
     async fn test_reconstruction_v1_not_found() {
         let dir = tempdir().unwrap();
-        let storage: Box<dyn StorageBackend> = Box::new(
-            LocalStorage::new(dir.path().to_str().unwrap()).unwrap()
-        );
+        let storage: Box<dyn StorageBackend> =
+            Box::new(LocalStorage::new(dir.path().to_str().unwrap()).unwrap());
 
         let (kp, auth, config) = create_test_config();
         let token = create_test_token(&kp, "read");
@@ -435,8 +436,12 @@ mod tests {
                 .app_data(web::Data::new(storage))
                 .app_data(web::Data::new(config))
                 .app_data(web::Data::new(auth))
-                .route("/v1/reconstructions/{file_id}", web::get().to(get_reconstruction_v1))
-        ).await;
+                .route(
+                    "/v1/reconstructions/{file_id}",
+                    web::get().to(get_reconstruction_v1),
+                ),
+        )
+        .await;
 
         let file_id = "a".repeat(64);
         let req = test::TestRequest::get()
@@ -451,9 +456,8 @@ mod tests {
     #[actix_web::test]
     async fn test_reconstruction_v1_invalid_file_id() {
         let dir = tempdir().unwrap();
-        let storage: Box<dyn StorageBackend> = Box::new(
-            LocalStorage::new(dir.path().to_str().unwrap()).unwrap()
-        );
+        let storage: Box<dyn StorageBackend> =
+            Box::new(LocalStorage::new(dir.path().to_str().unwrap()).unwrap());
 
         let (kp, auth, config) = create_test_config();
         let token = create_test_token(&kp, "read");
@@ -466,8 +470,12 @@ mod tests {
                 .app_data(web::Data::new(storage))
                 .app_data(web::Data::new(config))
                 .app_data(web::Data::new(auth))
-                .route("/v1/reconstructions/{file_id}", web::get().to(get_reconstruction_v1))
-        ).await;
+                .route(
+                    "/v1/reconstructions/{file_id}",
+                    web::get().to(get_reconstruction_v1),
+                ),
+        )
+        .await;
 
         let req = test::TestRequest::get()
             .uri("/v1/reconstructions/invalid")

@@ -8,15 +8,15 @@
 
 mod common;
 
-use actix_web::{test, web, App};
+use actix_web::{App, test, web};
 use bytes::Bytes;
 use tempfile::tempdir;
 
-use common::{test_config_with_new_key, test_token_for_keypair, TestContext};
+use common::{TestContext, test_config_with_new_key, test_token_for_keypair};
 use xet_server::format::xorb::XorbObjectInfoV1;
 use xet_server::index::MetadataIndex;
-use xet_server::storage::local::LocalStorage;
 use xet_server::storage::StorageBackend;
+use xet_server::storage::local::LocalStorage;
 
 /// Helper to create a valid xorb with proper structure and hash
 fn create_valid_xorb(content: &[u8]) -> (Vec<u8>, String) {
@@ -42,9 +42,8 @@ fn create_valid_xorb(content: &[u8]) -> (Vec<u8>, String) {
 async fn test_full_upload_workflow() {
     // Setup
     let dir = tempdir().unwrap();
-    let storage: Box<dyn StorageBackend> = Box::new(
-        LocalStorage::new(dir.path().to_str().unwrap()).unwrap()
-    );
+    let storage: Box<dyn StorageBackend> =
+        Box::new(LocalStorage::new(dir.path().to_str().unwrap()).unwrap());
     let storage_arc: std::sync::Arc<Box<dyn StorageBackend>> = std::sync::Arc::new(storage);
 
     let index = MetadataIndex::new();
@@ -57,11 +56,24 @@ async fn test_full_upload_workflow() {
             .app_data(web::Data::new(index))
             .app_data(web::Data::new(ctx.auth_verifier))
             .app_data(web::Data::new(ctx.config))
-            .route("/v1/xorbs/{prefix}/{hash}", web::post().to(xet_server::api::xorb::upload_xorb))
-            .route("/v1/shards", web::post().to(xet_server::api::shard::upload_shard))
-            .route("/v2/reconstructions/{file_id}", web::get().to(xet_server::api::reconstruction::get_reconstruction))
-            .route("/v1/chunks/{prefix}/{hash}", web::get().to(xet_server::api::global_dedup::query_chunk_dedup))
-    ).await;
+            .route(
+                "/v1/xorbs/{prefix}/{hash}",
+                web::post().to(xet_server::api::xorb::upload_xorb),
+            )
+            .route(
+                "/v1/shards",
+                web::post().to(xet_server::api::shard::upload_shard),
+            )
+            .route(
+                "/v2/reconstructions/{file_id}",
+                web::get().to(xet_server::api::reconstruction::get_reconstruction),
+            )
+            .route(
+                "/v1/chunks/{prefix}/{hash}",
+                web::get().to(xet_server::api::global_dedup::query_chunk_dedup),
+            ),
+    )
+    .await;
 
     // Step 1: Upload a xorb
     let (xorb_data, xorb_hash) = create_valid_xorb(b"test xorb data with some content");
@@ -128,9 +140,8 @@ async fn test_full_upload_workflow() {
 #[actix_web::test]
 async fn test_auth_workflow() {
     let dir = tempdir().unwrap();
-    let storage: Box<dyn StorageBackend> = Box::new(
-        LocalStorage::new(dir.path().to_str().unwrap()).unwrap()
-    );
+    let storage: Box<dyn StorageBackend> =
+        Box::new(LocalStorage::new(dir.path().to_str().unwrap()).unwrap());
 
     let index = MetadataIndex::new();
     let ctx: TestContext = test_config_with_new_key();
@@ -141,8 +152,12 @@ async fn test_auth_workflow() {
             .app_data(web::Data::new(index))
             .app_data(web::Data::new(ctx.auth_verifier))
             .app_data(web::Data::new(ctx.config))
-            .route("/v1/xorbs/{prefix}/{hash}", web::post().to(xet_server::api::xorb::upload_xorb))
-    ).await;
+            .route(
+                "/v1/xorbs/{prefix}/{hash}",
+                web::post().to(xet_server::api::xorb::upload_xorb),
+            ),
+    )
+    .await;
 
     let xorb_hash = "a".repeat(64);
 
@@ -191,9 +206,8 @@ async fn test_auth_workflow() {
 #[actix_web::test]
 async fn test_hash_validation() {
     let dir = tempdir().unwrap();
-    let storage: Box<dyn StorageBackend> = Box::new(
-        LocalStorage::new(dir.path().to_str().unwrap()).unwrap()
-    );
+    let storage: Box<dyn StorageBackend> =
+        Box::new(LocalStorage::new(dir.path().to_str().unwrap()).unwrap());
 
     let index = MetadataIndex::new();
     let ctx: TestContext = test_config_with_new_key();
@@ -205,10 +219,20 @@ async fn test_hash_validation() {
             .app_data(web::Data::new(index))
             .app_data(web::Data::new(ctx.auth_verifier))
             .app_data(web::Data::new(ctx.config))
-            .route("/v1/xorbs/{prefix}/{hash}", web::post().to(xet_server::api::xorb::upload_xorb))
-            .route("/v2/reconstructions/{file_id}", web::get().to(xet_server::api::reconstruction::get_reconstruction))
-            .route("/v1/chunks/{prefix}/{hash}", web::get().to(xet_server::api::global_dedup::query_chunk_dedup))
-    ).await;
+            .route(
+                "/v1/xorbs/{prefix}/{hash}",
+                web::post().to(xet_server::api::xorb::upload_xorb),
+            )
+            .route(
+                "/v2/reconstructions/{file_id}",
+                web::get().to(xet_server::api::reconstruction::get_reconstruction),
+            )
+            .route(
+                "/v1/chunks/{prefix}/{hash}",
+                web::get().to(xet_server::api::global_dedup::query_chunk_dedup),
+            ),
+    )
+    .await;
 
     // Test 1: Invalid hash length (too short)
     let req = test::TestRequest::post()
@@ -264,9 +288,8 @@ async fn test_hash_validation() {
 #[actix_web::test]
 async fn test_idempotency() {
     let dir = tempdir().unwrap();
-    let storage: Box<dyn StorageBackend> = Box::new(
-        LocalStorage::new(dir.path().to_str().unwrap()).unwrap()
-    );
+    let storage: Box<dyn StorageBackend> =
+        Box::new(LocalStorage::new(dir.path().to_str().unwrap()).unwrap());
 
     let index = MetadataIndex::new();
     let ctx: TestContext = test_config_with_new_key();
@@ -278,8 +301,12 @@ async fn test_idempotency() {
             .app_data(web::Data::new(index))
             .app_data(web::Data::new(ctx.auth_verifier))
             .app_data(web::Data::new(ctx.config))
-            .route("/v1/xorbs/{prefix}/{hash}", web::post().to(xet_server::api::xorb::upload_xorb))
-    ).await;
+            .route(
+                "/v1/xorbs/{prefix}/{hash}",
+                web::post().to(xet_server::api::xorb::upload_xorb),
+            ),
+    )
+    .await;
 
     let (xorb_data, xorb_hash) = create_valid_xorb(b"test xorb data");
 

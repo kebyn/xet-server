@@ -1,9 +1,9 @@
-use actix_web::{web, HttpRequest, HttpResponse};
-use crate::auth::extract::{AuthUser, AuthRead};
+use super::shared::{can_access_repo, resolve_revision};
+use crate::auth::extract::{AuthRead, AuthUser};
 use crate::metadata::{FileEntry, MetadataStore, RepoType};
+use actix_web::{HttpRequest, HttpResponse, web};
 use serde::Serialize;
 use std::collections::HashSet;
-use super::shared::{resolve_revision, can_access_repo};
 
 /// Tree entry response
 #[derive(Debug, Serialize, serde::Deserialize)]
@@ -25,7 +25,11 @@ fn infer_directories(entries: &[FileEntry], prefix: &str) -> Vec<String> {
             entry.path.clone()
         } else {
             let prefix_with_slash = format!("{}/", prefix);
-            entry.path.strip_prefix(&prefix_with_slash).unwrap_or(&entry.path).to_string()
+            entry
+                .path
+                .strip_prefix(&prefix_with_slash)
+                .unwrap_or(&entry.path)
+                .to_string()
         };
 
         // If path contains '/', the part before '/' is a directory
@@ -62,7 +66,7 @@ async fn handle_tree(
                 _ => HttpResponse::InternalServerError().json(serde_json::json!({
                     "error": e.to_string(),
                     "error_type": "InternalError"
-                }))
+                })),
             };
         }
     };
@@ -87,7 +91,10 @@ async fn handle_tree(
     };
 
     // Get file tree with prefix filter
-    let entries = match metadata.get_file_tree_prefix(repo.id, &commit_id, &tree_path).await {
+    let entries = match metadata
+        .get_file_tree_prefix(repo.id, &commit_id, &tree_path)
+        .await
+    {
         Ok(e) => e,
         Err(e) => {
             return HttpResponse::InternalServerError().json(serde_json::json!({
@@ -101,7 +108,9 @@ async fn handle_tree(
     let mut tree_entries: Vec<TreeEntry> = Vec::new();
 
     // Check for recursive query parameter (proper parsing, not substring match)
-    let recursive = req.uri().query()
+    let recursive = req
+        .uri()
+        .query()
         .map(|q| {
             q.split('&').any(|pair| {
                 pair.split_once('=')
@@ -119,7 +128,9 @@ async fn handle_tree(
             } else {
                 // M2 fix: Strip prefix with trailing slash to avoid leading '/' in result
                 let prefix_with_slash = format!("{}/", tree_path);
-                entry.path.strip_prefix(&prefix_with_slash)
+                entry
+                    .path
+                    .strip_prefix(&prefix_with_slash)
                     .unwrap_or(entry.path.strip_prefix(&tree_path).unwrap_or(&entry.path))
                     .to_string()
             };
@@ -151,7 +162,11 @@ async fn handle_tree(
                 entry.path.clone()
             } else {
                 let prefix_with_slash = format!("{}/", tree_path);
-                entry.path.strip_prefix(&prefix_with_slash).unwrap_or(&entry.path).to_string()
+                entry
+                    .path
+                    .strip_prefix(&prefix_with_slash)
+                    .unwrap_or(&entry.path)
+                    .to_string()
             };
             if !rel_path.contains('/') {
                 tree_entries.push(TreeEntry {
@@ -243,35 +258,47 @@ pub async fn tree_space_no_path(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use actix_web::{test as actix_test, App};
     use crate::auth::token_store::TokenStore;
     use crate::metadata::{FileEntry, Revision, SqliteMetadataStore};
+    use actix_web::{App, test as actix_test};
 
     #[test]
     fn test_infer_directories_respects_path_boundary() {
         let entries = vec![FileEntry {
-            path: "model/sub/a.bin".to_string(), repo_id: 1, commit_id: "c".to_string(),
-            size: 1, cas_hash: "h".to_string(), is_lfs: true,
+            path: "model/sub/a.bin".to_string(),
+            repo_id: 1,
+            commit_id: "c".to_string(),
+            size: 1,
+            cas_hash: "h".to_string(),
+            is_lfs: true,
         }];
         let dirs = infer_directories(&entries, "model");
         assert_eq!(dirs, vec!["sub".to_string()]);
     }
 
-    async fn setup_test_env_with_files() -> (std::sync::Arc<TokenStore>, std::sync::Arc<dyn MetadataStore>) {
+    async fn setup_test_env_with_files() -> (
+        std::sync::Arc<TokenStore>,
+        std::sync::Arc<dyn MetadataStore>,
+    ) {
         let token_store = std::sync::Arc::new(TokenStore::in_memory().await.unwrap());
-        let metadata: std::sync::Arc<dyn MetadataStore> = std::sync::Arc::new(
-            SqliteMetadataStore::in_memory().await.unwrap()
-        );
+        let metadata: std::sync::Arc<dyn MetadataStore> =
+            std::sync::Arc::new(SqliteMetadataStore::in_memory().await.unwrap());
         (token_store, metadata)
     }
 
     #[actix_web::test]
     async fn test_tree_listing() {
         let (token_store, metadata) = setup_test_env_with_files().await;
-        let token = token_store.create_token("testuser", "test-token", "read").await.unwrap();
+        let token = token_store
+            .create_token("testuser", "test-token", "read")
+            .await
+            .unwrap();
 
         // Create repo and add files
-        let repo = metadata.create_repo("testuser", "my-model", RepoType::Model, false).await.unwrap();
+        let repo = metadata
+            .create_repo("testuser", "my-model", RepoType::Model, false)
+            .await
+            .unwrap();
         let commit_id = "abc123";
         let revision = Revision {
             commit_id: commit_id.to_string(),
@@ -309,8 +336,12 @@ mod tests {
             App::new()
                 .app_data(web::Data::new(token_store.clone()))
                 .app_data(web::Data::new(metadata.clone()))
-                .route("/api/models/{ns}/{repo}/tree/{revision}/{path:.*}", web::get().to(tree_model))
-        ).await;
+                .route(
+                    "/api/models/{ns}/{repo}/tree/{revision}/{path:.*}",
+                    web::get().to(tree_model),
+                ),
+        )
+        .await;
 
         let req = actix_test::TestRequest::get()
             .uri("/api/models/testuser/my-model/tree/main/")
@@ -327,26 +358,50 @@ mod tests {
     #[actix_web::test]
     async fn test_tree_private_repo_denies_non_owner() {
         let (token_store, metadata) = setup_test_env_with_files().await;
-        let token = token_store.create_token("attacker", "t", "read").await.unwrap();
+        let token = token_store
+            .create_token("attacker", "t", "read")
+            .await
+            .unwrap();
         // 私有 repo,owner 是别人
-        let repo = metadata.create_repo("owner", "secret", RepoType::Model, true).await.unwrap();
+        let repo = metadata
+            .create_repo("owner", "secret", RepoType::Model, true)
+            .await
+            .unwrap();
         let commit_id = "abc123";
-        metadata.add_revision(Revision {
-            commit_id: commit_id.to_string(), repo_id: repo.id, parent: None,
-            message: "i".to_string(), author: "owner".to_string(), created_at: 1000,
-        }).await.unwrap();
+        metadata
+            .add_revision(Revision {
+                commit_id: commit_id.to_string(),
+                repo_id: repo.id,
+                parent: None,
+                message: "i".to_string(),
+                author: "owner".to_string(),
+                created_at: 1000,
+            })
+            .await
+            .unwrap();
         metadata.set_head(repo.id, commit_id).await.unwrap();
-        metadata.add_file_entries(vec![FileEntry {
-            path: "model.bin".to_string(), repo_id: repo.id, commit_id: commit_id.to_string(),
-            size: 1024, cas_hash: "secret_hash".to_string(), is_lfs: true,
-        }]).await.unwrap();
+        metadata
+            .add_file_entries(vec![FileEntry {
+                path: "model.bin".to_string(),
+                repo_id: repo.id,
+                commit_id: commit_id.to_string(),
+                size: 1024,
+                cas_hash: "secret_hash".to_string(),
+                is_lfs: true,
+            }])
+            .await
+            .unwrap();
 
         let app = actix_test::init_service(
             App::new()
                 .app_data(web::Data::new(token_store.clone()))
                 .app_data(web::Data::new(metadata.clone()))
-                .route("/api/models/{ns}/{repo}/tree/{revision}/{path:.*}", web::get().to(tree_model))
-        ).await;
+                .route(
+                    "/api/models/{ns}/{repo}/tree/{revision}/{path:.*}",
+                    web::get().to(tree_model),
+                ),
+        )
+        .await;
         let req = actix_test::TestRequest::get()
             .uri("/api/models/owner/secret/tree/main/")
             .insert_header(("Authorization", format!("Bearer {}", token)))
@@ -358,25 +413,49 @@ mod tests {
     #[actix_web::test]
     async fn test_tree_private_repo_allows_owner() {
         let (token_store, metadata) = setup_test_env_with_files().await;
-        let token = token_store.create_token("owner", "t", "read").await.unwrap();
-        let repo = metadata.create_repo("owner", "secret", RepoType::Model, true).await.unwrap();
+        let token = token_store
+            .create_token("owner", "t", "read")
+            .await
+            .unwrap();
+        let repo = metadata
+            .create_repo("owner", "secret", RepoType::Model, true)
+            .await
+            .unwrap();
         let commit_id = "abc123";
-        metadata.add_revision(Revision {
-            commit_id: commit_id.to_string(), repo_id: repo.id, parent: None,
-            message: "i".to_string(), author: "owner".to_string(), created_at: 1000,
-        }).await.unwrap();
+        metadata
+            .add_revision(Revision {
+                commit_id: commit_id.to_string(),
+                repo_id: repo.id,
+                parent: None,
+                message: "i".to_string(),
+                author: "owner".to_string(),
+                created_at: 1000,
+            })
+            .await
+            .unwrap();
         metadata.set_head(repo.id, commit_id).await.unwrap();
-        metadata.add_file_entries(vec![FileEntry {
-            path: "model.bin".to_string(), repo_id: repo.id, commit_id: commit_id.to_string(),
-            size: 1024, cas_hash: "h".to_string(), is_lfs: true,
-        }]).await.unwrap();
+        metadata
+            .add_file_entries(vec![FileEntry {
+                path: "model.bin".to_string(),
+                repo_id: repo.id,
+                commit_id: commit_id.to_string(),
+                size: 1024,
+                cas_hash: "h".to_string(),
+                is_lfs: true,
+            }])
+            .await
+            .unwrap();
 
         let app = actix_test::init_service(
             App::new()
                 .app_data(web::Data::new(token_store.clone()))
                 .app_data(web::Data::new(metadata.clone()))
-                .route("/api/models/{ns}/{repo}/tree/{revision}/{path:.*}", web::get().to(tree_model))
-        ).await;
+                .route(
+                    "/api/models/{ns}/{repo}/tree/{revision}/{path:.*}",
+                    web::get().to(tree_model),
+                ),
+        )
+        .await;
         let req = actix_test::TestRequest::get()
             .uri("/api/models/owner/secret/tree/main/")
             .insert_header(("Authorization", format!("Bearer {}", token)))
@@ -388,10 +467,16 @@ mod tests {
     #[actix_web::test]
     async fn test_tree_with_subdirectories() {
         let (token_store, metadata) = setup_test_env_with_files().await;
-        let token = token_store.create_token("testuser", "test-token", "read").await.unwrap();
+        let token = token_store
+            .create_token("testuser", "test-token", "read")
+            .await
+            .unwrap();
 
         // Create repo and add files with nested paths
-        let repo = metadata.create_repo("testuser", "my-model", RepoType::Model, false).await.unwrap();
+        let repo = metadata
+            .create_repo("testuser", "my-model", RepoType::Model, false)
+            .await
+            .unwrap();
         let commit_id = "abc123";
         let revision = Revision {
             commit_id: commit_id.to_string(),
@@ -437,8 +522,12 @@ mod tests {
             App::new()
                 .app_data(web::Data::new(token_store.clone()))
                 .app_data(web::Data::new(metadata.clone()))
-                .route("/api/models/{ns}/{repo}/tree/{revision}/{path:.*}", web::get().to(tree_model))
-        ).await;
+                .route(
+                    "/api/models/{ns}/{repo}/tree/{revision}/{path:.*}",
+                    web::get().to(tree_model),
+                ),
+        )
+        .await;
 
         let req = actix_test::TestRequest::get()
             .uri("/api/models/testuser/my-model/tree/main/")

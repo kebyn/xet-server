@@ -11,8 +11,8 @@ use tempfile::tempdir;
 use xet_server::chunking::{ChunkConfig, Chunker};
 use xet_server::hash::{compute_data_hash, xorb_hash};
 use xet_server::index::MetadataIndex;
-use xet_server::storage::local::LocalStorage;
 use xet_server::storage::StorageBackend;
+use xet_server::storage::local::LocalStorage;
 
 /// Test 5.1.1: Complete file upload workflow
 ///
@@ -24,9 +24,8 @@ use xet_server::storage::StorageBackend;
 #[actix_web::test]
 async fn test_e2e_complete_file_upload() {
     let dir = tempdir().unwrap();
-    let storage: Box<dyn StorageBackend> = Box::new(
-        LocalStorage::new(dir.path().to_str().unwrap()).unwrap(),
-    );
+    let storage: Box<dyn StorageBackend> =
+        Box::new(LocalStorage::new(dir.path().to_str().unwrap()).unwrap());
     let _ctx = common::test_config_with_new_key();
 
     // Step 1: Create test data and chunk it
@@ -56,7 +55,10 @@ async fn test_e2e_complete_file_upload() {
 
     // Step 3: Store xorb
     let xorb_key = format!("xorbs/default/{}", xorb_hex);
-    storage.put(&xorb_key, Bytes::from(xorb_data.clone())).await.unwrap();
+    storage
+        .put(&xorb_key, Bytes::from(xorb_data.clone()))
+        .await
+        .unwrap();
 
     // Step 4: Verify xorb is stored
     let stored = storage.exists(&xorb_key).await.unwrap();
@@ -86,7 +88,11 @@ async fn test_e2e_global_deduplication() {
     let chunks2 = chunker2.chunk_data(content);
 
     // Step 3: Verify chunks have same hashes
-    assert_eq!(chunks1.len(), chunks2.len(), "Same content should produce same number of chunks");
+    assert_eq!(
+        chunks1.len(),
+        chunks2.len(),
+        "Same content should produce same number of chunks"
+    );
 
     for (chunk1, chunk2) in chunks1.iter().zip(chunks2.iter()) {
         let data1 = &content[chunk1.offset..chunk1.offset + chunk1.size];
@@ -107,9 +113,8 @@ async fn test_e2e_global_deduplication() {
 #[actix_web::test]
 async fn test_e2e_sequential_uploads() {
     let dir = tempdir().unwrap();
-    let storage: Box<dyn StorageBackend> = Box::new(
-        LocalStorage::new(dir.path().to_str().unwrap()).unwrap(),
-    );
+    let storage: Box<dyn StorageBackend> =
+        Box::new(LocalStorage::new(dir.path().to_str().unwrap()).unwrap());
 
     // Upload 10 different xorbs
     for i in 0..10 {
@@ -119,7 +124,10 @@ async fn test_e2e_sequential_uploads() {
         let hash_hex = hash.to_hex();
 
         let xorb_key = format!("xorbs/default/{}", hash_hex);
-        storage.put(&xorb_key, Bytes::from(data_bytes.to_vec())).await.unwrap();
+        storage
+            .put(&xorb_key, Bytes::from(data_bytes.to_vec()))
+            .await
+            .unwrap();
     }
 
     // Verify all xorbs are stored
@@ -159,9 +167,8 @@ async fn test_e2e_empty_file() {
 #[actix_web::test]
 async fn test_e2e_large_file() {
     let dir = tempdir().unwrap();
-    let storage: Box<dyn StorageBackend> = Box::new(
-        LocalStorage::new(dir.path().to_str().unwrap()).unwrap(),
-    );
+    let storage: Box<dyn StorageBackend> =
+        Box::new(LocalStorage::new(dir.path().to_str().unwrap()).unwrap());
 
     // Create 1MB of data
     let large_data = vec![0xABu8; 1024 * 1024];
@@ -186,7 +193,10 @@ async fn test_e2e_large_file() {
 
     // Store xorb
     let xorb_key = format!("xorbs/default/{}", xorb_hex);
-    storage.put(&xorb_key, Bytes::from(xorb_data)).await.unwrap();
+    storage
+        .put(&xorb_key, Bytes::from(xorb_data))
+        .await
+        .unwrap();
 
     // Verify storage
     let stored = storage.exists(&xorb_key).await.unwrap();
@@ -217,12 +227,19 @@ async fn test_e2e_metadata_index() {
     // Query for file shards
     let shards = index.get_shards_for_file(&file_hash);
     assert!(shards.is_some(), "Should find shards for file");
-    assert_eq!(shards.unwrap(), vec![shard_id], "Should return correct shard");
+    assert_eq!(
+        shards.unwrap(),
+        vec![shard_id],
+        "Should return correct shard"
+    );
 
     // Query for non-existent file
     let non_existent = "e".repeat(64);
     let shards = index.get_shards_for_file(&non_existent);
-    assert!(shards.is_none(), "Should not find shards for non-existent file");
+    assert!(
+        shards.is_none(),
+        "Should not find shards for non-existent file"
+    );
 }
 
 /// Test 5.4.1: Chunk size validation
@@ -250,11 +267,29 @@ async fn test_e2e_chunk_size_validation() {
 
         if is_last {
             // Last chunk can be smaller than min_size
-            assert!(chunk.size <= max_size, "Last chunk {} exceeds max size: {} > {}", i, chunk.size, max_size);
+            assert!(
+                chunk.size <= max_size,
+                "Last chunk {} exceeds max size: {} > {}",
+                i,
+                chunk.size,
+                max_size
+            );
         } else {
             // Non-last chunks should be within range
-            assert!(chunk.size >= min_size, "Chunk {} below min size: {} < {}", i, chunk.size, min_size);
-            assert!(chunk.size <= max_size, "Chunk {} exceeds max size: {} > {}", i, chunk.size, max_size);
+            assert!(
+                chunk.size >= min_size,
+                "Chunk {} below min size: {} < {}",
+                i,
+                chunk.size,
+                min_size
+            );
+            assert!(
+                chunk.size <= max_size,
+                "Chunk {} exceeds max size: {} > {}",
+                i,
+                chunk.size,
+                max_size
+            );
         }
     }
 }

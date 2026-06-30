@@ -35,19 +35,19 @@
 //! let xorb = xorb_hash(&chunk_hashes);
 //! ```
 
-pub mod error;
-pub mod types;
-pub mod hash;
+pub mod api;
 pub mod chunking;
-pub mod format;
 pub mod config;
 pub mod conversion;
-pub mod storage;
-pub mod api;
-pub mod server;
+pub mod error;
+pub mod format;
+pub mod hash;
 pub mod index;
 pub mod metrics;
 pub mod middleware;
+pub mod server;
+pub mod storage;
+pub mod types;
 pub mod util;
 
-pub use error::{XetError, Result};
+pub use error::{Result, XetError};

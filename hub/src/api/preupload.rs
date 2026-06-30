@@ -1,6 +1,6 @@
-use actix_web::{web, HttpResponse};
 use crate::auth::extract::{AuthUser, AuthWrite};
 use crate::metadata::{MetadataStore, RepoType};
+use actix_web::{HttpResponse, web};
 use serde::{Deserialize, Serialize};
 
 /// Preupload request
@@ -54,7 +54,10 @@ async fn handle_preupload(
     // C-AUTH: preupload 是 commit 的写前置步骤,需校验对目标 namespace 的写权限
     // (与 handle_commit 一致)。在 repo 查询前返回 403,不泄露私有 repo 存在性。
     if namespace != auth.info.username {
-        let has_access = metadata.is_namespace_member(&auth.info.username, &namespace).await.unwrap_or(false);
+        let has_access = metadata
+            .is_namespace_member(&auth.info.username, &namespace)
+            .await
+            .unwrap_or(false);
         if !has_access {
             return HttpResponse::Forbidden().json(serde_json::json!({
                 "error": format!("User '{}' cannot access namespace '{}'", auth.info.username, namespace),
@@ -65,7 +68,7 @@ async fn handle_preupload(
 
     // Check repo exists
     match metadata.get_repo(&namespace, &repo_name, repo_type).await {
-        Ok(_) => {},
+        Ok(_) => {}
         Err(e) => {
             return match e {
                 crate::metadata::MetadataError::RepoNotFound(_) => {
@@ -77,13 +80,15 @@ async fn handle_preupload(
                 _ => HttpResponse::InternalServerError().json(serde_json::json!({
                     "error": e.to_string(),
                     "error_type": "InternalError"
-                }))
+                })),
             };
         }
     };
 
     // Classify each file's upload mode
-    let file_responses: Vec<PreuploadFileResponse> = body.files.iter()
+    let file_responses: Vec<PreuploadFileResponse> = body
+        .files
+        .iter()
         .map(|f| PreuploadFileResponse {
             path: f.path.clone(),
             upload_mode: classify_upload_mode(f.size, config.storage.inline_threshold_bytes),
@@ -91,7 +96,9 @@ async fn handle_preupload(
         })
         .collect();
 
-    HttpResponse::Ok().json(PreuploadResponse { files: file_responses })
+    HttpResponse::Ok().json(PreuploadResponse {
+        files: file_responses,
+    })
 }
 
 // Model preupload handler
@@ -130,33 +137,45 @@ pub async fn preupload_space(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use actix_web::{test as actix_test, App};
     use crate::auth::token_store::TokenStore;
     use crate::metadata::SqliteMetadataStore;
+    use actix_web::{App, test as actix_test};
 
-    async fn setup_test_env() -> (std::sync::Arc<TokenStore>, std::sync::Arc<dyn MetadataStore>) {
+    async fn setup_test_env() -> (
+        std::sync::Arc<TokenStore>,
+        std::sync::Arc<dyn MetadataStore>,
+    ) {
         let token_store = std::sync::Arc::new(TokenStore::in_memory().await.unwrap());
-        let metadata: std::sync::Arc<dyn MetadataStore> = std::sync::Arc::new(
-            SqliteMetadataStore::in_memory().await.unwrap()
-        );
+        let metadata: std::sync::Arc<dyn MetadataStore> =
+            std::sync::Arc::new(SqliteMetadataStore::in_memory().await.unwrap());
         (token_store, metadata)
     }
 
     #[actix_web::test]
     async fn test_preupload_mode_regular() {
         let (token_store, metadata) = setup_test_env().await;
-        let token = token_store.create_token("testuser", "test-token", "write").await.unwrap();
+        let token = token_store
+            .create_token("testuser", "test-token", "write")
+            .await
+            .unwrap();
 
         // Create repo
-        metadata.create_repo("testuser", "my-model", RepoType::Model, false).await.unwrap();
+        metadata
+            .create_repo("testuser", "my-model", RepoType::Model, false)
+            .await
+            .unwrap();
 
         let app = actix_test::init_service(
             App::new()
                 .app_data(web::Data::new(token_store.clone()))
                 .app_data(web::Data::new(metadata.clone()))
                 .app_data(web::Data::new(crate::config::HubConfig::default()))
-                .route("/api/models/{ns}/{repo}/preupload/{revision}", web::post().to(preupload_model))
-        ).await;
+                .route(
+                    "/api/models/{ns}/{repo}/preupload/{revision}",
+                    web::post().to(preupload_model),
+                ),
+        )
+        .await;
 
         // Small file (< 1MB)
         let req = actix_test::TestRequest::post()
@@ -166,7 +185,7 @@ mod tests {
                 files: vec![PreuploadFile {
                     path: "config.json".to_string(),
                     size: 1024,
-                }]
+                }],
             })
             .to_request();
 
@@ -181,18 +200,28 @@ mod tests {
     #[actix_web::test]
     async fn test_preupload_mode_lfs() {
         let (token_store, metadata) = setup_test_env().await;
-        let token = token_store.create_token("testuser", "test-token", "write").await.unwrap();
+        let token = token_store
+            .create_token("testuser", "test-token", "write")
+            .await
+            .unwrap();
 
         // Create repo
-        metadata.create_repo("testuser", "my-model", RepoType::Model, false).await.unwrap();
+        metadata
+            .create_repo("testuser", "my-model", RepoType::Model, false)
+            .await
+            .unwrap();
 
         let app = actix_test::init_service(
             App::new()
                 .app_data(web::Data::new(token_store.clone()))
                 .app_data(web::Data::new(metadata.clone()))
                 .app_data(web::Data::new(crate::config::HubConfig::default()))
-                .route("/api/models/{ns}/{repo}/preupload/{revision}", web::post().to(preupload_model))
-        ).await;
+                .route(
+                    "/api/models/{ns}/{repo}/preupload/{revision}",
+                    web::post().to(preupload_model),
+                ),
+        )
+        .await;
 
         // Medium file (1MB < size <= 10MB)
         let req = actix_test::TestRequest::post()
@@ -202,7 +231,7 @@ mod tests {
                 files: vec![PreuploadFile {
                     path: "model.bin".to_string(),
                     size: 5 * 1024 * 1024, // 5MB
-                }]
+                }],
             })
             .to_request();
 
@@ -217,18 +246,28 @@ mod tests {
     #[actix_web::test]
     async fn test_preupload_mode_xet() {
         let (token_store, metadata) = setup_test_env().await;
-        let token = token_store.create_token("testuser", "test-token", "write").await.unwrap();
+        let token = token_store
+            .create_token("testuser", "test-token", "write")
+            .await
+            .unwrap();
 
         // Create repo
-        metadata.create_repo("testuser", "my-model", RepoType::Model, false).await.unwrap();
+        metadata
+            .create_repo("testuser", "my-model", RepoType::Model, false)
+            .await
+            .unwrap();
 
         let app = actix_test::init_service(
             App::new()
                 .app_data(web::Data::new(token_store.clone()))
                 .app_data(web::Data::new(metadata.clone()))
                 .app_data(web::Data::new(crate::config::HubConfig::default()))
-                .route("/api/models/{ns}/{repo}/preupload/{revision}", web::post().to(preupload_model))
-        ).await;
+                .route(
+                    "/api/models/{ns}/{repo}/preupload/{revision}",
+                    web::post().to(preupload_model),
+                ),
+        )
+        .await;
 
         // Large file (> 10MB)
         let req = actix_test::TestRequest::post()
@@ -238,7 +277,7 @@ mod tests {
                 files: vec![PreuploadFile {
                     path: "model.bin".to_string(),
                     size: 100 * 1024 * 1024, // 100MB
-                }]
+                }],
             })
             .to_request();
 
@@ -257,14 +296,35 @@ mod tests {
         // Regular: <= 1MB
         assert_eq!(classify_upload_mode(0, inline_threshold), "regular");
         assert_eq!(classify_upload_mode(1024, inline_threshold), "regular");
-        assert_eq!(classify_upload_mode(1024 * 1024, inline_threshold), "regular");
+        assert_eq!(
+            classify_upload_mode(1024 * 1024, inline_threshold),
+            "regular"
+        );
 
         // LFS: > 1MB
-        assert_eq!(classify_upload_mode(1024 * 1024 + 1, inline_threshold), "lfs");
-        assert_eq!(classify_upload_mode(5 * 1024 * 1024, inline_threshold), "lfs");
-        assert_eq!(classify_upload_mode(10 * 1024 * 1024, inline_threshold), "lfs");
-        assert_eq!(classify_upload_mode(10 * 1024 * 1024 + 1, inline_threshold), "lfs");
-        assert_eq!(classify_upload_mode(100 * 1024 * 1024, inline_threshold), "lfs");
-        assert_eq!(classify_upload_mode(1024 * 1024 * 1024, inline_threshold), "lfs");
+        assert_eq!(
+            classify_upload_mode(1024 * 1024 + 1, inline_threshold),
+            "lfs"
+        );
+        assert_eq!(
+            classify_upload_mode(5 * 1024 * 1024, inline_threshold),
+            "lfs"
+        );
+        assert_eq!(
+            classify_upload_mode(10 * 1024 * 1024, inline_threshold),
+            "lfs"
+        );
+        assert_eq!(
+            classify_upload_mode(10 * 1024 * 1024 + 1, inline_threshold),
+            "lfs"
+        );
+        assert_eq!(
+            classify_upload_mode(100 * 1024 * 1024, inline_threshold),
+            "lfs"
+        );
+        assert_eq!(
+            classify_upload_mode(1024 * 1024 * 1024, inline_threshold),
+            "lfs"
+        );
     }
 }

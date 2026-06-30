@@ -37,8 +37,17 @@ fn test_compression_empty_data() {
 
 #[test]
 fn test_compression_scheme_from_u8() {
-    assert_eq!(CompressionScheme::try_from(0u8).unwrap(), CompressionScheme::None);
-    assert_eq!(CompressionScheme::try_from(1u8).unwrap(), CompressionScheme::LZ4);
-    assert_eq!(CompressionScheme::try_from(2u8).unwrap(), CompressionScheme::ByteGrouping4LZ4);
+    assert_eq!(
+        CompressionScheme::try_from(0u8).unwrap(),
+        CompressionScheme::None
+    );
+    assert_eq!(
+        CompressionScheme::try_from(1u8).unwrap(),
+        CompressionScheme::LZ4
+    );
+    assert_eq!(
+        CompressionScheme::try_from(2u8).unwrap(),
+        CompressionScheme::ByteGrouping4LZ4
+    );
     assert!(CompressionScheme::try_from(99u8).is_err());
 }

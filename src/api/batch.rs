@@ -5,12 +5,12 @@
 //! This implements the Git LFS batch API to enable standard Git LFS clients
 //! to work with the Xet server.
 
-use actix_web::{web, HttpResponse};
+use actix_web::{HttpResponse, web};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-use crate::api::auth::{extract_token_from_request, AuthVerifier};
-use crate::api::guard::{require_auth, AuthNeed};
+use crate::api::auth::{AuthVerifier, extract_token_from_request};
+use crate::api::guard::{AuthNeed, require_auth};
 use crate::config::ServerConfig;
 use crate::metrics::GLOBAL_METRICS;
 
@@ -79,7 +79,11 @@ pub async fn batch_operation(
 ) -> HttpResponse {
     let start = std::time::Instant::now();
 
-    info!("Batch operation request: {} ({} objects)", body.operation, body.objects.len());
+    info!(
+        "Batch operation request: {} ({} objects)",
+        body.operation,
+        body.objects.len()
+    );
 
     // I5 fix: Check if proxy token generation is available
     let can_sign_proxy = auth.can_sign_proxy_tokens();
@@ -104,20 +108,26 @@ pub async fn batch_operation(
     // Per Git LFS spec, the client sends preferred transfers in order; the server
     // picks the first supported one. If none are supported, reject the request.
     if let Some(ref transfers) = body.transfers
-        && !transfers.is_empty() && !transfers.iter().any(|t| t == "basic") {
-            GLOBAL_METRICS.record_request(400);
-            GLOBAL_METRICS.record_latency(start);
-            return HttpResponse::BadRequest().json(serde_json::json!({
-                "message": format!(
-                    "Unsupported transfer protocol: {:?}. This server only supports 'basic'.",
-                    transfers
-                )
-            }));
-        }
+        && !transfers.is_empty()
+        && !transfers.iter().any(|t| t == "basic")
+    {
+        GLOBAL_METRICS.record_request(400);
+        GLOBAL_METRICS.record_latency(start);
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "message": format!(
+                "Unsupported transfer protocol: {:?}. This server only supports 'basic'.",
+                transfers
+            )
+        }));
+    }
 
     // Extract, verify, and authorize the caller in one step.
     // Scope depends on the LFS operation; batch uses the Git-LFS {"message"} body shape.
-    let required_scope = if body.operation == "upload" { "write" } else { "read" };
+    let required_scope = if body.operation == "upload" {
+        "write"
+    } else {
+        "read"
+    };
     let claims = match require_auth(&req, &auth, AuthNeed::Scope(required_scope)) {
         Ok(c) => c,
         Err(rej) => return rej.respond_message(start),
@@ -188,15 +198,17 @@ pub async fn batch_operation(
         let response_obj = match body.operation.as_str() {
             "upload" => {
                 // For upload, provide upload action
-                let upload_url = format!(
-                    "{}/lfs/objects/{}",
-                    base_url,
-                    obj.oid
-                );
+                let upload_url = format!("{}/lfs/objects/{}", base_url, obj.oid);
 
                 let mut headers = std::collections::HashMap::new();
-                headers.insert("Authorization".to_string(), format!("Bearer {}", auth_token_for_action));
-                headers.insert("Content-Type".to_string(), "application/octet-stream".to_string());
+                headers.insert(
+                    "Authorization".to_string(),
+                    format!("Bearer {}", auth_token_for_action),
+                );
+                headers.insert(
+                    "Content-Type".to_string(),
+                    "application/octet-stream".to_string(),
+                );
 
                 BatchResponseObject {
                     oid: obj.oid.clone(),
@@ -215,14 +227,13 @@ pub async fn batch_operation(
             }
             "download" => {
                 // For download, provide download action
-                let download_url = format!(
-                    "{}/lfs/objects/{}",
-                    base_url,
-                    obj.oid
-                );
+                let download_url = format!("{}/lfs/objects/{}", base_url, obj.oid);
 
                 let mut headers = std::collections::HashMap::new();
-                headers.insert("Authorization".to_string(), format!("Bearer {}", auth_token_for_action));
+                headers.insert(
+                    "Authorization".to_string(),
+                    format!("Bearer {}", auth_token_for_action),
+                );
 
                 BatchResponseObject {
                     oid: obj.oid.clone(),
@@ -239,18 +250,16 @@ pub async fn batch_operation(
                     error: None,
                 }
             }
-            _ => {
-                BatchResponseObject {
-                    oid: obj.oid.clone(),
-                    size: obj.size,
-                    authenticated: false,
-                    actions: None,
-                    error: Some(BatchError {
-                        code: 400,
-                        message: format!("Unknown operation: {}", body.operation),
-                    }),
-                }
-            }
+            _ => BatchResponseObject {
+                oid: obj.oid.clone(),
+                size: obj.size,
+                authenticated: false,
+                actions: None,
+                error: Some(BatchError {
+                    code: 400,
+                    message: format!("Unknown operation: {}", body.operation),
+                }),
+            },
         };
 
         response_objects.push(response_obj);

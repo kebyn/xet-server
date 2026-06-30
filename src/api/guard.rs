@@ -16,7 +16,7 @@ use std::time::Instant;
 use actix_web::{HttpRequest, HttpResponse};
 
 use crate::api::auth::{
-    authorize_endpoint, extract_token_from_request, is_internal_token, AuthVerifier, XetClaims,
+    AuthVerifier, XetClaims, authorize_endpoint, extract_token_from_request, is_internal_token,
 };
 use crate::metrics::GLOBAL_METRICS;
 
@@ -112,13 +112,13 @@ pub fn require_auth(
     need: AuthNeed,
 ) -> Result<XetClaims, AuthReject> {
     let token = extract_token_from_request(req).ok_or(AuthReject::MissingToken)?;
-    let claims = auth.verify_token(&token).map_err(|_| AuthReject::InvalidToken)?;
+    let claims = auth
+        .verify_token(&token)
+        .map_err(|_| AuthReject::InvalidToken)?;
 
     let forbidden_msg = need.forbidden_message();
     let authorized = match need {
-        AuthNeed::Scope(scope) | AuthNeed::ScopeMsg(scope, _) => {
-            authorize_endpoint(&claims, scope)
-        }
+        AuthNeed::Scope(scope) | AuthNeed::ScopeMsg(scope, _) => authorize_endpoint(&claims, scope),
         AuthNeed::Internal(_) => is_internal_token(&claims),
     };
 

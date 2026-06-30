@@ -3,10 +3,12 @@
 //! Provides helpers for creating test tokens and configurations
 //! using Ed25519 authentication.
 
-use xet_server::api::auth::{sign_xet_token, KeyPair, XetClaims, AuthVerifier};
-use xet_server::config::{AuthConfig, ConversionConfig, ServerConfig, ServerSettings, StorageConfig};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
+use xet_server::api::auth::{AuthVerifier, KeyPair, XetClaims, sign_xet_token};
+use xet_server::config::{
+    AuthConfig, ConversionConfig, ServerConfig, ServerSettings, StorageConfig,
+};
 
 /// Test context that holds temp resources to keep them alive during tests.
 ///

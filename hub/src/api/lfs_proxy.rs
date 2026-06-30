@@ -1,12 +1,12 @@
-use actix_web::{web, HttpRequest, HttpResponse};
-use futures_util::{Stream, StreamExt, TryStreamExt};
-use pin_project::pin_project;
-use std::pin::Pin;
-use std::task::{Context, Poll};
 use crate::auth::token_store::TokenStore;
 use crate::auth::xet_signer::XetSigner;
 use crate::cas_client::CasClient;
 use crate::config::HubConfig;
+use actix_web::{HttpRequest, HttpResponse, web};
+use futures_util::{Stream, StreamExt, TryStreamExt};
+use pin_project::pin_project;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
 /// Maximum number of objects allowed in a single batch request.
 /// Mirrors CAS-side limit for defense-in-depth — reject oversized batches early
@@ -86,12 +86,13 @@ fn extract_token(req: &HttpRequest) -> Option<String> {
 
         // Try Basic auth (username:password where password is the token)
         if let Some(encoded) = auth_str.strip_prefix("Basic ") {
-            use base64::{engine::general_purpose::STANDARD, Engine as _};
+            use base64::{Engine as _, engine::general_purpose::STANDARD};
             if let Ok(decoded) = STANDARD.decode(encoded)
                 && let Ok(creds) = String::from_utf8(decoded)
-                    && let Some((_user, pass)) = creds.split_once(':') {
-                        return Some(pass.to_string());
-                    }
+                && let Some((_user, pass)) = creds.split_once(':')
+            {
+                return Some(pass.to_string());
+            }
         }
     }
 
@@ -145,64 +146,80 @@ fn rewrite_batch_urls(
     };
 
     if let Some(objects) = response.get_mut("objects")
-        && let Some(arr) = objects.as_array_mut() {
-            for obj in arr {
-                // Clone oid to avoid borrow conflict
-                let oid = obj.get("oid").and_then(|o| o.as_str()).unwrap_or("").to_string();
+        && let Some(arr) = objects.as_array_mut()
+    {
+        for obj in arr {
+            // Clone oid to avoid borrow conflict
+            let oid = obj
+                .get("oid")
+                .and_then(|o| o.as_str())
+                .unwrap_or("")
+                .to_string();
 
-                // Skip generating proxy tokens for invalid OIDs to avoid wasted computation
-                if !validate_oid(&oid) {
-                    continue;
-                }
+            // Skip generating proxy tokens for invalid OIDs to avoid wasted computation
+            if !validate_oid(&oid) {
+                continue;
+            }
 
-                if let Some(actions) = obj.get_mut("actions") {
-                    // Generate proxy tokens for each operation
-                    // Note: repo_id and repo_type are empty because LFS batch API doesn't include repo context
-                    // The token is still bound to OID + operation, which provides sufficient security
-                    // I2 fix: Handle signing errors gracefully - skip objects that fail to sign
-                    if let Some(upload_action) = actions.get_mut("upload") {
-                        match signer.sign_proxy(username, &oid, "upload", "", "") {
-                            Ok((proxy_token, _)) => {
-                                if !rewrite_action_url(upload_action, &hub_url, &proxy_token)
-                                    && let Some(actions_obj) = actions.as_object_mut() {
-                                        actions_obj.remove("upload");
-                                    }
+            if let Some(actions) = obj.get_mut("actions") {
+                // Generate proxy tokens for each operation
+                // Note: repo_id and repo_type are empty because LFS batch API doesn't include repo context
+                // The token is still bound to OID + operation, which provides sufficient security
+                // I2 fix: Handle signing errors gracefully - skip objects that fail to sign
+                if let Some(upload_action) = actions.get_mut("upload") {
+                    match signer.sign_proxy(username, &oid, "upload", "", "") {
+                        Ok((proxy_token, _)) => {
+                            if !rewrite_action_url(upload_action, &hub_url, &proxy_token)
+                                && let Some(actions_obj) = actions.as_object_mut()
+                            {
+                                actions_obj.remove("upload");
                             }
-                            Err(e) => {
-                                tracing::error!("Failed to sign proxy token for upload {}: {}", oid, e);
-                                // Remove the action if we can't sign a token for it
-                                if let Some(actions_obj) = actions.as_object_mut() {
-                                    actions_obj.remove("upload");
-                                }
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to sign proxy token for upload {}: {}", oid, e);
+                            // Remove the action if we can't sign a token for it
+                            if let Some(actions_obj) = actions.as_object_mut() {
+                                actions_obj.remove("upload");
                             }
                         }
                     }
-                    if let Some(download_action) = actions.get_mut("download") {
-                        match signer.sign_proxy(username, &oid, "download", "", "") {
-                            Ok((proxy_token, _)) => {
-                                if !rewrite_action_url(download_action, &hub_url, &proxy_token)
-                                    && let Some(actions_obj) = actions.as_object_mut() {
-                                        actions_obj.remove("download");
-                                    }
+                }
+                if let Some(download_action) = actions.get_mut("download") {
+                    match signer.sign_proxy(username, &oid, "download", "", "") {
+                        Ok((proxy_token, _)) => {
+                            if !rewrite_action_url(download_action, &hub_url, &proxy_token)
+                                && let Some(actions_obj) = actions.as_object_mut()
+                            {
+                                actions_obj.remove("download");
                             }
-                            Err(e) => {
-                                tracing::error!("Failed to sign proxy token for download {}: {}", oid, e);
-                                if let Some(actions_obj) = actions.as_object_mut() {
-                                    actions_obj.remove("download");
-                                }
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "Failed to sign proxy token for download {}: {}",
+                                oid,
+                                e
+                            );
+                            if let Some(actions_obj) = actions.as_object_mut() {
+                                actions_obj.remove("download");
                             }
                         }
                     }
                 }
             }
         }
+    }
 }
 
 /// Rewrite a single action's URL and auth header with proxy token.
 /// 返回 true 表示成功重写;false 表示 href 无法解析,调用方应丢弃该 action
 /// 以免把内部 CAS URL 泄露给客户端。
-fn rewrite_action_url(action: &mut serde_json::Value, hub_url: &url::Url, proxy_token: &str) -> bool {
-    let new_href = action.get("href")
+fn rewrite_action_url(
+    action: &mut serde_json::Value,
+    hub_url: &url::Url,
+    proxy_token: &str,
+) -> bool {
+    let new_href = action
+        .get("href")
         .and_then(|h| h.as_str())
         .and_then(|h| url::Url::parse(h).ok())
         .map(|mut url| {
@@ -231,13 +248,17 @@ fn rewrite_action_url(action: &mut serde_json::Value, hub_url: &url::Url, proxy_
 
     // Always replace Authorization header with proxy token if present
     // This ensures internal CAS tokens are never leaked to clients
-    if action.get("header").and_then(|h| h.get("Authorization")).is_some()
-        && let Some(header_obj) = action.get_mut("header").and_then(|h| h.as_object_mut()) {
-            header_obj.insert(
-                "Authorization".to_string(),
-                serde_json::Value::String(format!("Bearer {}", proxy_token)),
-            );
-        }
+    if action
+        .get("header")
+        .and_then(|h| h.get("Authorization"))
+        .is_some()
+        && let Some(header_obj) = action.get_mut("header").and_then(|h| h.as_object_mut())
+    {
+        header_obj.insert(
+            "Authorization".to_string(),
+            serde_json::Value::String(format!("Bearer {}", proxy_token)),
+        );
+    }
     true
 }
 
@@ -263,14 +284,20 @@ fn validate_proxy_token(
         None => {
             // M1: Use safe slicing to avoid panic on non-ASCII boundaries
             let token_preview = token.get(..30).unwrap_or(token);
-            tracing::error!("validate_proxy_token: verify_proxy_token failed for token starting with: {}...", token_preview);
+            tracing::error!(
+                "validate_proxy_token: verify_proxy_token failed for token starting with: {}...",
+                token_preview
+            );
             return false;
         }
     };
 
     // Check token type (not checked by verify_proxy_token)
     if claims.token_type != "proxy" {
-        tracing::error!("validate_proxy_token: token_type mismatch: {} != proxy", claims.token_type);
+        tracing::error!(
+            "validate_proxy_token: token_type mismatch: {} != proxy",
+            claims.token_type
+        );
         return false;
     }
 
@@ -279,13 +306,21 @@ fn validate_proxy_token(
 
     // Check OID matches
     if claims.oid.as_deref() != Some(expected_oid) {
-        tracing::error!("validate_proxy_token: oid mismatch: {:?} != {}", claims.oid, expected_oid);
+        tracing::error!(
+            "validate_proxy_token: oid mismatch: {:?} != {}",
+            claims.oid,
+            expected_oid
+        );
         return false;
     }
 
     // Check operation matches
     if claims.operation.as_deref() != Some(expected_operation) {
-        tracing::error!("validate_proxy_token: operation mismatch: {:?} != {}", claims.operation, expected_operation);
+        tracing::error!(
+            "validate_proxy_token: operation mismatch: {:?} != {}",
+            claims.operation,
+            expected_operation
+        );
         return false;
     }
 
@@ -384,9 +419,10 @@ pub async fn lfs_batch(
 
     // I3 fix: Validate token scope based on operation type
     // LFS batch operation requires appropriate scope (upload -> write, download -> read)
-    let operation = body.get("operation")
+    let operation = body
+        .get("operation")
         .and_then(|o| o.as_str())
-        .unwrap_or("download");  // Default to download if not specified
+        .unwrap_or("download"); // Default to download if not specified
     let required_scope = match operation {
         "upload" => "write",
         "download" => "read",
@@ -402,7 +438,10 @@ pub async fn lfs_batch(
     // "write" implies "read" — a user with write access can always download
     let has_scope = token_info.scope == required_scope
         || token_info.scope == "read write"
-        || token_info.scope.split_whitespace().any(|s| s == required_scope)
+        || token_info
+            .scope
+            .split_whitespace()
+            .any(|s| s == required_scope)
         || (required_scope == "read" && token_info.scope.split_whitespace().any(|s| s == "write"));
     if !has_scope {
         return HttpResponse::Forbidden().json(serde_json::json!({
@@ -413,7 +452,8 @@ pub async fn lfs_batch(
     }
 
     // Validate batch size before forwarding to CAS (defense-in-depth)
-    let object_count = body.get("objects")
+    let object_count = body
+        .get("objects")
         .and_then(|o| o.as_array())
         .map(|a| a.len())
         .unwrap_or(0);
@@ -511,7 +551,11 @@ pub async fn lfs_upload(
     // Create temp directory if it doesn't exist
     let temp_dir = std::path::Path::new(&config.storage.upload_temp_dir);
     if let Err(e) = tokio::fs::create_dir_all(temp_dir).await {
-        tracing::error!("Failed to create temp dir {}: {}", config.storage.upload_temp_dir, e);
+        tracing::error!(
+            "Failed to create temp dir {}: {}",
+            config.storage.upload_temp_dir,
+            e
+        );
         return HttpResponse::InternalServerError().json(serde_json::json!({
             "error": "Failed to initialize upload",
             "error_type": "InternalError"
@@ -547,9 +591,9 @@ pub async fn lfs_upload(
     }
 
     // Stream payload to temp file while computing hash
-    use sha2::{Sha256, Digest};
-    use tokio::io::AsyncWriteExt;
     use futures_util::StreamExt;
+    use sha2::{Digest, Sha256};
+    use tokio::io::AsyncWriteExt;
 
     let mut hasher = Sha256::new();
     let mut file_writer = match tokio::fs::File::create(&temp_path).await {
@@ -583,7 +627,11 @@ pub async fn lfs_upload(
 
         total_bytes += chunk.len() as u64;
         if total_bytes > max_upload_size {
-            tracing::warn!("Upload too large: {} bytes (max {})", total_bytes, max_upload_size);
+            tracing::warn!(
+                "Upload too large: {} bytes (max {})",
+                total_bytes,
+                max_upload_size
+            );
             // I4 fix: Explicit temp file cleanup on error path
             let _ = tokio::fs::remove_file(&temp_path).await;
             return HttpResponse::PayloadTooLarge().json(serde_json::json!({
@@ -621,7 +669,9 @@ pub async fn lfs_upload(
     if computed_hash != oid {
         tracing::warn!(
             "Hash mismatch for OID {}: computed {} ({} bytes)",
-            oid, computed_hash, total_bytes
+            oid,
+            computed_hash,
+            total_bytes
         );
         // Clean up temp file
         let _ = tokio::fs::remove_file(&temp_path).await;
@@ -645,12 +695,9 @@ pub async fn lfs_upload(
     };
     let file_size = total_bytes;
 
-    let result = cas_client.proxy_lfs_upload_from_path(
-        &oid,
-        &temp_path,
-        file_size,
-        &internal_token,
-    ).await;
+    let result = cas_client
+        .proxy_lfs_upload_from_path(&oid, &temp_path, file_size, &internal_token)
+        .await;
 
     // Clean up temp file
     let _ = tokio::fs::remove_file(&temp_path).await;
@@ -658,7 +705,8 @@ pub async fn lfs_upload(
     match result {
         Ok(_) => HttpResponse::Ok().finish(),
         Err(e) => {
-            let status_code = actix_web::http::StatusCode::from_u16(e.status).unwrap_or(actix_web::http::StatusCode::BAD_GATEWAY);
+            let status_code = actix_web::http::StatusCode::from_u16(e.status)
+                .unwrap_or(actix_web::http::StatusCode::BAD_GATEWAY);
             HttpResponse::build(status_code).json(serde_json::json!({
                 "error": e.message,
                 "error_type": "CasError"
@@ -717,7 +765,10 @@ pub async fn lfs_download(
     };
 
     // C3 fix: Use streaming download with runtime size enforcement
-    match cas_client.proxy_lfs_download_streaming(&oid, &internal_token).await {
+    match cas_client
+        .proxy_lfs_download_streaming(&oid, &internal_token)
+        .await
+    {
         Ok((content_length, resp)) => {
             // Convert reqwest response body to actix-web streaming body
             let stream = resp.bytes_stream();
@@ -727,7 +778,7 @@ pub async fn lfs_download(
             let max_size = config.cas.max_download_size;
             let limited_stream = MaxBytesStream::new(
                 stream.map(|result| result.map_err(std::io::Error::other)),
-                max_size
+                max_size,
             );
 
             let mut builder = HttpResponse::Ok();
@@ -749,8 +800,8 @@ pub async fn lfs_download(
             _ => HttpResponse::BadGateway().json(serde_json::json!({
                 "error": e.to_string(),
                 "error_type": "BadGateway"
-            }))
-        }
+            })),
+        },
     }
 }
 
@@ -813,12 +864,30 @@ mod tests {
 
         let objects = response.get("objects").unwrap().as_array().unwrap();
         let actions = objects[0].get("actions").unwrap();
-        let upload_href = actions.get("upload").unwrap().get("href").unwrap().as_str().unwrap();
-        let download_href = actions.get("download").unwrap().get("href").unwrap().as_str().unwrap();
+        let upload_href = actions
+            .get("upload")
+            .unwrap()
+            .get("href")
+            .unwrap()
+            .as_str()
+            .unwrap();
+        let download_href = actions
+            .get("download")
+            .unwrap()
+            .get("href")
+            .unwrap()
+            .as_str()
+            .unwrap();
 
         // URLs should be rewritten with proxy tokens (starting with proxy_)
-        assert!(upload_href.starts_with(&format!("http://hub:8080/lfs/objects/{}?token=proxy_", valid_oid)));
-        assert!(download_href.starts_with(&format!("http://hub:8080/lfs/objects/{}?token=proxy_", valid_oid)));
+        assert!(upload_href.starts_with(&format!(
+            "http://hub:8080/lfs/objects/{}?token=proxy_",
+            valid_oid
+        )));
+        assert!(download_href.starts_with(&format!(
+            "http://hub:8080/lfs/objects/{}?token=proxy_",
+            valid_oid
+        )));
     }
 
     #[test]
@@ -843,14 +912,17 @@ mod tests {
         rewrite_batch_urls(&mut response, "http://hub:8080", &signer, "testuser");
 
         // Should remain unchanged
-        assert_eq!(response, json!({
-            "objects": [
-                {
-                    "oid": "abc123",
-                    "size": 1024
-                }
-            ]
-        }));
+        assert_eq!(
+            response,
+            json!({
+                "objects": [
+                    {
+                        "oid": "abc123",
+                        "size": 1024
+                    }
+                ]
+            })
+        );
     }
 
     #[test]
@@ -895,12 +967,34 @@ mod tests {
         let objects = response.get("objects").unwrap().as_array().unwrap();
 
         // First object has upload action
-        let upload_href = objects[0].get("actions").unwrap().get("upload").unwrap().get("href").unwrap().as_str().unwrap();
-        assert!(upload_href.starts_with(&format!("http://hub:8080/lfs/objects/{}?token=proxy_", oid1)));
+        let upload_href = objects[0]
+            .get("actions")
+            .unwrap()
+            .get("upload")
+            .unwrap()
+            .get("href")
+            .unwrap()
+            .as_str()
+            .unwrap();
+        assert!(upload_href.starts_with(&format!(
+            "http://hub:8080/lfs/objects/{}?token=proxy_",
+            oid1
+        )));
 
         // Second object has download action
-        let download_href = objects[1].get("actions").unwrap().get("download").unwrap().get("href").unwrap().as_str().unwrap();
-        assert!(download_href.starts_with(&format!("http://hub:8080/lfs/objects/{}?token=proxy_", oid2)));
+        let download_href = objects[1]
+            .get("actions")
+            .unwrap()
+            .get("download")
+            .unwrap()
+            .get("href")
+            .unwrap()
+            .as_str()
+            .unwrap();
+        assert!(download_href.starts_with(&format!(
+            "http://hub:8080/lfs/objects/{}?token=proxy_",
+            oid2
+        )));
     }
 
     // Helper function to create a test signer
@@ -917,7 +1011,9 @@ mod tests {
     #[test]
     fn test_validate_proxy_token_valid() {
         let signer = create_test_signer();
-        let (token, _) = signer.sign_proxy("testuser", "abc123def456", "upload", "", "").unwrap();
+        let (token, _) = signer
+            .sign_proxy("testuser", "abc123def456", "upload", "", "")
+            .unwrap();
 
         let result = validate_proxy_token(&token, "abc123def456", "upload", &signer);
         assert!(result, "Valid proxy token should be accepted");
@@ -928,7 +1024,9 @@ mod tests {
         let signer = create_test_signer();
         // Create a token that expires immediately (we can't easily test this without mocking time)
         // For now, we'll just verify the validation logic works
-        let (token, _) = signer.sign_proxy("testuser", "abc123def456", "upload", "", "").unwrap();
+        let (token, _) = signer
+            .sign_proxy("testuser", "abc123def456", "upload", "", "")
+            .unwrap();
 
         let result = validate_proxy_token(&token, "abc123def456", "upload", &signer);
         assert!(result, "Non-expired token should be accepted");
@@ -937,7 +1035,9 @@ mod tests {
     #[test]
     fn test_validate_proxy_token_wrong_oid() {
         let signer = create_test_signer();
-        let (token, _) = signer.sign_proxy("testuser", "abc123def456", "upload", "", "").unwrap();
+        let (token, _) = signer
+            .sign_proxy("testuser", "abc123def456", "upload", "", "")
+            .unwrap();
 
         // Try to validate with wrong OID
         let result = validate_proxy_token(&token, "wrongoid", "upload", &signer);
@@ -947,7 +1047,9 @@ mod tests {
     #[test]
     fn test_validate_proxy_token_wrong_operation() {
         let signer = create_test_signer();
-        let (token, _) = signer.sign_proxy("testuser", "abc123def456", "upload", "", "").unwrap();
+        let (token, _) = signer
+            .sign_proxy("testuser", "abc123def456", "upload", "", "")
+            .unwrap();
 
         // Try to validate with wrong operation
         let result = validate_proxy_token(&token, "abc123def456", "download", &signer);
@@ -957,10 +1059,12 @@ mod tests {
     #[test]
     fn test_validate_proxy_token_invalid_signature() {
         let signer = create_test_signer();
-        let (token, _) = signer.sign_proxy("testuser", "abc123def456", "upload", "", "").unwrap();
+        let (token, _) = signer
+            .sign_proxy("testuser", "abc123def456", "upload", "", "")
+            .unwrap();
 
         // Tamper with the token
-        let tampered_token = format!("{}x", &token[..token.len()-1]);
+        let tampered_token = format!("{}x", &token[..token.len() - 1]);
 
         let result = validate_proxy_token(&tampered_token, "abc123def456", "upload", &signer);
         assert!(!result, "Token with invalid signature should be rejected");
@@ -970,7 +1074,9 @@ mod tests {
     fn test_validate_proxy_token_non_proxy_token() {
         let signer = create_test_signer();
         // Create a regular user token instead of proxy token
-        let (user_token, _) = signer.sign("testuser", "read", "repo", "model", "main").unwrap();
+        let (user_token, _) = signer
+            .sign("testuser", "read", "repo", "model", "main")
+            .unwrap();
 
         let result = validate_proxy_token(&user_token, "abc123def456", "upload", &signer);
         assert!(!result, "User token should be rejected as proxy token");
@@ -981,20 +1087,37 @@ mod tests {
         let signer = create_test_signer();
 
         // Test various malformed tokens
-        assert!(!validate_proxy_token("", "abc123", "upload", &signer), "Empty token should be rejected");
-        assert!(!validate_proxy_token("proxy_", "abc123", "upload", &signer), "Empty body should be rejected");
-        assert!(!validate_proxy_token("proxy_abc", "abc123", "upload", &signer), "Single part should be rejected");
-        assert!(!validate_proxy_token("proxy_abc.def", "abc123", "upload", &signer), "Two parts should be rejected");
-        assert!(!validate_proxy_token("proxy_abc.def.ghi.jkl", "abc123", "upload", &signer), "Four parts should be rejected");
+        assert!(
+            !validate_proxy_token("", "abc123", "upload", &signer),
+            "Empty token should be rejected"
+        );
+        assert!(
+            !validate_proxy_token("proxy_", "abc123", "upload", &signer),
+            "Empty body should be rejected"
+        );
+        assert!(
+            !validate_proxy_token("proxy_abc", "abc123", "upload", &signer),
+            "Single part should be rejected"
+        );
+        assert!(
+            !validate_proxy_token("proxy_abc.def", "abc123", "upload", &signer),
+            "Two parts should be rejected"
+        );
+        assert!(
+            !validate_proxy_token("proxy_abc.def.ghi.jkl", "abc123", "upload", &signer),
+            "Four parts should be rejected"
+        );
     }
 
     #[test]
     fn test_validate_proxy_token_wrong_token_type() {
         let signer = create_test_signer();
-        let (token, _) = signer.sign_proxy("testuser", "abc123def456", "upload", "", "").unwrap();
+        let (token, _) = signer
+            .sign_proxy("testuser", "abc123def456", "upload", "", "")
+            .unwrap();
 
         // Manually tamper with the token_type claim
-        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
         let token_body = token.strip_prefix("proxy_").unwrap();
         let parts: Vec<&str> = token_body.split('.').collect();
@@ -1030,7 +1153,9 @@ mod tests {
         let signer2 = XetSigner::new(signing_key2, "key-id-2", 3600, 300);
 
         // Sign token with signer1
-        let (token, _) = signer1.sign_proxy("testuser", "abc123def456", "upload", "", "").unwrap();
+        let (token, _) = signer1
+            .sign_proxy("testuser", "abc123def456", "upload", "", "")
+            .unwrap();
 
         // Try to validate with signer2 (different kid)
         let result = validate_proxy_token(&token, "abc123def456", "upload", &signer2);

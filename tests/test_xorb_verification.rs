@@ -71,5 +71,8 @@ fn test_verify_xorb_mismatched_hash() {
 
     // Verify should fail - hash doesn't match data
     let result = xet_server::format::xorb::verify_xorb(&xorb_data);
-    assert!(result.is_err(), "Xorb with mismatched hash should fail verification");
+    assert!(
+        result.is_err(),
+        "Xorb with mismatched hash should fail verification"
+    );
 }

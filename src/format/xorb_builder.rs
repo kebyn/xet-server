@@ -1,7 +1,7 @@
 use std::io::Write;
 
 use crate::error::Result;
-use crate::format::compression::{compress, CompressionScheme};
+use crate::format::compression::{CompressionScheme, compress};
 use crate::format::xorb::{XorbChunkHeader, XorbObjectInfoV1, verify_xorb};
 use crate::hash::{compute_data_hash, xorb_hash};
 use crate::types::MerkleHash;
@@ -130,19 +130,20 @@ impl XorbBuilder {
 
         // Compute the xorb hash from (chunk_hash, serialized_chunk_size) pairs.
         // verify_xorb uses the on-disk byte length of each chunk region as the size.
-        let chunk_info: Vec<(MerkleHash, u64)> = self.chunks.iter().map(|c| {
-            let serialized_size = c.serialized_chunk.len() as u64;
-            (c.chunk_hash, serialized_size)
-        }).collect();
+        let chunk_info: Vec<(MerkleHash, u64)> = self
+            .chunks
+            .iter()
+            .map(|c| {
+                let serialized_size = c.serialized_chunk.len() as u64;
+                (c.chunk_hash, serialized_size)
+            })
+            .collect();
 
         let xorb_hash_val = xorb_hash(&chunk_info);
 
-        let total_uncompressed_size: u64 = self.chunks.iter()
-            .map(|c| c.uncompressed_size as u64)
-            .sum();
-        let total_compressed_size: u64 = self.chunks.iter()
-            .map(|c| c.compressed_len as u64)
-            .sum();
+        let total_uncompressed_size: u64 =
+            self.chunks.iter().map(|c| c.uncompressed_size as u64).sum();
+        let total_compressed_size: u64 = self.chunks.iter().map(|c| c.compressed_len as u64).sum();
 
         // Build and append the footer
         let footer = XorbObjectInfoV1 {
@@ -167,18 +168,23 @@ impl XorbBuilder {
 
     /// Compute the xorb hash from accumulated chunks without finalizing.
     pub fn xorb_hash(&self) -> MerkleHash {
-        let chunk_info: Vec<(MerkleHash, u64)> = self.chunks.iter().map(|c| {
-            let serialized_size = c.serialized_chunk.len() as u64;
-            (c.chunk_hash, serialized_size)
-        }).collect();
+        let chunk_info: Vec<(MerkleHash, u64)> = self
+            .chunks
+            .iter()
+            .map(|c| {
+                let serialized_size = c.serialized_chunk.len() as u64;
+                (c.chunk_hash, serialized_size)
+            })
+            .collect();
         xorb_hash(&chunk_info)
     }
 
     /// Return (hash, uncompressed_size) pairs for all accumulated chunks.
     pub fn chunk_info(&self) -> Vec<(MerkleHash, u64)> {
-        self.chunks.iter().map(|c| {
-            (c.chunk_hash, c.uncompressed_size as u64)
-        }).collect()
+        self.chunks
+            .iter()
+            .map(|c| (c.chunk_hash, c.uncompressed_size as u64))
+            .collect()
     }
 }
 
@@ -245,7 +251,9 @@ mod tests {
         for scheme in &schemes {
             let mut builder = XorbBuilder::new(*scheme);
             let _ = builder.add_chunk(b"test data for compression").unwrap();
-            let _ = builder.add_chunk(b"more test data to make it interesting").unwrap();
+            let _ = builder
+                .add_chunk(b"more test data to make it interesting")
+                .unwrap();
 
             let result = builder.build().unwrap();
             verify_xorb(&result.data).unwrap();

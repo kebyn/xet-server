@@ -1,6 +1,6 @@
 //! Integration tests for metrics middleware
 
-use actix_web::{middleware::from_fn, test, web, App};
+use actix_web::{App, middleware::from_fn, test, web};
 use serial_test::serial;
 use std::sync::atomic::Ordering;
 use xet_server::metrics::GLOBAL_METRICS;

@@ -5,7 +5,7 @@
 
 use crate::hash::DATA_KEY;
 use crate::types::MerkleHash;
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 
 /// Incremental BLAKE3 hasher for streaming data.
 ///

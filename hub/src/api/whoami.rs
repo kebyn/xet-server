@@ -1,11 +1,9 @@
-use actix_web::HttpResponse;
-use crate::auth::extract::AuthUser;
 use crate::auth::extract::AuthAny;
+use crate::auth::extract::AuthUser;
+use actix_web::HttpResponse;
 
 /// GET /api/whoami - Get current user info from token
-pub async fn whoami(
-    auth: AuthUser<AuthAny>,
-) -> HttpResponse {
+pub async fn whoami(auth: AuthUser<AuthAny>) -> HttpResponse {
     HttpResponse::Ok().json(serde_json::json!({
         "name": auth.info.username,
         "email": "",
@@ -23,19 +21,23 @@ pub async fn whoami(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use actix_web::{test, App, web};
     use crate::auth::token_store::TokenStore;
+    use actix_web::{App, test, web};
 
     #[actix_web::test]
     async fn test_whoami_valid_token() {
         let token_store = std::sync::Arc::new(TokenStore::in_memory().await.unwrap());
-        let token = token_store.create_token("testuser", "test-token", "read").await.unwrap();
+        let token = token_store
+            .create_token("testuser", "test-token", "read")
+            .await
+            .unwrap();
 
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(token_store.clone()))
-                .route("/api/whoami", web::get().to(whoami))
-        ).await;
+                .route("/api/whoami", web::get().to(whoami)),
+        )
+        .await;
 
         let req = test::TestRequest::get()
             .uri("/api/whoami")
@@ -58,8 +60,9 @@ mod tests {
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(token_store.clone()))
-                .route("/api/whoami", web::get().to(whoami))
-        ).await;
+                .route("/api/whoami", web::get().to(whoami)),
+        )
+        .await;
 
         let req = test::TestRequest::get()
             .uri("/api/whoami")
@@ -77,12 +80,11 @@ mod tests {
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(token_store.clone()))
-                .route("/api/whoami", web::get().to(whoami))
-        ).await;
+                .route("/api/whoami", web::get().to(whoami)),
+        )
+        .await;
 
-        let req = test::TestRequest::get()
-            .uri("/api/whoami")
-            .to_request();
+        let req = test::TestRequest::get().uri("/api/whoami").to_request();
 
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), actix_web::http::StatusCode::UNAUTHORIZED);

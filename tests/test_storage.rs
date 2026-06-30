@@ -2,8 +2,8 @@
 
 use bytes::Bytes;
 use tempfile::tempdir;
-use xet_server::storage::local::LocalStorage;
 use xet_server::storage::StorageBackend;
+use xet_server::storage::local::LocalStorage;
 
 #[tokio::test]
 async fn test_local_storage_put_get() {
@@ -67,5 +67,8 @@ async fn test_local_storage_not_found() {
     let storage = LocalStorage::new(dir.path().to_str().unwrap()).unwrap();
 
     let result = storage.get("nonexistent/file.bin").await;
-    assert!(matches!(result, Err(xet_server::storage::StorageError::NotFound(_))));
+    assert!(matches!(
+        result,
+        Err(xet_server::storage::StorageError::NotFound(_))
+    ));
 }

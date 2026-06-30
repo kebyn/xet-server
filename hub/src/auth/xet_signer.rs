@@ -1,4 +1,4 @@
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::{Signer, SigningKey};
 use serde::Serialize;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -31,13 +31,24 @@ pub struct XetSigner {
 
 impl XetSigner {
     /// Create a new XetSigner from a PEM-encoded private key
-    pub fn from_pem(pem_bytes: &[u8], kid: &str, ttl_seconds: u64, proxy_ttl_seconds: u64) -> Result<Self, String> {
+    pub fn from_pem(
+        pem_bytes: &[u8],
+        kid: &str,
+        ttl_seconds: u64,
+        proxy_ttl_seconds: u64,
+    ) -> Result<Self, String> {
         Self::from_pem_with_internal_ttl(pem_bytes, kid, ttl_seconds, proxy_ttl_seconds, 86400)
     }
 
     /// Create a new XetSigner from a PEM-encoded private key with configurable internal token TTL.
     /// C1 fix: Allows GC internal tokens to have longer TTL (default 24 hours).
-    pub fn from_pem_with_internal_ttl(pem_bytes: &[u8], kid: &str, ttl_seconds: u64, proxy_ttl_seconds: u64, internal_ttl_seconds: u64) -> Result<Self, String> {
+    pub fn from_pem_with_internal_ttl(
+        pem_bytes: &[u8],
+        kid: &str,
+        ttl_seconds: u64,
+        proxy_ttl_seconds: u64,
+        internal_ttl_seconds: u64,
+    ) -> Result<Self, String> {
         use ed25519_dalek::pkcs8::DecodePrivateKey;
         let pem_str = std::str::from_utf8(pem_bytes).map_err(|e| e.to_string())?;
         let signing_key = SigningKey::from_pkcs8_pem(pem_str)
@@ -52,7 +63,12 @@ impl XetSigner {
     }
 
     /// Create a new XetSigner from a raw signing key (for testing)
-    pub fn new(signing_key: SigningKey, kid: &str, ttl_seconds: u64, proxy_ttl_seconds: u64) -> Self {
+    pub fn new(
+        signing_key: SigningKey,
+        kid: &str,
+        ttl_seconds: u64,
+        proxy_ttl_seconds: u64,
+    ) -> Self {
         Self {
             signing_key,
             kid: kid.to_string(),
@@ -64,7 +80,13 @@ impl XetSigner {
 
     /// Create a new XetSigner from a raw signing key with configurable internal token TTL.
     /// C1 fix: Allows GC internal tokens to have longer TTL.
-    pub fn new_with_internal_ttl(signing_key: SigningKey, kid: &str, ttl_seconds: u64, proxy_ttl_seconds: u64, internal_ttl_seconds: u64) -> Self {
+    pub fn new_with_internal_ttl(
+        signing_key: SigningKey,
+        kid: &str,
+        ttl_seconds: u64,
+        proxy_ttl_seconds: u64,
+        internal_ttl_seconds: u64,
+    ) -> Self {
         Self {
             signing_key,
             kid: kid.to_string(),
@@ -88,10 +110,12 @@ impl XetSigner {
 
         // I1 fix: Use map_err instead of unwrap() to avoid panic on serialization failure
         let header_b64 = URL_SAFE_NO_PAD.encode(
-            serde_json::to_vec(&header).map_err(|e| format!("Failed to serialize header: {}", e))?
+            serde_json::to_vec(&header)
+                .map_err(|e| format!("Failed to serialize header: {}", e))?,
         );
         let claims_b64 = URL_SAFE_NO_PAD.encode(
-            serde_json::to_vec(&claims).map_err(|e| format!("Failed to serialize claims: {}", e))?
+            serde_json::to_vec(&claims)
+                .map_err(|e| format!("Failed to serialize claims: {}", e))?,
         );
 
         let signing_input = format!("{}.{}", header_b64, claims_b64);
@@ -105,7 +129,14 @@ impl XetSigner {
     /// Returns (token, expiration_timestamp)
     /// I1 fix: Use unwrap_or_default() for system time to avoid panic on clock issues
     /// I2 fix: Return Result to propagate serialization errors instead of returning empty string
-    pub fn sign(&self, sub: &str, scope: &str, repo_id: &str, repo_type: &str, revision: &str) -> Result<(String, u64), String> {
+    pub fn sign(
+        &self,
+        sub: &str,
+        scope: &str,
+        repo_id: &str,
+        repo_type: &str,
+        revision: &str,
+    ) -> Result<(String, u64), String> {
         // M4 fix: Reject signing if system clock is broken instead of using 0.
         // With iat=0, the verifier's max-age check would reject the token anyway,
         // but failing fast here gives a clearer error.
@@ -137,7 +168,14 @@ impl XetSigner {
     /// Returns (token, expiration_timestamp)
     /// I1 fix: Use unwrap_or_default() for system time to avoid panic on clock issues
     /// I2 fix: Return Result to propagate serialization errors instead of returning empty string
-    pub fn sign_proxy(&self, sub: &str, oid: &str, operation: &str, repo_id: &str, repo_type: &str) -> Result<(String, u64), String> {
+    pub fn sign_proxy(
+        &self,
+        sub: &str,
+        oid: &str,
+        operation: &str,
+        repo_id: &str,
+        repo_type: &str,
+    ) -> Result<(String, u64), String> {
         // M4 fix: Reject signing if system clock is broken
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -228,7 +266,10 @@ impl XetSigner {
         let verifying_key = self.signing_key.verifying_key();
 
         // Verify signature
-        if verifying_key.verify(signing_input.as_bytes(), &signature).is_err() {
+        if verifying_key
+            .verify(signing_input.as_bytes(), &signature)
+            .is_err()
+        {
             return None;
         }
 
@@ -302,14 +343,20 @@ mod tests {
         let signing_key = generate_test_key();
         let signer = XetSigner::new(signing_key, "test-key-1", 3600, 300);
 
-        let (token, exp) = signer.sign("user123", "read", "namespace/model", "model", "main").unwrap();
+        let (token, exp) = signer
+            .sign("user123", "read", "namespace/model", "model", "main")
+            .unwrap();
 
         assert!(token.starts_with("xet_"), "Token should start with xet_");
 
         // Check that the token has three parts (header.claims.signature) after xet_ prefix
         let token_body = token.strip_prefix("xet_").unwrap();
         let parts: Vec<&str> = token_body.split('.').collect();
-        assert_eq!(parts.len(), 3, "Token should have 3 parts (header.claims.signature)");
+        assert_eq!(
+            parts.len(),
+            3,
+            "Token should have 3 parts (header.claims.signature)"
+        );
 
         // Verify expiration is in the future
         let now = SystemTime::now()
@@ -317,7 +364,10 @@ mod tests {
             .unwrap()
             .as_secs();
         assert!(exp > now, "Expiration should be in the future");
-        assert!(exp <= now + 3601, "Expiration should be at most ttl_seconds from now");
+        assert!(
+            exp <= now + 3601,
+            "Expiration should be at most ttl_seconds from now"
+        );
     }
 
     #[test]
@@ -325,7 +375,9 @@ mod tests {
         let signing_key = generate_test_key();
         let signer = XetSigner::new(signing_key, "test-key-2", 3600, 300);
 
-        let (token, _) = signer.sign("user123", "write", "namespace/model", "dataset", "v1.0").unwrap();
+        let (token, _) = signer
+            .sign("user123", "write", "namespace/model", "dataset", "v1.0")
+            .unwrap();
 
         // Decode and verify claims
         let token_body = token.strip_prefix("xet_").unwrap();
@@ -355,7 +407,9 @@ mod tests {
         let signer = XetSigner::from_pem(pem_bytes, "pem-key", 3600, 300).unwrap();
 
         // Verify by signing something
-        let (token, _) = signer.sign("user", "read", "repo", "model", "main").unwrap();
+        let (token, _) = signer
+            .sign("user", "read", "repo", "model", "main")
+            .unwrap();
         assert!(token.starts_with("xet_"));
     }
 
@@ -367,10 +421,17 @@ mod tests {
         let signer1 = XetSigner::new(key1, "key1", 3600, 300);
         let signer2 = XetSigner::new(key2, "key2", 3600, 300);
 
-        let (token1, _) = signer1.sign("user", "read", "repo", "model", "main").unwrap();
-        let (token2, _) = signer2.sign("user", "read", "repo", "model", "main").unwrap();
+        let (token1, _) = signer1
+            .sign("user", "read", "repo", "model", "main")
+            .unwrap();
+        let (token2, _) = signer2
+            .sign("user", "read", "repo", "model", "main")
+            .unwrap();
 
-        assert_ne!(token1, token2, "Different keys should produce different signatures");
+        assert_ne!(
+            token1, token2,
+            "Different keys should produce different signatures"
+        );
     }
 
     #[test]
@@ -378,14 +439,23 @@ mod tests {
         let signing_key = generate_test_key();
         let signer = XetSigner::new(signing_key, "test-key-proxy", 3600, 300);
 
-        let (token, exp) = signer.sign_proxy("user123", "abc123def456", "upload", "", "").unwrap();
+        let (token, exp) = signer
+            .sign_proxy("user123", "abc123def456", "upload", "", "")
+            .unwrap();
 
-        assert!(token.starts_with("proxy_"), "Proxy token should start with proxy_");
+        assert!(
+            token.starts_with("proxy_"),
+            "Proxy token should start with proxy_"
+        );
 
         // Check that the token has three parts (header.claims.signature) after proxy_ prefix
         let token_body = token.strip_prefix("proxy_").unwrap();
         let parts: Vec<&str> = token_body.split('.').collect();
-        assert_eq!(parts.len(), 3, "Token should have 3 parts (header.claims.signature)");
+        assert_eq!(
+            parts.len(),
+            3,
+            "Token should have 3 parts (header.claims.signature)"
+        );
 
         // Verify expiration is in the future and ~5 minutes
         let now = SystemTime::now()
@@ -393,7 +463,10 @@ mod tests {
             .unwrap()
             .as_secs();
         assert!(exp > now, "Expiration should be in the future");
-        assert!(exp <= now + 301, "Expiration should be at most 5 minutes from now");
+        assert!(
+            exp <= now + 301,
+            "Expiration should be at most 5 minutes from now"
+        );
     }
 
     #[test]
@@ -401,7 +474,9 @@ mod tests {
         let signing_key = generate_test_key();
         let signer = XetSigner::new(signing_key, "test-key-proxy-2", 3600, 300);
 
-        let (token, _) = signer.sign_proxy("user456", "oid789xyz", "download", "", "").unwrap();
+        let (token, _) = signer
+            .sign_proxy("user456", "oid789xyz", "download", "", "")
+            .unwrap();
 
         // Decode and verify claims
         let token_body = token.strip_prefix("proxy_").unwrap();
@@ -422,10 +497,15 @@ mod tests {
         let signing_key = generate_test_key();
         let signer = XetSigner::new(signing_key, "test-key-verify", 3600, 300);
 
-        let (token, _) = signer.sign_proxy("user", "oid123", "upload", "", "").unwrap();
+        let (token, _) = signer
+            .sign_proxy("user", "oid123", "upload", "", "")
+            .unwrap();
 
         // Valid token should verify
-        assert!(signer.verify_proxy_token(&token).is_some(), "Valid proxy token should verify");
+        assert!(
+            signer.verify_proxy_token(&token).is_some(),
+            "Valid proxy token should verify"
+        );
     }
 
     #[test]
@@ -433,13 +513,18 @@ mod tests {
         let signing_key = generate_test_key();
         let signer = XetSigner::new(signing_key, "test-key-verify-2", 3600, 300);
 
-        let (token, _) = signer.sign_proxy("user", "oid123", "upload", "", "").unwrap();
+        let (token, _) = signer
+            .sign_proxy("user", "oid123", "upload", "", "")
+            .unwrap();
 
         // Tamper with the token
-        let tampered_token = format!("{}tampered", &token[..token.len()-8]);
+        let tampered_token = format!("{}tampered", &token[..token.len() - 8]);
 
         // Invalid signature should not verify
-        assert!(signer.verify_proxy_token(&tampered_token).is_none(), "Tampered token should not verify");
+        assert!(
+            signer.verify_proxy_token(&tampered_token).is_none(),
+            "Tampered token should not verify"
+        );
     }
 
     #[test]
@@ -447,13 +532,18 @@ mod tests {
         let signing_key = generate_test_key();
         let signer = XetSigner::new(signing_key, "test-key-verify-3", 3600, 300);
 
-        let (token, _) = signer.sign_proxy("user", "oid123", "upload", "", "").unwrap();
+        let (token, _) = signer
+            .sign_proxy("user", "oid123", "upload", "", "")
+            .unwrap();
 
         // Change prefix from proxy_ to xet_
         let wrong_prefix_token = format!("xet_{}", &token[6..]);
 
         // Wrong prefix should not verify
-        assert!(signer.verify_proxy_token(&wrong_prefix_token).is_none(), "Token with wrong prefix should not verify");
+        assert!(
+            signer.verify_proxy_token(&wrong_prefix_token).is_none(),
+            "Token with wrong prefix should not verify"
+        );
     }
 
     #[test]
@@ -462,10 +552,22 @@ mod tests {
         let signer = XetSigner::new(signing_key, "test-key-verify-4", 3600, 300);
 
         // Malformed tokens should not verify
-        assert!(signer.verify_proxy_token("proxy_").is_none(), "Empty token body should not verify");
-        assert!(signer.verify_proxy_token("proxy_abc").is_none(), "Single part token should not verify");
-        assert!(signer.verify_proxy_token("proxy_abc.def").is_none(), "Two part token should not verify");
-        assert!(signer.verify_proxy_token("proxy_abc.def.ghi.jkl").is_none(), "Four part token should not verify");
+        assert!(
+            signer.verify_proxy_token("proxy_").is_none(),
+            "Empty token body should not verify"
+        );
+        assert!(
+            signer.verify_proxy_token("proxy_abc").is_none(),
+            "Single part token should not verify"
+        );
+        assert!(
+            signer.verify_proxy_token("proxy_abc.def").is_none(),
+            "Two part token should not verify"
+        );
+        assert!(
+            signer.verify_proxy_token("proxy_abc.def.ghi.jkl").is_none(),
+            "Four part token should not verify"
+        );
     }
 
     #[test]
@@ -476,9 +578,14 @@ mod tests {
         let signer1 = XetSigner::new(key1, "key1", 3600, 300);
         let signer2 = XetSigner::new(key2, "key2", 3600, 300);
 
-        let (token, _) = signer1.sign_proxy("user", "oid123", "upload", "", "").unwrap();
+        let (token, _) = signer1
+            .sign_proxy("user", "oid123", "upload", "", "")
+            .unwrap();
 
         // Token signed with key1 should not verify with key2
-        assert!(signer2.verify_proxy_token(&token).is_none(), "Token should not verify with different key");
+        assert!(
+            signer2.verify_proxy_token(&token).is_none(),
+            "Token should not verify with different key"
+        );
     }
 }

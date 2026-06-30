@@ -1,9 +1,9 @@
-use xet_server::format::xorb::{XorbChunkHeader, XorbObjectInfoV1};
-use xet_server::format::shard::{MDBShardFileHeader, MDBShardFileFooter};
+use std::io::Cursor;
 use xet_server::format::compression::{CompressionScheme, compress, decompress};
+use xet_server::format::shard::{MDBShardFileFooter, MDBShardFileHeader};
+use xet_server::format::xorb::{XorbChunkHeader, XorbObjectInfoV1};
 use xet_server::hash::compute_data_hash;
 use xet_server::types::MerkleHash;
-use std::io::Cursor;
 
 #[test]
 fn test_xorb_chunk_with_compression() {
@@ -28,7 +28,10 @@ fn test_xorb_chunk_with_compression() {
     let parsed_header = XorbChunkHeader::deserialize(&mut cursor).unwrap();
 
     assert_eq!(parsed_header.compressed_length, header.compressed_length);
-    assert_eq!(parsed_header.uncompressed_length, header.uncompressed_length);
+    assert_eq!(
+        parsed_header.uncompressed_length,
+        header.uncompressed_length
+    );
 
     // Read compressed data
     let mut compressed_buf = vec![0u8; parsed_header.compressed_length as usize];
@@ -39,7 +42,8 @@ fn test_xorb_chunk_with_compression() {
         parsed_header.compression_scheme,
         &compressed_buf,
         parsed_header.uncompressed_length as usize,
-    ).unwrap();
+    )
+    .unwrap();
 
     assert_eq!(decompressed, original_data);
 }
@@ -127,7 +131,7 @@ fn test_shard_header_footer_integration() {
 
 #[test]
 fn test_full_shard_with_entries() {
-    use xet_server::format::shard::{FileDataSequenceHeader, FileDataSequenceEntry};
+    use xet_server::format::shard::{FileDataSequenceEntry, FileDataSequenceHeader};
 
     // Create a minimal shard structure
     let header = MDBShardFileHeader::default();
@@ -211,7 +215,8 @@ fn test_compression_roundtrip_with_header() {
             parsed_header.compression_scheme,
             &compressed_buf,
             parsed_header.uncompressed_length as usize,
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(decompressed.len(), size);
         assert_eq!(decompressed, data);

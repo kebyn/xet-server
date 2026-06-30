@@ -119,11 +119,7 @@ pub trait MetadataStore: Send + Sync {
     async fn add_revision(&self, revision: Revision) -> Result<(), MetadataError>;
 
     /// Get a specific revision
-    async fn get_revision(
-        &self,
-        repo_id: i64,
-        commit_id: &str,
-    ) -> Result<Revision, MetadataError>;
+    async fn get_revision(&self, repo_id: i64, commit_id: &str) -> Result<Revision, MetadataError>;
 
     /// Get the HEAD commit for a repository
     async fn get_head(&self, repo_id: i64) -> Result<Option<String>, MetadataError>;

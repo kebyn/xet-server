@@ -1,5 +1,5 @@
-use criterion::{criterion_group, criterion_main, Criterion};
-use xet_server::chunking::{Chunker, ChunkConfig};
+use criterion::{Criterion, criterion_group, criterion_main};
+use xet_server::chunking::{ChunkConfig, Chunker};
 
 fn bench_chunking_1mb(c: &mut Criterion) {
     let data = vec![0xABu8; 1024 * 1024];

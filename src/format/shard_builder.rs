@@ -152,9 +152,7 @@ impl ShardBuilder {
 
         // ---- (a) header ----
         let header = MDBShardFileHeader::default();
-        header
-            .serialize(&mut buf)
-            .map_err(XetError::IoError)?;
+        header.serialize(&mut buf).map_err(XetError::IoError)?;
 
         // ---- (b) file info section ----
         for file in &self.files {
@@ -216,16 +214,31 @@ impl ShardBuilder {
             .flat_map(|f| f.segments.iter())
             .map(|s| s.unpacked_segment_bytes as u64)
             .sum();
-        let total_stored_bytes: u64 =
-            self.xorbs.iter().map(|x| x.num_bytes_in_xorb as u64).sum();
+        let total_stored_bytes: u64 = self.xorbs.iter().map(|x| x.num_bytes_in_xorb as u64).sum();
 
         let footer = MDBShardFileFooter {
             version: 2,
-            file_info_offset: if self.files.is_empty() { 0 } else { file_info_offset },
-            xorb_info_offset: if self.xorbs.is_empty() { 0 } else { xorb_info_offset },
-            file_lookup_offset: if self.files.is_empty() { 0 } else { xorb_info_offset },
+            file_info_offset: if self.files.is_empty() {
+                0
+            } else {
+                file_info_offset
+            },
+            xorb_info_offset: if self.xorbs.is_empty() {
+                0
+            } else {
+                xorb_info_offset
+            },
+            file_lookup_offset: if self.files.is_empty() {
+                0
+            } else {
+                xorb_info_offset
+            },
             file_lookup_num_entry: self.files.len() as u64,
-            xorb_lookup_offset: if self.xorbs.is_empty() { 0 } else { footer_offset },
+            xorb_lookup_offset: if self.xorbs.is_empty() {
+                0
+            } else {
+                footer_offset
+            },
             xorb_lookup_num_entry: self.xorbs.len() as u64,
             chunk_lookup_offset: 0,
             chunk_lookup_num_entry: 0,
@@ -252,7 +265,8 @@ impl ShardBuilder {
         if buf.len() != total_size {
             return Err(XetError::ParseError(format!(
                 "shard binary size mismatch: wrote {} bytes, expected {}",
-                buf.len(), total_size
+                buf.len(),
+                total_size
             )));
         }
 
@@ -337,7 +351,8 @@ mod tests {
         let data = builder.build().unwrap();
 
         // Expected size: header + (file hdr + 1 entry) + (xorb hdr + 1 chunk) + footer
-        let expected_size = HEADER_SIZE + (FILE_HEADER_SIZE + FILE_ENTRY_SIZE)
+        let expected_size = HEADER_SIZE
+            + (FILE_HEADER_SIZE + FILE_ENTRY_SIZE)
             + (XORB_HEADER_SIZE + XORB_ENTRY_SIZE)
             + FOOTER_SIZE;
         assert_eq!(data.len(), expected_size);
@@ -451,7 +466,10 @@ mod tests {
         assert_eq!(parsed.xorb_chunk_entries.len(), 3);
         for (i, entry) in parsed.xorb_chunk_entries.iter().enumerate() {
             assert_eq!(entry.chunk_hash, chunks[i].chunk_hash);
-            assert_eq!(entry.chunk_byte_range_start, chunks[i].chunk_byte_range_start);
+            assert_eq!(
+                entry.chunk_byte_range_start,
+                chunks[i].chunk_byte_range_start
+            );
             assert_eq!(entry.unpacked_segment_bytes, 256);
         }
 
@@ -517,14 +535,16 @@ mod tests {
         assert_eq!(parsed.footer.version, 2);
         assert_eq!(parsed.footer.file_info_offset, HEADER_SIZE as u64);
 
-        let expected_xorb_offset =
-            (HEADER_SIZE + FILE_HEADER_SIZE + 2 * FILE_ENTRY_SIZE) as u64;
+        let expected_xorb_offset = (HEADER_SIZE + FILE_HEADER_SIZE + 2 * FILE_ENTRY_SIZE) as u64;
         assert_eq!(parsed.footer.xorb_info_offset, expected_xorb_offset);
 
-        let expected_footer_offset =
-            (HEADER_SIZE + FILE_HEADER_SIZE + 2 * FILE_ENTRY_SIZE
-                + XORB_HEADER_SIZE + 2 * XORB_ENTRY_SIZE
-                + XORB_HEADER_SIZE + 3 * XORB_ENTRY_SIZE) as u64;
+        let expected_footer_offset = (HEADER_SIZE
+            + FILE_HEADER_SIZE
+            + 2 * FILE_ENTRY_SIZE
+            + XORB_HEADER_SIZE
+            + 2 * XORB_ENTRY_SIZE
+            + XORB_HEADER_SIZE
+            + 3 * XORB_ENTRY_SIZE) as u64;
         assert_eq!(parsed.footer.footer_offset, expected_footer_offset);
         assert_eq!(data.len(), expected_footer_offset as usize + FOOTER_SIZE);
 
@@ -574,11 +594,17 @@ mod tests {
 
         for (i, entry) in parsed.xorb_chunk_entries[..2].iter().enumerate() {
             assert_eq!(entry.chunk_hash, chunks_1[i].chunk_hash);
-            assert_eq!(entry.chunk_byte_range_start, chunks_1[i].chunk_byte_range_start);
+            assert_eq!(
+                entry.chunk_byte_range_start,
+                chunks_1[i].chunk_byte_range_start
+            );
         }
         for (i, entry) in parsed.xorb_chunk_entries[2..].iter().enumerate() {
             assert_eq!(entry.chunk_hash, chunks_2[i].chunk_hash);
-            assert_eq!(entry.chunk_byte_range_start, chunks_2[i].chunk_byte_range_start);
+            assert_eq!(
+                entry.chunk_byte_range_start,
+                chunks_2[i].chunk_byte_range_start
+            );
         }
 
         // -- Chunk mappings --
@@ -673,9 +699,13 @@ mod tests {
 
         // Verify all chunks belong to the correct xorbs
         let expected_xorbs: Vec<MerkleHash> = vec![
-            xorb_hash_a, xorb_hash_a,
+            xorb_hash_a,
+            xorb_hash_a,
             xorb_hash_b,
-            xorb_hash_c, xorb_hash_c, xorb_hash_c, xorb_hash_c,
+            xorb_hash_c,
+            xorb_hash_c,
+            xorb_hash_c,
+            xorb_hash_c,
         ];
         let actual_xorbs: Vec<MerkleHash> =
             parsed.chunk_mappings.iter().map(|&(_, xh, _)| xh).collect();

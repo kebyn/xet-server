@@ -1,7 +1,7 @@
-use serde::Deserialize;
-use std::time::Duration;
 use crate::config::CasSettings;
 use crate::error::HubError;
+use serde::Deserialize;
+use std::time::Duration;
 
 /// Error returned by CAS upload operations, preserving HTTP status codes
 /// for proper error propagation to clients.
@@ -28,7 +28,12 @@ pub trait CasClientTrait: Send + Sync {
     async fn head_blob(&self, oid: &str, internal_token: &str) -> Result<BlobState, HubError>;
 
     /// Proxy LFS upload to CAS
-    async fn proxy_lfs_upload(&self, oid: &str, data: bytes::Bytes, token: &str) -> Result<(), CasUploadError>;
+    async fn proxy_lfs_upload(
+        &self,
+        oid: &str,
+        data: bytes::Bytes,
+        token: &str,
+    ) -> Result<(), CasUploadError>;
 }
 
 /// CAS HTTP client for communicating with the content addressable storage.
@@ -46,7 +51,8 @@ impl CasClientTrait for CasClient {
     /// HEAD a blob to check existence and state
     async fn head_blob(&self, oid: &str, internal_token: &str) -> Result<BlobState, HubError> {
         let url = format!("{}/internal/blob/{}", self.base_url, oid);
-        let resp = self.client
+        let resp = self
+            .client
             .head(&url)
             .header("Authorization", format!("Bearer {}", internal_token))
             .send()
@@ -80,23 +86,38 @@ impl CasClientTrait for CasClient {
     }
 
     /// Upload a blob to CAS via LFS endpoint (buffered version)
-    async fn proxy_lfs_upload(&self, oid: &str, data: bytes::Bytes, token: &str) -> Result<(), CasUploadError> {
+    async fn proxy_lfs_upload(
+        &self,
+        oid: &str,
+        data: bytes::Bytes,
+        token: &str,
+    ) -> Result<(), CasUploadError> {
         let url = format!("{}/lfs/objects/{}", self.base_url, oid);
-        let resp = self.client
+        let resp = self
+            .client
             .put(&url)
             .header("Authorization", format!("Bearer {}", token))
             .header("Content-Type", "application/octet-stream")
             .body(data)
             .send()
             .await
-            .map_err(|e| CasUploadError { status: 502, message: format!("CAS request failed: {}", e) })?;
+            .map_err(|e| CasUploadError {
+                status: 502,
+                message: format!("CAS request failed: {}", e),
+            })?;
 
         let status = resp.status().as_u16();
         if resp.status().is_success() {
             Ok(())
         } else {
-            let body = resp.text().await.map_err(|e| CasUploadError { status, message: format!("Failed to read CAS response: {}", e) })?;
-            Err(CasUploadError { status, message: body })
+            let body = resp.text().await.map_err(|e| CasUploadError {
+                status,
+                message: format!("Failed to read CAS response: {}", e),
+            })?;
+            Err(CasUploadError {
+                status,
+                message: body,
+            })
         }
     }
 }
@@ -120,9 +141,14 @@ impl CasClient {
     }
 
     /// Get full blob state via internal API
-    pub async fn get_state(&self, oid: &str, internal_token: &str) -> Result<Option<BlobState>, HubError> {
+    pub async fn get_state(
+        &self,
+        oid: &str,
+        internal_token: &str,
+    ) -> Result<Option<BlobState>, HubError> {
         let url = format!("{}/internal/state/{}", self.base_url, oid);
-        let resp = self.client
+        let resp = self
+            .client
             .get(&url)
             .header("Authorization", format!("Bearer {}", internal_token))
             .send()
@@ -144,9 +170,14 @@ impl CasClient {
     }
 
     /// Proxy a Git LFS batch request to CAS
-    pub async fn proxy_batch(&self, body: &serde_json::Value, token: &str) -> Result<serde_json::Value, HubError> {
+    pub async fn proxy_batch(
+        &self,
+        body: &serde_json::Value,
+        token: &str,
+    ) -> Result<serde_json::Value, HubError> {
         let url = format!("{}/objects/batch", self.base_url);
-        let resp = self.client
+        let resp = self
+            .client
             .post(&url)
             .header("Authorization", format!("Bearer {}", token))
             .header("Content-Type", "application/vnd.git-lfs+json")
@@ -162,7 +193,10 @@ impl CasClient {
             .map_err(|e| HubError::CasError(e.to_string()))?;
 
         if status >= 400 {
-            return Err(HubError::CasError(format!("CAS batch error: {}", resp_body)));
+            return Err(HubError::CasError(format!(
+                "CAS batch error: {}",
+                resp_body
+            )));
         }
 
         Ok(resp_body)
@@ -181,13 +215,18 @@ impl CasClient {
     ) -> Result<(), CasUploadError> {
         let url = format!("{}/lfs/objects/{}", self.base_url, oid);
 
-        let file = tokio::fs::File::open(file_path).await
-            .map_err(|e| CasUploadError { status: 500, message: format!("Failed to open temp file: {}", e) })?;
+        let file = tokio::fs::File::open(file_path)
+            .await
+            .map_err(|e| CasUploadError {
+                status: 500,
+                message: format!("Failed to open temp file: {}", e),
+            })?;
 
         let stream = tokio_util::io::ReaderStream::new(file);
         let body = reqwest::Body::wrap_stream(stream);
 
-        let resp = self.client
+        let resp = self
+            .client
             .put(&url)
             .header("Authorization", format!("Bearer {}", token))
             .header("Content-Type", "application/octet-stream")
@@ -195,23 +234,37 @@ impl CasClient {
             .body(body)
             .send()
             .await
-            .map_err(|e| CasUploadError { status: 502, message: format!("CAS request failed: {}", e) })?;
+            .map_err(|e| CasUploadError {
+                status: 502,
+                message: format!("CAS request failed: {}", e),
+            })?;
 
         let status = resp.status().as_u16();
         if resp.status().is_success() {
             Ok(())
         } else {
-            let body = resp.text().await.map_err(|e| CasUploadError { status, message: format!("Failed to read CAS response: {}", e) })?;
-            Err(CasUploadError { status, message: body })
+            let body = resp.text().await.map_err(|e| CasUploadError {
+                status,
+                message: format!("Failed to read CAS response: {}", e),
+            })?;
+            Err(CasUploadError {
+                status,
+                message: body,
+            })
         }
     }
 
     /// Download a blob from CAS via LFS endpoint (buffered version)
     /// Loads entire file into memory. Use proxy_lfs_download_streaming for large files.
     /// I7 fix: Check Content-Length before loading body to prevent memory exhaustion.
-    pub async fn proxy_lfs_download(&self, oid: &str, token: &str) -> Result<bytes::Bytes, HubError> {
+    pub async fn proxy_lfs_download(
+        &self,
+        oid: &str,
+        token: &str,
+    ) -> Result<bytes::Bytes, HubError> {
         let url = format!("{}/lfs/objects/{}", self.base_url, oid);
-        let resp = self.client
+        let resp = self
+            .client
             .get(&url)
             .header("Authorization", format!("Bearer {}", token))
             .send()
@@ -222,12 +275,13 @@ impl CasClient {
             200 => {
                 // I7 fix: Check Content-Length before loading body into memory
                 if let Some(content_length) = resp.content_length()
-                    && content_length > self.max_download_size {
-                        return Err(HubError::CasError(format!(
-                            "Download too large: {} bytes (max: {} bytes)",
-                            content_length, self.max_download_size
-                        )));
-                    }
+                    && content_length > self.max_download_size
+                {
+                    return Err(HubError::CasError(format!(
+                        "Download too large: {} bytes (max: {} bytes)",
+                        content_length, self.max_download_size
+                    )));
+                }
 
                 let body = resp
                     .bytes()
@@ -238,7 +292,8 @@ impl CasClient {
                 if body.len() as u64 > self.max_download_size {
                     return Err(HubError::CasError(format!(
                         "Download too large: {} bytes (max: {} bytes)",
-                        body.len(), self.max_download_size
+                        body.len(),
+                        self.max_download_size
                     )));
                 }
 
@@ -258,7 +313,8 @@ impl CasClient {
         token: &str,
     ) -> Result<(u64, reqwest::Response), HubError> {
         let url = format!("{}/lfs/objects/{}", self.base_url, oid);
-        let resp = self.client
+        let resp = self
+            .client
             .get(&url)
             .header("Authorization", format!("Bearer {}", token))
             .send()
