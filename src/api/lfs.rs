@@ -14,11 +14,13 @@ use futures_util::{Stream, StreamExt};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tracing::{debug, error, info};
 
 use crate::api::auth::AuthVerifier;
 use crate::api::guard::{AuthNeed, require_auth};
 use crate::api::reconstruction::fetch_and_parse_shard;
+use crate::chunking::ChunkConfig;
 use crate::config::{ConversionConfig, ServerConfig};
 use crate::conversion::ConvertingOids;
 use crate::format::compression::decompress;
@@ -28,12 +30,28 @@ use crate::index::MetadataIndex;
 use crate::metrics::GLOBAL_METRICS;
 use crate::storage::{StorageBackend, StorageError};
 use crate::types::MerkleHash;
-use crate::util::{DualHasher, TempFile};
+use crate::util::{DualHasher, StreamingHasher, TempFile};
+
+fn max_compressed_len_for_chunk(
+    scheme: crate::format::compression::CompressionScheme,
+    expected_uncompressed_len: usize,
+) -> usize {
+    match scheme {
+        crate::format::compression::CompressionScheme::None => expected_uncompressed_len,
+        // lz4_flex::compress_prepend_size uses the LZ4 block format plus a 4-byte
+        // original-size prefix. The LZ4 worst-case bound is n + n/255 + 16.
+        crate::format::compression::CompressionScheme::LZ4
+        | crate::format::compression::CompressionScheme::ByteGrouping4LZ4 => {
+            expected_uncompressed_len + expected_uncompressed_len / 255 + 20
+        }
+    }
+}
 
 /// 从 xorb 原始字节中按偏移定位单个 chunk,校验其完整性后解压。
 ///
 /// C-DATA-2: chunk_hash 覆盖 header(8B)+压缩数据。在解压前对该区域重算 hash
 /// 并与 shard 记录值比对,检出磁盘 bit-rot / 存储损坏 / 串改,并先于解压挡住污染数据。
+#[cfg(test)]
 fn extract_chunk_verified(
     xorb_data: &[u8],
     chunk_offset_bytes: usize,
@@ -70,6 +88,132 @@ fn extract_chunk_verified(
     )
     .map_err(|e| format!("Failed to decompress chunk: {}", e))?;
     Ok(bytes::Bytes::from(decompressed))
+}
+
+/// Read one chunk from a xorb file at `chunk_offset_bytes`, verify header+compressed
+/// bytes against `expected_hash`, then decompress it.
+///
+/// This keeps reconstruction memory bounded to one compressed chunk plus one
+/// decompressed chunk, instead of loading the entire xorb into memory.
+async fn extract_chunk_verified_from_file(
+    xorb_file: &mut tokio::fs::File,
+    chunk_offset_bytes: u64,
+    expected_uncompressed_len: u32,
+    expected_hash: &MerkleHash,
+) -> std::result::Result<bytes::Bytes, String> {
+    xorb_file
+        .seek(std::io::SeekFrom::Start(chunk_offset_bytes))
+        .await
+        .map_err(|e| {
+            format!(
+                "Failed to seek to chunk offset {}: {}",
+                chunk_offset_bytes, e
+            )
+        })?;
+
+    let mut header_bytes = [0u8; XorbChunkHeader::SIZE];
+    xorb_file.read_exact(&mut header_bytes).await.map_err(|e| {
+        format!(
+            "Failed to read chunk header at offset {}: {}",
+            chunk_offset_bytes, e
+        )
+    })?;
+
+    let mut chunk_cursor = std::io::Cursor::new(&header_bytes);
+    let chunk_header = XorbChunkHeader::deserialize(&mut chunk_cursor)
+        .map_err(|e| format!("Failed to parse chunk header: {}", e))?;
+
+    let max_uncompressed_len = ChunkConfig::default().max_chunk_size();
+    if expected_uncompressed_len as usize > max_uncompressed_len {
+        return Err(format!(
+            "Shard chunk length {} exceeds maximum {} at offset {}",
+            expected_uncompressed_len, max_uncompressed_len, chunk_offset_bytes
+        ));
+    }
+
+    if chunk_header.uncompressed_length != expected_uncompressed_len {
+        return Err(format!(
+            "Chunk length mismatch at offset {}: header declares {} bytes, shard expects {} bytes",
+            chunk_offset_bytes, chunk_header.uncompressed_length, expected_uncompressed_len
+        ));
+    }
+
+    let max_compressed_len = max_compressed_len_for_chunk(
+        chunk_header.compression_scheme,
+        expected_uncompressed_len as usize,
+    );
+    if chunk_header.compressed_length as usize > max_compressed_len {
+        return Err(format!(
+            "Chunk compressed length {} exceeds maximum {} at offset {}",
+            chunk_header.compressed_length, max_compressed_len, chunk_offset_bytes
+        ));
+    }
+
+    let mut compressed_data = vec![0u8; chunk_header.compressed_length as usize];
+    xorb_file
+        .read_exact(&mut compressed_data)
+        .await
+        .map_err(|e| {
+            format!(
+                "Failed to read chunk data at offset {} ({} bytes): {}",
+                chunk_offset_bytes, chunk_header.compressed_length, e
+            )
+        })?;
+
+    // Verify the exact same byte region as xet-core: header + compressed payload.
+    let mut hasher = StreamingHasher::new();
+    hasher.update(&header_bytes);
+    hasher.update(&compressed_data);
+    let actual_hash = hasher.finalize();
+    if actual_hash != *expected_hash {
+        return Err(format!(
+            "Chunk hash mismatch at offset {}: stored data is corrupted",
+            chunk_offset_bytes
+        ));
+    }
+
+    let decompressed = decompress(
+        chunk_header.compression_scheme,
+        &compressed_data,
+        chunk_header.uncompressed_length as usize,
+    )
+    .map_err(|e| format!("Failed to decompress chunk: {}", e))?;
+    Ok(bytes::Bytes::from(decompressed))
+}
+
+struct TempPathGuard {
+    path: Option<std::path::PathBuf>,
+}
+
+impl TempPathGuard {
+    fn new(path: std::path::PathBuf) -> Self {
+        Self { path: Some(path) }
+    }
+
+    fn path(&self) -> &std::path::Path {
+        self.path.as_deref().expect("temp path already cleaned")
+    }
+
+    async fn cleanup(mut self) {
+        if let Some(path) = self.path.take() {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+    }
+}
+
+impl Drop for TempPathGuard {
+    fn drop(&mut self) {
+        let Some(path) = self.path.take() else {
+            return;
+        };
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn_blocking(move || {
+                let _ = std::fs::remove_file(path);
+            });
+        } else {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 /// Upload an LFS object (raw file) via streaming.
@@ -892,11 +1036,11 @@ where
 ///
 /// ## Memory
 ///
-/// I3 fix: Peak memory is bounded by download_to_path (streams to temp file),
-/// plus one xorb read from temp file at a time (streamed in chunks).
-/// Previously, get() loaded entire xorbs (up to 512MB each) into memory,
+/// I3 fix: xorb downloads stream to temp files, and reconstruction reads each
+/// temp xorb by chunk offset. Prefetch can keep one extra xorb on disk, but not
+/// in RAM. Previously, get() loaded entire xorbs (up to 512MB each) into memory,
 /// with 2 concurrent xorbs (current + prefetched) = potential 1GB+ peak RAM.
-/// Now: O(chunk_size) for streaming download + O(chunk_size) for temp file read.
+/// Now: O(chunk_size) RAM for one compressed chunk plus one decompressed chunk.
 ///
 /// ## Extension Point
 ///
@@ -910,9 +1054,9 @@ fn create_reconstruction_stream(
     use async_stream::stream;
 
     // Type aliases for prefetch handles
-    // I3 fix: XorbPrefetch now returns a temp file path instead of in-memory bytes
+    // I3 fix: XorbPrefetch returns a temp path guard instead of in-memory bytes.
     type ShardPrefetch = tokio::task::JoinHandle<Result<MDBShardFile, String>>;
-    type XorbPrefetch = tokio::task::JoinHandle<Result<std::path::PathBuf, String>>;
+    type XorbPrefetch = tokio::task::JoinHandle<Result<TempPathGuard, String>>;
 
     Box::pin(stream! {
         // Resolve temp directory for xorb downloads (configurable via XET_RECONSTRUCTION_TEMP_DIR)
@@ -994,18 +1138,20 @@ fn create_reconstruction_stream(
             // Helper to download xorb to temp file
             let storage_for_download = storage.clone();
             let temp_dir_clone = temp_dir.clone();
-            let download_xorb_to_temp = move |xorb_hash: String| -> tokio::task::JoinHandle<Result<std::path::PathBuf, String>> {
+            let download_xorb_to_temp = move |xorb_hash: String| -> tokio::task::JoinHandle<Result<TempPathGuard, String>> {
                 let storage = storage_for_download.clone();
                 let temp_dir = temp_dir_clone.clone();
                 tokio::spawn(async move {
                     let xorb_key = format!("xorbs/{}", xorb_hash);
                     let temp_path = temp_dir.join(format!("xorb-{}-{}.tmp", xorb_hash, uuid::Uuid::new_v4()));
+                    let temp_guard = TempPathGuard::new(temp_path);
 
                     // I3 fix: Use download_to_path for streaming download (bounded memory)
-                    storage.download_to_path(&xorb_key, &temp_path).await
-                        .map_err(|e| format!("Failed to download xorb {}: {}", xorb_hash, e))?;
+                    if let Err(e) = storage.download_to_path(&xorb_key, temp_guard.path()).await {
+                        return Err(format!("Failed to download xorb {}: {}", xorb_hash, e));
+                    }
 
-                    Ok(temp_path)
+                    Ok(temp_guard)
                 })
             };
 
@@ -1017,7 +1163,7 @@ fn create_reconstruction_stream(
             for (xorb_idx, (xorb_hash, num_entries, xorb_chunk_offset)) in xorb_entries.iter().enumerate() {
                 // Await current xorb (prefetched or fallback)
                 let xorb_start = std::time::Instant::now();
-                let xorb_temp_path: std::path::PathBuf = if let Some(handle) = next_xorb_prefetch.take() {
+                let xorb_temp: TempPathGuard = if let Some(handle) = next_xorb_prefetch.take() {
                     let result = handle.await
                         .map_err(|e| format!("Xorb prefetch task panicked: {}", e))?
                         .map_err(|e| format!("Failed to fetch xorb {}: {}", xorb_hash, e));
@@ -1031,7 +1177,8 @@ fn create_reconstruction_stream(
                 } else {
                     let xorb_key = format!("xorbs/{}", xorb_hash);
                     let temp_path = temp_dir.join(format!("xorb-{}-{}.tmp", xorb_hash, uuid::Uuid::new_v4()));
-                    storage.download_to_path(&xorb_key, &temp_path).await
+                    let temp_guard = TempPathGuard::new(temp_path);
+                    storage.download_to_path(&xorb_key, temp_guard.path()).await
                         .map_err(|e| format!("Failed to download xorb {}: {}", xorb_hash, e))?;
                     debug!(
                         xorb = %xorb_hash,
@@ -1039,7 +1186,7 @@ fn create_reconstruction_stream(
                         prefetch = false,
                         "xorb fetched"
                     );
-                    temp_path
+                    temp_guard
                 };
 
                 // Kick off prefetch of next xorb (while we decompress current xorb's chunks)
@@ -1049,24 +1196,18 @@ fn create_reconstruction_stream(
                     next_xorb_prefetch = Some(download_xorb_to_temp(next_xorb_hash));
                 }
 
-                // I3 fix: Read xorb data from temp file (bounded memory via streaming read)
-                // Read the entire xorb from temp file — this is still needed because chunk
-                // extraction requires random access into the xorb data. However, the key
-                // improvement is that the download itself is streaming (via download_to_path).
-                // For very large xorbs, a chunk-by-chunk streaming read from the temp file
-                // could be added in the future, but this already eliminates the S3→RAM bottleneck.
-                let xorb_data = match tokio::fs::read(&xorb_temp_path).await {
-                    Ok(data) => data,
+                // Open the temp xorb and read only the chunk regions needed by the shard.
+                // This keeps peak reconstruction memory at chunk scale instead of xorb scale.
+                let mut xorb_file = match tokio::fs::File::open(xorb_temp.path()).await {
+                    Ok(file) => file,
                     Err(e) => {
-                        // Clean up temp file on error
-                        let _ = tokio::fs::remove_file(&xorb_temp_path).await;
-                        yield Err(format!("Failed to read xorb temp file {}: {}", xorb_hash, e));
+                        if let Some(handle) = next_xorb_prefetch.take() {
+                            handle.abort();
+                        }
+                        yield Err(format!("Failed to open xorb temp file {}: {}", xorb_hash, e));
                         return;
                     }
                 };
-
-                // Clean up temp file after reading
-                let _ = tokio::fs::remove_file(&xorb_temp_path).await;
 
                 // Extract each chunk from the xorb
                 for chunk_idx in 0..*num_entries {
@@ -1076,16 +1217,34 @@ fn create_reconstruction_stream(
                     }
 
                     let chunk_entry = &shard.xorb_chunk_entries[global_chunk_idx];
-                    let chunk_offset_bytes = chunk_entry.chunk_byte_range_start as usize;
+                    let chunk_offset_bytes = chunk_entry.chunk_byte_range_start as u64;
 
-                    match extract_chunk_verified(&xorb_data, chunk_offset_bytes, &chunk_entry.chunk_hash) {
+                    match extract_chunk_verified_from_file(
+                        &mut xorb_file,
+                        chunk_offset_bytes,
+                        chunk_entry.unpacked_segment_bytes,
+                        &chunk_entry.chunk_hash,
+                    )
+                    .await
+                    {
                         Ok(bytes) => yield Ok(bytes),
                         Err(e) => {
+                            if let Some(handle) = next_xorb_prefetch.take() {
+                                handle.abort();
+                            }
                             yield Err(e);
                             return;
                         }
                     }
                 }
+
+                // Clean up temp file after all chunk reads complete.
+                drop(xorb_file);
+                xorb_temp.cleanup().await;
+            }
+
+            if let Some(handle) = next_xorb_prefetch.take() {
+                handle.abort();
             }
         }
     })
@@ -1128,5 +1287,87 @@ mod tests {
         let last = corrupted.len() - 1;
         corrupted[last] ^= 0xFF;
         assert!(extract_chunk_verified(&corrupted, 0, &hash).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_extract_chunk_verified_from_file_reads_only_target_chunk() {
+        use crate::format::compression::{CompressionScheme, compress};
+        use crate::hash::compute_data_hash;
+
+        fn build_chunk(raw: &[u8]) -> (Vec<u8>, MerkleHash) {
+            let compressed = compress(CompressionScheme::LZ4, raw).unwrap();
+            let header = XorbChunkHeader {
+                version: 1,
+                compressed_length: compressed.len() as u32,
+                compression_scheme: CompressionScheme::LZ4,
+                uncompressed_length: raw.len() as u32,
+            };
+            let mut chunk_bytes = Vec::new();
+            header.serialize(&mut chunk_bytes).unwrap();
+            chunk_bytes.extend_from_slice(&compressed);
+            let hash = compute_data_hash(&chunk_bytes);
+            (chunk_bytes, hash)
+        }
+
+        let prefix = b"not-a-chunk-prefix";
+        let first_raw = b"first chunk data";
+        let second_raw = b"second chunk payload";
+        let (first_chunk, first_hash) = build_chunk(first_raw);
+        let (second_chunk, second_hash) = build_chunk(second_raw);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("xorb.tmp");
+        let mut file_bytes = Vec::new();
+        file_bytes.extend_from_slice(prefix);
+        let first_offset = file_bytes.len() as u64;
+        file_bytes.extend_from_slice(&first_chunk);
+        let second_offset = file_bytes.len() as u64;
+        file_bytes.extend_from_slice(&second_chunk);
+        tokio::fs::write(&path, &file_bytes).await.unwrap();
+
+        let mut file = tokio::fs::File::open(&path).await.unwrap();
+        let first = extract_chunk_verified_from_file(
+            &mut file,
+            first_offset,
+            first_raw.len() as u32,
+            &first_hash,
+        )
+        .await
+        .unwrap();
+        assert_eq!(&first[..], &first_raw[..]);
+
+        let second = extract_chunk_verified_from_file(
+            &mut file,
+            second_offset,
+            second_raw.len() as u32,
+            &second_hash,
+        )
+        .await
+        .unwrap();
+        assert_eq!(&second[..], &second_raw[..]);
+
+        let mut file = tokio::fs::File::open(&path).await.unwrap();
+        assert!(
+            extract_chunk_verified_from_file(
+                &mut file,
+                second_offset,
+                second_raw.len() as u32,
+                &first_hash,
+            )
+            .await
+            .is_err()
+        );
+
+        let mut file = tokio::fs::File::open(&path).await.unwrap();
+        assert!(
+            extract_chunk_verified_from_file(
+                &mut file,
+                first_offset,
+                second_raw.len() as u32,
+                &first_hash
+            )
+            .await
+            .is_err()
+        );
     }
 }
