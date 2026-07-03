@@ -56,7 +56,7 @@ pub async fn get_blob_state(
     }
 
     // Check MetadataIndex first
-    if index.get_shards_for_file(&oid).is_some() {
+    if index.get_file_refs(&oid).is_some() {
         info!("Internal state query for {}: xet_only", oid);
         GLOBAL_METRICS.record_request(200);
         GLOBAL_METRICS.record_latency(start);
@@ -159,7 +159,7 @@ pub async fn head_blob(
     }
 
     // Check MetadataIndex first
-    if index.get_shards_for_file(&oid).is_some() {
+    if index.get_file_refs(&oid).is_some() {
         GLOBAL_METRICS.record_request(200);
         GLOBAL_METRICS.record_latency(start);
         return HttpResponse::Ok()

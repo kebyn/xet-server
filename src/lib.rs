@@ -45,6 +45,7 @@ pub mod hash;
 pub mod index;
 pub mod metrics;
 pub mod middleware;
+pub mod reconstruction_io;
 pub mod reconstruction_plan;
 pub mod server;
 pub mod shard_validation;

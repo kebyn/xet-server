@@ -23,7 +23,7 @@ struct ChunkDedupResponse {
 pub async fn query_chunk_dedup(
     path: web::Path<(String, String)>,
     index: web::Data<MetadataIndex>,
-    _storage: web::Data<Box<dyn StorageBackend>>,
+    storage: web::Data<Box<dyn StorageBackend>>,
     auth: web::Data<AuthVerifier>,
     req: actix_web::HttpRequest,
 ) -> HttpResponse {
@@ -60,12 +60,31 @@ pub async fn query_chunk_dedup(
 
     // Look up chunk in metadata index
     let response = match index.get_xorb_for_chunk(&hash) {
-        Some((xorb_hash, chunk_index)) => ChunkDedupResponse {
-            hash,
-            found: true,
-            xorb_hash: Some(xorb_hash),
-            chunk_index: Some(chunk_index),
-        },
+        Some((xorb_hash, chunk_index)) => {
+            let xorb_key = format!("xorbs/{}", xorb_hash);
+            match storage.exists(&xorb_key).await {
+                Ok(true) => ChunkDedupResponse {
+                    hash,
+                    found: true,
+                    xorb_hash: Some(xorb_hash),
+                    chunk_index: Some(chunk_index),
+                },
+                Ok(false) => ChunkDedupResponse {
+                    hash,
+                    found: false,
+                    xorb_hash: None,
+                    chunk_index: None,
+                },
+                Err(e) => {
+                    GLOBAL_METRICS.record_request(500);
+                    GLOBAL_METRICS.record_error();
+                    GLOBAL_METRICS.record_latency(start);
+                    return HttpResponse::InternalServerError().json(serde_json::json!({
+                        "error": format!("Storage error: {}", e)
+                    }));
+                }
+            }
+        }
         None => ChunkDedupResponse {
             hash,
             found: false,
@@ -85,6 +104,7 @@ mod tests {
     use super::*;
     use crate::api::auth::{AuthVerifier, KeyPair, XetClaims, sign_xet_token};
     use crate::config::{AuthConfig, ServerConfig};
+    use crate::index::{VerifiedChunkMapping, VerifiedShardRegistration};
     use crate::storage::local::LocalStorage;
     use actix_web::{App, test, web};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -172,6 +192,54 @@ mod tests {
         let body: ChunkDedupResponse = test::read_body_json(resp).await;
         assert!(!body.found);
         assert_eq!(body.hash, hash);
+    }
+
+    #[actix_web::test]
+    async fn test_chunk_dedup_ignores_mapping_when_xorb_missing() {
+        let dir = tempdir().unwrap();
+        let storage: Box<dyn StorageBackend> =
+            Box::new(LocalStorage::new(dir.path().to_str().unwrap()).unwrap());
+
+        let (kp, auth, _config) = create_test_config();
+        let token = create_test_token(&kp, "read");
+
+        let index = MetadataIndex::new();
+        let chunk_hash = "a".repeat(64);
+        index.register_verified_shard(VerifiedShardRegistration {
+            shard_id: "stale-shard".to_string(),
+            files: vec![],
+            chunks: vec![VerifiedChunkMapping {
+                chunk_hash: chunk_hash.clone(),
+                xorb_hash: "b".repeat(64),
+                chunk_index: 0,
+            }],
+        });
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(index))
+                .app_data(web::Data::new(storage))
+                .app_data(web::Data::new(auth))
+                .route(
+                    "/v1/chunks/{prefix}/{hash}",
+                    web::get().to(query_chunk_dedup),
+                ),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri(&format!("/v1/chunks/default/{}", chunk_hash))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+
+        let body: ChunkDedupResponse = test::read_body_json(resp).await;
+        assert!(!body.found);
+        assert_eq!(body.hash, chunk_hash);
+        assert_eq!(body.xorb_hash, None);
+        assert_eq!(body.chunk_index, None);
     }
 
     #[actix_web::test]
