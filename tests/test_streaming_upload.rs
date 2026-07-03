@@ -12,11 +12,13 @@ use tempfile::tempdir;
 use common::{TestContext, test_token_for_keypair};
 use xet_server::api::auth::{AuthVerifier, KeyPair};
 use xet_server::format::compression::CompressionScheme;
+use xet_server::format::shard_builder::{FileSegment, ShardBuilder, XorbChunkBuildEntry};
 use xet_server::format::xorb_builder::XorbBuilder;
 use xet_server::hash::compute_data_hash;
 use xet_server::index::MetadataIndex;
 use xet_server::storage::StorageBackend;
 use xet_server::storage::local::LocalStorage;
+use xet_server::types::MerkleHash;
 
 fn create_test_config_with_temp_dir(temp_dir: &str) -> TestContext {
     // Generate a key pair first
@@ -90,6 +92,15 @@ fn create_valid_xorb(content: &[u8]) -> (Vec<u8>, String) {
     builder.add_chunk(content).unwrap();
     let xorb = builder.build().unwrap();
     (xorb.data, xorb.xorb_hash.to_hex())
+}
+
+fn sha256_merkle_hash(data: &[u8]) -> MerkleHash {
+    use sha2::{Digest, Sha256};
+
+    let digest = Sha256::digest(data);
+    let mut bytes = [0u8; 32];
+    bytes.copy_from_slice(&digest);
+    MerkleHash::from(bytes)
 }
 
 #[actix_web::test]
@@ -360,40 +371,45 @@ async fn test_streaming_shard_upload() {
 
     let index = MetadataIndex::new();
 
-    // Create a valid shard by serializing header + padding + footer
-    use xet_server::format::shard::{MDBShardFileFooter, MDBShardFileHeader};
-    let header = MDBShardFileHeader::default();
-    let footer = MDBShardFileFooter {
-        version: 1,
-        file_info_offset: 48,
-        xorb_info_offset: 1000,
-        file_lookup_offset: 2000,
-        file_lookup_num_entry: 0,
-        xorb_lookup_offset: 2100,
-        xorb_lookup_num_entry: 0,
-        chunk_lookup_offset: 2200,
-        chunk_lookup_num_entry: 0,
-        chunk_hash_hmac_key: [0u8; 32],
-        shard_creation_timestamp: 1700000000,
-        shard_key_expiry: u64::MAX,
-        stored_bytes_on_disk: 0,
-        materialized_bytes: 0,
-        stored_bytes: 0,
-        footer_offset: 0, // will be set after we know the size
-    };
+    let raw = b"streaming shard upload validates referenced xorb";
+    let raw_hash = compute_data_hash(raw);
+    let mut xorb_builder = XorbBuilder::new(CompressionScheme::None);
+    let (serialized_chunk_hash, _compressed_len) = xorb_builder.add_chunk(raw).unwrap();
+    let xorb = xorb_builder.build().unwrap();
 
-    let mut shard_data = Vec::new();
-    header.serialize(&mut shard_data).unwrap();
-    // Pad between header and footer
-    let padding_size = 208; // ensure enough space
-    shard_data.resize(shard_data.len() + padding_size, 0);
-    // Set footer_offset to actual position
-    let footer_offset = shard_data.len();
-    let footer = MDBShardFileFooter {
-        footer_offset: footer_offset as u64,
-        ..footer
-    };
-    footer.serialize(&mut shard_data).unwrap();
+    storage_arc
+        .put(
+            &format!("xorbs/{}", xorb.xorb_hash.to_hex()),
+            Bytes::from(xorb.data),
+        )
+        .await
+        .unwrap();
+
+    let mut shard_builder = ShardBuilder::new();
+    let xorb_index = shard_builder
+        .add_xorb_with_raw_chunk_hashes(
+            xorb.xorb_hash,
+            xorb.total_uncompressed_size as u32,
+            xorb.total_compressed_size as u32,
+            vec![XorbChunkBuildEntry {
+                chunk_hash: serialized_chunk_hash,
+                chunk_byte_range_start: 0,
+                unpacked_segment_bytes: raw.len() as u32,
+            }],
+            vec![raw_hash],
+        )
+        .unwrap();
+    shard_builder.add_file(
+        sha256_merkle_hash(raw),
+        vec![FileSegment {
+            xorb_hash: xorb.xorb_hash,
+            xorb_index,
+            chunk_index_start: 0,
+            chunk_index_end: 1,
+            unpacked_segment_bytes: raw.len() as u32,
+        }],
+    );
+    let shard_data = shard_builder.build().unwrap();
 
     let app = test::init_service(
         App::new()
