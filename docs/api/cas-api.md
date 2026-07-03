@@ -160,6 +160,8 @@ Content-Type: application/octet-stream
 
 **请求体**：Shard 二进制数据
 
+Shard 上传会在 shard 进入可发现索引前验证所有引用的 xorbs 以及声明的 file/chunk 映射。语法上有效但引用缺失 xorb、chunk hash 不匹配，或声明的 file hash 与重构内容不匹配的 shard 会被拒绝，并且不会注册到 metadata index 中用于重构或全局去重。
+
 **响应**：
 - `200 OK`: 上传成功
 - `400 Bad Request`: Shard 格式无效
@@ -222,7 +224,7 @@ Authorization: Bearer xet_xxx
   - `xorb_hash`: Xorb 的 BLAKE3 哈希
   - `size`: Xorb 大小（字节）
   - `chunks`: 该 Xorb 中包含的 chunk 列表
-    - `chunk_hash`: Chunk 的 BLAKE3 哈希
+    - `chunk_hash`: 原始 chunk 内容的 BLAKE3 哈希（raw chunk hash，用于全局去重）
     - `offset`: Chunk 在 Xorb 中的偏移量
     - `length`: Chunk 长度（字节）
 
@@ -256,11 +258,11 @@ Authorization: Bearer xet_xxx
   ],
   "fetch_info": {
     "xorb1_hash": {
-      "storage_path": "xorbs/ab/xorb1_hash",
+      "storage_path": "xorbs/xorb1_hash",
       "size": 65536
     },
     "xorb2_hash": {
-      "storage_path": "xorbs/cd/xorb2_hash",
+      "storage_path": "xorbs/xorb2_hash",
       "size": 131072
     }
   }
