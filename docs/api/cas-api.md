@@ -164,7 +164,7 @@ Shard 上传会在 shard 进入可发现索引前验证所有引用的 xorbs 以
 
 **响应**：
 - `200 OK`: 上传成功
-- `400 Bad Request`: Shard 格式无效
+- `400 Bad Request`: Shard 格式无效或内容验证失败（缺失 xorb、chunk hash 不匹配、file hash 不匹配）
 - `401 Unauthorized`: 认证失败
 
 **示例**：
