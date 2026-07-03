@@ -7,9 +7,12 @@
 mod common;
 
 use actix_web::{App, http::Method, test, web};
+use async_trait::async_trait;
 use bytes::Bytes;
 use sha2::{Digest, Sha256};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tempfile::tempdir;
 
 use common::{TestContext, test_token_for_keypair};
@@ -17,8 +20,8 @@ use xet_server::config::ConversionConfig;
 use xet_server::conversion::{ConversionPipeline, ConvertingOids};
 use xet_server::hash::compute_data_hash;
 use xet_server::index::{MetadataIndex, VerifiedFileMapping, VerifiedShardRegistration};
-use xet_server::storage::StorageBackend;
 use xet_server::storage::local::LocalStorage;
+use xet_server::storage::{StorageBackend, StorageResult};
 
 fn create_test_context() -> TestContext {
     common::test_config_with_new_key()
@@ -28,6 +31,65 @@ fn sha256_hex(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
     hex::encode(hasher.finalize())
+}
+
+struct DeleteRawAfterExistsStorage {
+    inner: Arc<LocalStorage>,
+    raw_key: String,
+    deleted: AtomicBool,
+}
+
+impl DeleteRawAfterExistsStorage {
+    fn new(inner: Arc<LocalStorage>, raw_key: String) -> Self {
+        Self {
+            inner,
+            raw_key,
+            deleted: AtomicBool::new(false),
+        }
+    }
+}
+
+#[async_trait]
+impl StorageBackend for DeleteRawAfterExistsStorage {
+    async fn put(&self, key: &str, data: Bytes) -> StorageResult<()> {
+        self.inner.put(key, data).await
+    }
+
+    async fn put_from_path(&self, key: &str, path: &Path) -> StorageResult<()> {
+        self.inner.put_from_path(key, path).await
+    }
+
+    async fn get(&self, key: &str) -> StorageResult<Bytes> {
+        self.inner.get(key).await
+    }
+
+    async fn get_path(&self, key: &str) -> StorageResult<Option<PathBuf>> {
+        self.inner.get_path(key).await
+    }
+
+    async fn exists(&self, key: &str) -> StorageResult<bool> {
+        if key == self.raw_key && !self.deleted.swap(true, Ordering::SeqCst) {
+            self.inner.delete(key).await?;
+            return Ok(true);
+        }
+        self.inner.exists(key).await
+    }
+
+    async fn delete(&self, key: &str) -> StorageResult<()> {
+        self.inner.delete(key).await
+    }
+
+    async fn list_objects(&self, prefix: &str) -> StorageResult<Vec<String>> {
+        self.inner.list_objects(prefix).await
+    }
+
+    async fn get_size(&self, key: &str) -> StorageResult<u64> {
+        self.inner.get_size(key).await
+    }
+
+    async fn download_to_path(&self, key: &str, dest: &Path) -> StorageResult<()> {
+        self.inner.download_to_path(key, dest).await
+    }
 }
 
 /// Test that GET /internal/state/{oid} returns raw_only for a blob in storage.
@@ -524,5 +586,83 @@ async fn test_lfs_download_xet_only_reconstructs() {
     assert_eq!(download_resp.status(), 200);
 
     let body = test::read_body(download_resp).await;
+    assert_eq!(body.as_ref(), content.as_slice());
+}
+
+#[actix_web::test]
+async fn test_lfs_download_falls_back_to_xet_when_raw_disappears_after_exists() {
+    let storage_dir = tempdir().unwrap();
+    let upload_temp_dir = tempdir().unwrap();
+    let reconstruction_temp_dir = tempdir().unwrap();
+
+    let ctx = create_test_context();
+    let token = test_token_for_keypair(&ctx.keypair, "read write");
+
+    let local_storage = Arc::new(LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap());
+    let conversion_storage: Arc<Box<dyn StorageBackend>> = Arc::new(Box::new(
+        LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap(),
+    ));
+    let index = Arc::new(MetadataIndex::new());
+
+    let config = xet_server::config::ServerConfig {
+        storage: xet_server::config::StorageConfig {
+            upload_temp_dir: Some(upload_temp_dir.path().to_str().unwrap().to_string()),
+            reconstruction_temp_dir: Some(
+                reconstruction_temp_dir.path().to_str().unwrap().to_string(),
+            ),
+            ..ctx.config.storage
+        },
+        ..ctx.config
+    };
+
+    let conversion_config = ConversionConfig {
+        min_conversion_size: 0,
+        delete_raw_after_conversion: false,
+        ..Default::default()
+    };
+
+    let content: Vec<u8> = (0..(128 * 1024)).map(|i| (i % 251) as u8).collect();
+    let oid = sha256_hex(&content);
+    let object_key = format!("lfs/objects/{}", oid);
+    local_storage
+        .put(&object_key, Bytes::from(content.clone()))
+        .await
+        .unwrap();
+
+    let pipeline =
+        ConversionPipeline::new(conversion_storage, index.clone(), conversion_config.clone());
+    pipeline.convert(&oid).await.unwrap();
+    assert!(
+        local_storage.exists(&object_key).await.unwrap(),
+        "test setup keeps raw blob so the route observes raw existence first"
+    );
+
+    let race_storage: Arc<Box<dyn StorageBackend>> = Arc::new(Box::new(
+        DeleteRawAfterExistsStorage::new(local_storage, object_key),
+    ));
+
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::from(race_storage))
+            .app_data(web::Data::from(index))
+            .app_data(web::Data::new(Arc::new(ConvertingOids::new())))
+            .app_data(web::Data::new(conversion_config))
+            .app_data(web::Data::new(ctx.auth_verifier.clone()))
+            .app_data(web::Data::new(config))
+            .route(
+                "/lfs/objects/{oid}",
+                web::get().to(xet_server::api::lfs::download_lfs_object),
+            ),
+    )
+    .await;
+
+    let req = test::TestRequest::get()
+        .uri(&format!("/lfs/objects/{}", oid))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+    let body = test::read_body(resp).await;
     assert_eq!(body.as_ref(), content.as_slice());
 }
