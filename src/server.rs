@@ -47,7 +47,11 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
 
     // Rebuild MetadataIndex from stored shards (stateless server)
     // I1 fix: Pass Arc clone for parallel shard fetching
-    match index.rebuild_from_storage(storage.clone()).await {
+    let rebuild_temp_dir = config.storage.resolve_reconstruction_temp_dir();
+    match index
+        .rebuild_from_storage(storage.clone(), rebuild_temp_dir)
+        .await
+    {
         Ok(count) => tracing::info!("Rebuilt metadata index: {} shards loaded", count),
         Err(e) => tracing::warn!("Failed to rebuild index: {}", e),
     }

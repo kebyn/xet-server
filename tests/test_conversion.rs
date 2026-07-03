@@ -358,8 +358,9 @@ async fn test_rebuild_from_storage() {
 
     // Create a fresh, empty index and rebuild it from storage.
     let fresh_index = MetadataIndex::new();
+    let rebuild_temp_dir = tempfile::tempdir().unwrap();
     let count = fresh_index
-        .rebuild_from_storage(storage.clone())
+        .rebuild_from_storage(storage.clone(), rebuild_temp_dir.path().to_path_buf())
         .await
         .unwrap();
     assert!(count >= 1, "should have rebuilt at least 1 shard");
