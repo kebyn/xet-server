@@ -294,7 +294,7 @@ export XET_UPLOAD_TEMP_DIR=/fast-ssd/xet-uploads  # 可选，默认为 {XET_LOCA
 
 2. **CAS Tokens** (`xet_xxx`)：
    - 短期有效（默认 1 小时，由 `HUB_TOKEN_TTL_SECONDS` 配置）
-   - 绑定到特定仓库和修订版本
+   - 携带签发时的 Hub 上下文（`repo_id` / `repo_type` / `revision`）
    - 由 Hub 签发，CAS 验证
 
 3. **Proxy Tokens** (特殊 CAS token)：
@@ -797,7 +797,7 @@ LFS 对象是原始文件的直接存储，使用 SHA-256 哈希标识。
 
 2. **CAS 层**：CAS 令牌 (xet_xxx)
    - 短期有效（默认 1 小时，由 `HUB_TOKEN_TTL_SECONDS` 配置）
-   - 绑定到特定仓库和修订版本
+   - 携带签发时的 Hub 上下文（`repo_id` / `repo_type` / `revision`）
    - 由 Hub 签发，CAS 验证
 
 ### 2. 授权
@@ -813,7 +813,7 @@ LFS 对象是原始文件的直接存储，使用 SHA-256 哈希标识。
 **权限检查**：
 - 每个 API 端点检查所需作用域
 - `internal` 自动包含 `read` 和 `write`
-- 令牌绑定到特定 `repo_id` 和 `repo_type`
+- `repo_id`、`repo_type` 和 `revision` claims 仅标识 Hub 签发上下文；CAS 内容授权按 scope 和内容能力执行，不强制 repository-scoped CAS object isolation。
 
 ### 3. 数据安全
 
