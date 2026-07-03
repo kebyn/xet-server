@@ -135,7 +135,9 @@ async fn reconstruct_single_file_ref_to_temp(
         .map_err(|e| ReconstructionError::Integrity(e.to_string()))?;
 
     for planned in plan.chunks {
-        if !xorb_cache.contains_key(&planned.xorb_hash) {
+        if let std::collections::hash_map::Entry::Vacant(entry) =
+            xorb_cache.entry(planned.xorb_hash)
+        {
             let key = format!("xorbs/{}", planned.xorb_hash.to_hex());
             let guard = TempPathGuard::new(temp_dir.join(format!(
                 "reconstruct-xorb-{}-{}.tmp",
@@ -146,7 +148,7 @@ async fn reconstruct_single_file_ref_to_temp(
                 .download_to_path(&key, guard.path())
                 .await
                 .map_err(|e| map_storage_error(&key, e))?;
-            xorb_cache.insert(planned.xorb_hash, guard);
+            entry.insert(guard);
         }
 
         let guard = xorb_cache.get(&planned.xorb_hash).unwrap();
