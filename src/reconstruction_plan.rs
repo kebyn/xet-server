@@ -76,6 +76,13 @@ pub fn build_file_chunk_plan(
     let mut xorb_offsets: HashMap<MerkleHash, (usize, usize)> = HashMap::new();
     let mut xorb_chunk_offset = 0usize;
     for xorb_entry in &shard.xorb_entries {
+        if xorb_offsets.contains_key(&xorb_entry.xorb_hash) {
+            return Err(XetError::ParseError(format!(
+                "duplicate xorb hash {} in shard reconstruction plan",
+                xorb_entry.xorb_hash
+            )));
+        }
+
         let num_entries = xorb_entry.num_entries as usize;
         if xorb_chunk_offset
             .checked_add(num_entries)
@@ -86,19 +93,22 @@ pub fn build_file_chunk_plan(
                 xorb_entry.xorb_hash
             )));
         }
-        xorb_offsets
-            .entry(xorb_entry.xorb_hash)
-            .or_insert((xorb_chunk_offset, num_entries));
+        xorb_offsets.insert(xorb_entry.xorb_hash, (xorb_chunk_offset, num_entries));
         xorb_chunk_offset = xorb_chunk_offset
             .checked_add(num_entries)
             .ok_or_else(|| XetError::ParseError("Xorb chunk offset overflow".to_string()))?;
     }
 
-    let raw_chunk_lookup: HashMap<(MerkleHash, u32), MerkleHash> = shard
-        .chunk_lookup_entries
-        .iter()
-        .map(|entry| ((entry.xorb_hash, entry.chunk_index), entry.chunk_hash))
-        .collect();
+    let mut raw_chunk_lookup: HashMap<(MerkleHash, u32), MerkleHash> = HashMap::new();
+    for entry in &shard.chunk_lookup_entries {
+        let key = (entry.xorb_hash, entry.chunk_index);
+        if raw_chunk_lookup.insert(key, entry.chunk_hash).is_some() {
+            return Err(XetError::ParseError(format!(
+                "duplicate raw chunk lookup for xorb {} chunk {}",
+                entry.xorb_hash, entry.chunk_index
+            )));
+        }
+    }
 
     let mut chunks = Vec::new();
     let mut total_unpacked_bytes = 0u64;
@@ -258,6 +268,89 @@ mod tests {
         (shard, file_a, file_b, raw_hashes)
     }
 
+    fn build_one_file_two_xorb_shard() -> (MDBShardFile, MerkleHash, Vec<MerkleHash>) {
+        let mut xb_a = XorbBuilder::new(CompressionScheme::None);
+        let raw_a = b"xorb-a".as_slice();
+        let raw_hash_a = compute_data_hash(raw_a);
+        let (serialized_hash_a, _) = xb_a.add_chunk(raw_a).unwrap();
+        let xorb_chunk_a = XorbChunkBuildEntry {
+            chunk_hash: serialized_hash_a,
+            chunk_byte_range_start: 0,
+            unpacked_segment_bytes: raw_a.len() as u32,
+        };
+        let xorb_a = xb_a.build().unwrap();
+
+        let mut xb_b = XorbBuilder::new(CompressionScheme::None);
+        let raw_b = b"xorb-b".as_slice();
+        let raw_hash_b = compute_data_hash(raw_b);
+        let (serialized_hash_b, _) = xb_b.add_chunk(raw_b).unwrap();
+        let xorb_chunk_b = XorbChunkBuildEntry {
+            chunk_hash: serialized_hash_b,
+            chunk_byte_range_start: 0,
+            unpacked_segment_bytes: raw_b.len() as u32,
+        };
+        let xorb_b = xb_b.build().unwrap();
+
+        let mut sb = ShardBuilder::new();
+        let xorb_index_a = sb
+            .add_xorb_with_raw_chunk_hashes(
+                xorb_a.xorb_hash,
+                xorb_a.total_uncompressed_size as u32,
+                xorb_a.total_compressed_size as u32,
+                vec![xorb_chunk_a],
+                vec![raw_hash_a],
+            )
+            .unwrap();
+        let xorb_index_b = sb
+            .add_xorb_with_raw_chunk_hashes(
+                xorb_b.xorb_hash,
+                xorb_b.total_uncompressed_size as u32,
+                xorb_b.total_compressed_size as u32,
+                vec![xorb_chunk_b],
+                vec![raw_hash_b],
+            )
+            .unwrap();
+
+        let file_hash = MerkleHash::from([3u8; 32]);
+        sb.add_file(
+            file_hash,
+            vec![
+                FileSegment {
+                    xorb_hash: xorb_a.xorb_hash,
+                    xorb_index: xorb_index_a,
+                    chunk_index_start: 0,
+                    chunk_index_end: 1,
+                    unpacked_segment_bytes: raw_a.len() as u32,
+                },
+                FileSegment {
+                    xorb_hash: xorb_b.xorb_hash,
+                    xorb_index: xorb_index_b,
+                    chunk_index_start: 0,
+                    chunk_index_end: 1,
+                    unpacked_segment_bytes: raw_b.len() as u32,
+                },
+            ],
+        );
+
+        let shard = MDBShardFile::parse(&sb.build().unwrap()).unwrap();
+        (shard, file_hash, vec![raw_hash_a, raw_hash_b])
+    }
+
+    fn assert_plan_err_contains(
+        shard: &MDBShardFile,
+        file_hash: &MerkleHash,
+        expected_file_index: Option<usize>,
+        expected: &str,
+    ) {
+        let err = build_file_chunk_plan(shard, file_hash, expected_file_index)
+            .expect_err("expected planner to reject malformed shard");
+        let message = err.to_string();
+        assert!(
+            message.contains(expected),
+            "expected error containing {expected:?}, got {message:?}"
+        );
+    }
+
     #[test]
     fn test_build_file_chunk_plan_selects_only_requested_file() {
         let (shard, file_a, file_b, raw_hashes) = build_two_file_shard();
@@ -273,5 +366,102 @@ mod tests {
         assert_eq!(plan_b.chunks.len(), 1);
         assert_eq!(plan_b.chunks[0].raw_chunk_hash, raw_hashes[1]);
         assert_eq!(plan_b.total_unpacked_bytes, 6);
+    }
+
+    #[test]
+    fn test_build_file_chunk_plan_rejects_duplicate_xorb_hash() {
+        let (mut shard, file_a, _, _) = build_two_file_shard();
+        shard.xorb_entries.push(shard.xorb_entries[0].clone());
+        shard
+            .xorb_chunk_entries
+            .extend(shard.xorb_chunk_entries.clone());
+
+        assert_plan_err_contains(&shard, &file_a, Some(0), "duplicate xorb hash");
+    }
+
+    #[test]
+    fn test_build_file_chunk_plan_rejects_duplicate_raw_lookup_key() {
+        let (mut shard, file_a, _, _) = build_two_file_shard();
+        let mut duplicate = shard.chunk_lookup_entries[0].clone();
+        duplicate.chunk_hash = MerkleHash::from([9u8; 32]);
+        shard.chunk_lookup_entries.push(duplicate);
+
+        assert_plan_err_contains(&shard, &file_a, Some(0), "duplicate raw chunk lookup");
+    }
+
+    #[test]
+    fn test_build_file_chunk_plan_rejects_expected_file_index_mismatch() {
+        let (shard, file_a, _, _) = build_two_file_shard();
+
+        assert_plan_err_contains(&shard, &file_a, Some(1), "Expected file index");
+    }
+
+    #[test]
+    fn test_build_file_chunk_plan_rejects_missing_xorb_reference() {
+        let (mut shard, file_a, _, _) = build_two_file_shard();
+        shard.file_data_entries[0].xorb_hash = MerkleHash::from([8u8; 32]);
+
+        assert_plan_err_contains(&shard, &file_a, Some(0), "references missing xorb");
+    }
+
+    #[test]
+    fn test_build_file_chunk_plan_rejects_invalid_chunk_range() {
+        let (mut shard, file_a, _, _) = build_two_file_shard();
+        shard.file_data_entries[0].chunk_index_start = 2;
+        shard.file_data_entries[0].chunk_index_end = 1;
+
+        assert_plan_err_contains(&shard, &file_a, Some(0), "invalid chunk range");
+    }
+
+    #[test]
+    fn test_build_file_chunk_plan_rejects_chunk_range_out_of_bounds() {
+        let (mut shard, file_a, _, _) = build_two_file_shard();
+        shard.file_data_entries[0].chunk_index_end = 3;
+
+        assert_plan_err_contains(&shard, &file_a, Some(0), "beyond 2 chunks");
+    }
+
+    #[test]
+    fn test_build_file_chunk_plan_rejects_missing_raw_lookup() {
+        let (mut shard, file_a, _, _) = build_two_file_shard();
+        let xorb_hash = shard.xorb_entries[0].xorb_hash;
+        shard
+            .chunk_lookup_entries
+            .retain(|entry| !(entry.xorb_hash == xorb_hash && entry.chunk_index == 0));
+
+        assert_plan_err_contains(&shard, &file_a, Some(0), "Missing raw chunk hash");
+    }
+
+    #[test]
+    fn test_build_file_chunk_plan_rejects_segment_byte_total_mismatch() {
+        let (mut shard, file_a, _, _) = build_two_file_shard();
+        shard.file_data_entries[0].unpacked_segment_bytes = 7;
+
+        assert_plan_err_contains(&shard, &file_a, Some(0), "segment byte total mismatch");
+    }
+
+    #[test]
+    fn test_build_file_chunk_plan_maps_second_xorb_local_chunk_to_global_entry() {
+        let (shard, file_hash, raw_hashes) = build_one_file_two_xorb_shard();
+
+        let plan = build_file_chunk_plan(&shard, &file_hash, Some(0)).unwrap();
+
+        assert_eq!(plan.file_index, 0);
+        assert_eq!(plan.chunks.len(), 2);
+        assert_eq!(plan.total_unpacked_bytes, 12);
+        assert_eq!(plan.chunks[0].xorb_hash, shard.xorb_entries[0].xorb_hash);
+        assert_eq!(plan.chunks[0].xorb_chunk_index, 0);
+        assert_eq!(
+            plan.chunks[0].serialized_chunk_hash,
+            shard.xorb_chunk_entries[0].chunk_hash
+        );
+        assert_eq!(plan.chunks[0].raw_chunk_hash, raw_hashes[0]);
+        assert_eq!(plan.chunks[1].xorb_hash, shard.xorb_entries[1].xorb_hash);
+        assert_eq!(plan.chunks[1].xorb_chunk_index, 0);
+        assert_eq!(
+            plan.chunks[1].serialized_chunk_hash,
+            shard.xorb_chunk_entries[1].chunk_hash
+        );
+        assert_eq!(plan.chunks[1].raw_chunk_hash, raw_hashes[1]);
     }
 }
