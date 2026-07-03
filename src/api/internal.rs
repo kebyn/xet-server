@@ -196,9 +196,16 @@ mod tests {
     use super::*;
     use crate::api::auth::{AuthVerifier, KeyPair, XetClaims, sign_xet_token};
     use crate::config::AuthConfig;
+    use crate::format::shard::MDBShardFile;
+    use crate::format::shard_builder::{FileSegment, ShardBuilder, XorbChunkBuildEntry};
+    use crate::format::xorb_builder::XorbBuilder;
+    use crate::hash::compute_data_hash;
+    use crate::shard_validation::validate_shard_for_index;
     use crate::storage::local::LocalStorage;
+    use crate::types::MerkleHash;
     use actix_web::{App, test, web};
     use bytes::Bytes;
+    use sha2::{Digest, Sha256};
     use std::time::{SystemTime, UNIX_EPOCH};
     use tempfile::tempdir;
 
@@ -247,23 +254,106 @@ mod tests {
         sign_xet_token(&claims, kp).unwrap()
     }
 
+    fn sha256_hex(data: &[u8]) -> String {
+        format!("{:x}", Sha256::digest(data))
+    }
+
+    fn sha256_merkle_hash(data: &[u8]) -> MerkleHash {
+        MerkleHash::from_hex(&sha256_hex(data)).unwrap()
+    }
+
+    fn build_mismatched_file_hash_xorb_and_shard(
+        attacker_bytes: &[u8],
+        victim_bytes: &[u8],
+    ) -> (Vec<u8>, Vec<u8>, String) {
+        let mut xorb_builder =
+            XorbBuilder::new(crate::format::compression::CompressionScheme::None);
+        let (serialized_chunk_hash, compressed_len) =
+            xorb_builder.add_chunk(attacker_bytes).unwrap();
+        let xorb = xorb_builder.build().unwrap();
+        let raw_chunk_hash = compute_data_hash(attacker_bytes);
+        let victim_hash = sha256_merkle_hash(victim_bytes);
+
+        let mut shard_builder = ShardBuilder::new();
+        let xorb_index = shard_builder
+            .add_xorb_with_raw_chunk_hashes(
+                xorb.xorb_hash,
+                xorb.total_uncompressed_size as u32,
+                xorb.total_compressed_size as u32,
+                vec![XorbChunkBuildEntry {
+                    chunk_hash: serialized_chunk_hash,
+                    chunk_byte_range_start: 0,
+                    unpacked_segment_bytes: attacker_bytes.len() as u32,
+                }],
+                vec![raw_chunk_hash],
+            )
+            .unwrap();
+        assert_eq!(compressed_len as usize, attacker_bytes.len());
+        shard_builder.add_file(
+            victim_hash,
+            vec![FileSegment {
+                xorb_hash: xorb.xorb_hash,
+                xorb_index,
+                chunk_index_start: 0,
+                chunk_index_end: 1,
+                unpacked_segment_bytes: attacker_bytes.len() as u32,
+            }],
+        );
+
+        (
+            xorb.data,
+            shard_builder.build().unwrap(),
+            victim_hash.to_hex(),
+        )
+    }
+
     #[actix_web::test]
     async fn test_internal_head_ignores_unverified_shard_poisoning() {
-        let dir = tempdir().unwrap();
+        let storage_dir = tempdir().unwrap();
+        let validation_temp_dir = tempdir().unwrap();
         let storage: Box<dyn StorageBackend> =
-            Box::new(LocalStorage::new(dir.path().to_str().unwrap()).unwrap());
+            Box::new(LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap());
+
+        let attacker_bytes = b"attacker controlled bytes";
+        let victim_bytes = b"victim bytes with different sha256";
+        let (xorb_data, shard_data, victim_oid) =
+            build_mismatched_file_hash_xorb_and_shard(attacker_bytes, victim_bytes);
+        assert_ne!(victim_oid, sha256_hex(attacker_bytes));
+
+        let shard_id = compute_data_hash(&shard_data).to_hex();
+        let parsed_shard = MDBShardFile::parse(&shard_data).unwrap();
+        let xorb_hash = parsed_shard.xorb_entries[0].xorb_hash.to_hex();
+
+        storage
+            .put(&format!("xorbs/{}", xorb_hash), Bytes::from(xorb_data))
+            .await
+            .unwrap();
         storage
             .put(
-                "shards/invalid-poison-shard",
-                Bytes::from_static(b"not a shard"),
+                &format!("shards/{}", shard_id),
+                Bytes::from(shard_data.clone()),
             )
             .await
             .unwrap();
 
+        let validate_result = validate_shard_for_index(
+            &shard_id,
+            &parsed_shard,
+            storage.as_ref(),
+            validation_temp_dir.path(),
+        )
+        .await;
+        let validation_error = validate_result.unwrap_err();
+        assert!(
+            validation_error.contains("File hash mismatch"),
+            "{}",
+            validation_error
+        );
+
         let index = MetadataIndex::new();
+        assert!(index.get_file_refs(&victim_oid).is_none());
         let (kp, auth) = create_test_config();
         let token = create_internal_token(&kp);
-        let victim_oid = "a".repeat(64);
 
         let app = test::init_service(
             App::new()

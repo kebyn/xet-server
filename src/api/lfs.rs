@@ -1080,7 +1080,12 @@ mod tests {
             reconstruction_temp_dir.path(),
         )
         .await;
-        assert!(validate_result.is_err());
+        let validation_error = validate_result.unwrap_err();
+        assert!(
+            validation_error.contains("File hash mismatch"),
+            "{}",
+            validation_error
+        );
         assert!(index_for_assert.get_file_refs(&victim_oid).is_none());
 
         let app = actix_test::init_service(
