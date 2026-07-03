@@ -18,7 +18,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tracing::{debug, error, info};
 
 use crate::api::auth::AuthVerifier;
-use crate::api::guard::{AuthNeed, require_auth};
+use crate::api::guard::{AuthNeed, LfsOperation, require_auth};
 use crate::api::reconstruction::fetch_and_parse_shard;
 use crate::chunking::ChunkConfig;
 use crate::config::{ConversionConfig, ServerConfig};
@@ -243,31 +243,16 @@ pub async fn upload_lfs_object(
     }
 
     // Extract, verify, and authorize the caller in one step.
-    let claims = match require_auth(&req, &auth, AuthNeed::Scope("write")) {
-        Ok(c) => c,
-        Err(rej) => return rej.respond(start),
-    };
-
-    // C6 fix: Verify proxy token is bound to this specific OID and operation
-    if claims.token_type == "proxy" {
-        if let Some(ref bound_oid) = claims.oid
-            && bound_oid != &oid
-        {
-            GLOBAL_METRICS.record_request(403);
-            GLOBAL_METRICS.record_latency(start);
-            return HttpResponse::Forbidden().json(serde_json::json!({
-                "error": "Proxy token is bound to a different OID"
-            }));
-        }
-        if let Some(ref bound_op) = claims.operation
-            && bound_op != "upload"
-        {
-            GLOBAL_METRICS.record_request(403);
-            GLOBAL_METRICS.record_latency(start);
-            return HttpResponse::Forbidden().json(serde_json::json!({
-                "error": "Proxy token is not authorized for upload"
-            }));
-        }
+    if let Err(rej) = require_auth(
+        &req,
+        &auth,
+        AuthNeed::LfsObject {
+            operation: LfsOperation::Upload,
+            oid: oid.clone(),
+            message: "Insufficient scope or invalid LFS upload token",
+        },
+    ) {
+        return rej.respond(start);
     }
 
     // M7 fix: Use a more reasonable pre-check threshold (see xorb.rs for rationale).
@@ -456,31 +441,16 @@ pub async fn download_lfs_object(
     }
 
     // Extract, verify, and authorize the caller in one step.
-    let claims = match require_auth(&req, &auth, AuthNeed::Scope("read")) {
-        Ok(c) => c,
-        Err(rej) => return rej.respond(start),
-    };
-
-    // C6 fix: Verify proxy token is bound to this specific OID and operation
-    if claims.token_type == "proxy" {
-        if let Some(ref bound_oid) = claims.oid
-            && bound_oid != &oid
-        {
-            GLOBAL_METRICS.record_request(403);
-            GLOBAL_METRICS.record_latency(start);
-            return HttpResponse::Forbidden().json(serde_json::json!({
-                "error": "Proxy token is bound to a different OID"
-            }));
-        }
-        if let Some(ref bound_op) = claims.operation
-            && bound_op != "download"
-        {
-            GLOBAL_METRICS.record_request(403);
-            GLOBAL_METRICS.record_latency(start);
-            return HttpResponse::Forbidden().json(serde_json::json!({
-                "error": "Proxy token is not authorized for download"
-            }));
-        }
+    if let Err(rej) = require_auth(
+        &req,
+        &auth,
+        AuthNeed::LfsObject {
+            operation: LfsOperation::Download,
+            oid: oid.clone(),
+            message: "Insufficient scope or invalid LFS download token",
+        },
+    ) {
+        return rej.respond(start);
     }
 
     // STATELESS: Check MetadataIndex for xet data

@@ -24,6 +24,35 @@ use crate::metrics::GLOBAL_METRICS;
 ///
 /// The optional message variants let a handler keep its existing 403 wording
 /// while still routing the decision through `require_auth`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LfsOperation {
+    Upload,
+    Download,
+}
+
+impl LfsOperation {
+    pub fn required_regular_scope(self) -> &'static str {
+        match self {
+            Self::Upload => "write",
+            Self::Download => "read",
+        }
+    }
+
+    pub fn proxy_scope(self) -> &'static str {
+        match self {
+            Self::Upload => "lfs-upload",
+            Self::Download => "lfs-download",
+        }
+    }
+
+    pub fn claim_value(self) -> &'static str {
+        match self {
+            Self::Upload => "upload",
+            Self::Download => "download",
+        }
+    }
+}
+
 pub enum AuthNeed {
     /// Caller must hold `scope` (or be an internal service token). 403 body uses
     /// the default "Insufficient scope" message.
@@ -33,6 +62,29 @@ pub enum AuthNeed {
     /// Caller must present a valid internal service token (defense-in-depth:
     /// sub + scope + token_type all checked). Carries the 403 message to use.
     Internal(&'static str),
+    LfsObject {
+        operation: LfsOperation,
+        oid: String,
+        message: &'static str,
+    },
+}
+
+pub fn authorize_lfs_object(claims: &XetClaims, operation: LfsOperation, oid: &str) -> bool {
+    if is_internal_token(claims) {
+        return true;
+    }
+
+    if claims.token_type == "proxy" {
+        let has_proxy_scope = claims
+            .scope
+            .split_whitespace()
+            .any(|s| s == operation.proxy_scope());
+        return has_proxy_scope
+            && claims.oid.as_deref() == Some(oid)
+            && claims.operation.as_deref() == Some(operation.claim_value());
+    }
+
+    authorize_endpoint(claims, operation.required_regular_scope())
 }
 
 impl AuthNeed {
@@ -41,6 +93,7 @@ impl AuthNeed {
             AuthNeed::Scope(_) => "Insufficient scope",
             AuthNeed::ScopeMsg(_, msg) => msg,
             AuthNeed::Internal(msg) => msg,
+            AuthNeed::LfsObject { message, .. } => message,
         }
     }
 }
@@ -120,11 +173,77 @@ pub fn require_auth(
     let authorized = match need {
         AuthNeed::Scope(scope) | AuthNeed::ScopeMsg(scope, _) => authorize_endpoint(&claims, scope),
         AuthNeed::Internal(_) => is_internal_token(&claims),
+        AuthNeed::LfsObject {
+            operation, ref oid, ..
+        } => authorize_lfs_object(&claims, operation, oid),
     };
 
     if authorized {
         Ok(claims)
     } else {
         Err(AuthReject::Forbidden(forbidden_msg))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xet_auth_types::XetClaims;
+
+    fn claims(
+        scope: &str,
+        token_type: &str,
+        oid: Option<&str>,
+        operation: Option<&str>,
+    ) -> XetClaims {
+        XetClaims {
+            sub: "u".to_string(),
+            scope: scope.to_string(),
+            repo_id: "ns/repo".to_string(),
+            repo_type: "model".to_string(),
+            revision: "main".to_string(),
+            exp: 4_102_444_800,
+            iat: 1_700_000_000,
+            kid: "kid".to_string(),
+            token_type: token_type.to_string(),
+            oid: oid.map(str::to_string),
+            operation: operation.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn test_lfs_proxy_requires_oid_and_operation() {
+        let c = claims("lfs-download", "proxy", None, Some("download"));
+        assert!(!authorize_lfs_object(&c, LfsOperation::Download, "a"));
+
+        let c = claims("lfs-download", "proxy", Some("a"), None);
+        assert!(!authorize_lfs_object(&c, LfsOperation::Download, "a"));
+    }
+
+    #[test]
+    fn test_lfs_proxy_rejects_wrong_oid_or_operation() {
+        let c = claims("lfs-download", "proxy", Some("a"), Some("download"));
+        assert!(!authorize_lfs_object(&c, LfsOperation::Download, "b"));
+        assert!(!authorize_lfs_object(&c, LfsOperation::Upload, "a"));
+    }
+
+    #[test]
+    fn test_lfs_proxy_accepts_exact_binding() {
+        let c = claims("lfs-download", "proxy", Some("a"), Some("download"));
+        assert!(authorize_lfs_object(&c, LfsOperation::Download, "a"));
+
+        let c = claims("lfs-upload", "proxy", Some("a"), Some("upload"));
+        assert!(authorize_lfs_object(&c, LfsOperation::Upload, "a"));
+    }
+
+    #[test]
+    fn test_lfs_proxy_regular_tokens_still_work() {
+        let c = claims("read", "user", None, None);
+        assert!(authorize_lfs_object(&c, LfsOperation::Download, "a"));
+        assert!(!authorize_lfs_object(&c, LfsOperation::Upload, "a"));
+
+        let c = claims("write", "user", None, None);
+        assert!(authorize_lfs_object(&c, LfsOperation::Upload, "a"));
+        assert!(!authorize_lfs_object(&c, LfsOperation::Download, "a"));
     }
 }

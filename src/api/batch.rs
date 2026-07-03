@@ -142,7 +142,7 @@ pub async fn batch_operation(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let expires_in = claims.exp.saturating_sub(now_secs).max(1);
+    let caller_expires_in = claims.exp.saturating_sub(now_secs).max(1);
 
     // Process each object
     let mut response_objects = Vec::new();
@@ -169,9 +169,9 @@ pub async fn batch_operation(
         // I5 fix: Generate proxy token if signing key is available, otherwise fall back to user token
         // I6 fix: If proxy signing is available but fails, return per-object error instead of
         // silently falling back to user's long-lived token (which could leak to client logs)
-        let auth_token_for_action = if can_sign_proxy {
+        let (auth_token_for_action, action_expires_in) = if can_sign_proxy {
             match auth.sign_proxy_token(&claims.sub, &obj.oid, &body.operation) {
-                Some(proxy_token) => proxy_token,
+                Some(proxy) => (proxy.token, proxy.expires_in),
                 None => {
                     tracing::error!(
                         oid = %obj.oid,
@@ -192,7 +192,7 @@ pub async fn batch_operation(
                 }
             }
         } else {
-            token.clone()
+            (token.clone(), caller_expires_in)
         };
 
         let response_obj = match body.operation.as_str() {
@@ -218,7 +218,7 @@ pub async fn batch_operation(
                         upload: Some(BatchAction {
                             href: upload_url,
                             header: headers,
-                            expires_in,
+                            expires_in: action_expires_in,
                         }),
                         download: None,
                     }),
@@ -244,7 +244,7 @@ pub async fn batch_operation(
                         download: Some(BatchAction {
                             href: download_url,
                             header: headers,
-                            expires_in,
+                            expires_in: action_expires_in,
                         }),
                     }),
                     error: None,
