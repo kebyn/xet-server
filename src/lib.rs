@@ -45,9 +45,11 @@ pub mod hash;
 pub mod index;
 pub mod metrics;
 pub mod middleware;
+pub mod reconstruction_plan;
 pub mod server;
 pub mod storage;
 pub mod types;
 pub mod util;
+pub mod xorb_reader;
 
 pub use error::{Result, XetError};

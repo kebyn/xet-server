@@ -14,38 +14,25 @@ use futures_util::{Stream, StreamExt};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tracing::{debug, error, info};
 
 use crate::api::auth::AuthVerifier;
 use crate::api::guard::{AuthNeed, LfsOperation, require_auth};
 use crate::api::reconstruction::fetch_and_parse_shard;
-use crate::chunking::ChunkConfig;
 use crate::config::{ConversionConfig, ServerConfig};
 use crate::conversion::ConvertingOids;
+#[cfg(test)]
 use crate::format::compression::decompress;
 use crate::format::shard::MDBShardFile;
+#[cfg(test)]
 use crate::format::xorb::XorbChunkHeader;
 use crate::index::MetadataIndex;
 use crate::metrics::GLOBAL_METRICS;
 use crate::storage::{StorageBackend, StorageError};
+#[cfg(test)]
 use crate::types::MerkleHash;
-use crate::util::{DualHasher, StreamingHasher, TempFile};
-
-fn max_compressed_len_for_chunk(
-    scheme: crate::format::compression::CompressionScheme,
-    expected_uncompressed_len: usize,
-) -> usize {
-    match scheme {
-        crate::format::compression::CompressionScheme::None => expected_uncompressed_len,
-        // lz4_flex::compress_prepend_size uses the LZ4 block format plus a 4-byte
-        // original-size prefix. The LZ4 worst-case bound is n + n/255 + 16.
-        crate::format::compression::CompressionScheme::LZ4
-        | crate::format::compression::CompressionScheme::ByteGrouping4LZ4 => {
-            expected_uncompressed_len + expected_uncompressed_len / 255 + 20
-        }
-    }
-}
+use crate::util::{DualHasher, TempFile};
+use crate::xorb_reader::{TempPathGuard, extract_chunk_verified_from_file};
 
 /// 从 xorb 原始字节中按偏移定位单个 chunk,校验其完整性后解压。
 ///
@@ -88,132 +75,6 @@ fn extract_chunk_verified(
     )
     .map_err(|e| format!("Failed to decompress chunk: {}", e))?;
     Ok(bytes::Bytes::from(decompressed))
-}
-
-/// Read one chunk from a xorb file at `chunk_offset_bytes`, verify header+compressed
-/// bytes against `expected_hash`, then decompress it.
-///
-/// This keeps reconstruction memory bounded to one compressed chunk plus one
-/// decompressed chunk, instead of loading the entire xorb into memory.
-async fn extract_chunk_verified_from_file(
-    xorb_file: &mut tokio::fs::File,
-    chunk_offset_bytes: u64,
-    expected_uncompressed_len: u32,
-    expected_hash: &MerkleHash,
-) -> std::result::Result<bytes::Bytes, String> {
-    xorb_file
-        .seek(std::io::SeekFrom::Start(chunk_offset_bytes))
-        .await
-        .map_err(|e| {
-            format!(
-                "Failed to seek to chunk offset {}: {}",
-                chunk_offset_bytes, e
-            )
-        })?;
-
-    let mut header_bytes = [0u8; XorbChunkHeader::SIZE];
-    xorb_file.read_exact(&mut header_bytes).await.map_err(|e| {
-        format!(
-            "Failed to read chunk header at offset {}: {}",
-            chunk_offset_bytes, e
-        )
-    })?;
-
-    let mut chunk_cursor = std::io::Cursor::new(&header_bytes);
-    let chunk_header = XorbChunkHeader::deserialize(&mut chunk_cursor)
-        .map_err(|e| format!("Failed to parse chunk header: {}", e))?;
-
-    let max_uncompressed_len = ChunkConfig::default().max_chunk_size();
-    if expected_uncompressed_len as usize > max_uncompressed_len {
-        return Err(format!(
-            "Shard chunk length {} exceeds maximum {} at offset {}",
-            expected_uncompressed_len, max_uncompressed_len, chunk_offset_bytes
-        ));
-    }
-
-    if chunk_header.uncompressed_length != expected_uncompressed_len {
-        return Err(format!(
-            "Chunk length mismatch at offset {}: header declares {} bytes, shard expects {} bytes",
-            chunk_offset_bytes, chunk_header.uncompressed_length, expected_uncompressed_len
-        ));
-    }
-
-    let max_compressed_len = max_compressed_len_for_chunk(
-        chunk_header.compression_scheme,
-        expected_uncompressed_len as usize,
-    );
-    if chunk_header.compressed_length as usize > max_compressed_len {
-        return Err(format!(
-            "Chunk compressed length {} exceeds maximum {} at offset {}",
-            chunk_header.compressed_length, max_compressed_len, chunk_offset_bytes
-        ));
-    }
-
-    let mut compressed_data = vec![0u8; chunk_header.compressed_length as usize];
-    xorb_file
-        .read_exact(&mut compressed_data)
-        .await
-        .map_err(|e| {
-            format!(
-                "Failed to read chunk data at offset {} ({} bytes): {}",
-                chunk_offset_bytes, chunk_header.compressed_length, e
-            )
-        })?;
-
-    // Verify the exact same byte region as xet-core: header + compressed payload.
-    let mut hasher = StreamingHasher::new();
-    hasher.update(&header_bytes);
-    hasher.update(&compressed_data);
-    let actual_hash = hasher.finalize();
-    if actual_hash != *expected_hash {
-        return Err(format!(
-            "Chunk hash mismatch at offset {}: stored data is corrupted",
-            chunk_offset_bytes
-        ));
-    }
-
-    let decompressed = decompress(
-        chunk_header.compression_scheme,
-        &compressed_data,
-        chunk_header.uncompressed_length as usize,
-    )
-    .map_err(|e| format!("Failed to decompress chunk: {}", e))?;
-    Ok(bytes::Bytes::from(decompressed))
-}
-
-struct TempPathGuard {
-    path: Option<std::path::PathBuf>,
-}
-
-impl TempPathGuard {
-    fn new(path: std::path::PathBuf) -> Self {
-        Self { path: Some(path) }
-    }
-
-    fn path(&self) -> &std::path::Path {
-        self.path.as_deref().expect("temp path already cleaned")
-    }
-
-    async fn cleanup(mut self) {
-        if let Some(path) = self.path.take() {
-            let _ = tokio::fs::remove_file(path).await;
-        }
-    }
-}
-
-impl Drop for TempPathGuard {
-    fn drop(&mut self) {
-        let Some(path) = self.path.take() else {
-            return;
-        };
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn_blocking(move || {
-                let _ = std::fs::remove_file(path);
-            });
-        } else {
-            let _ = std::fs::remove_file(path);
-        }
-    }
 }
 
 /// Upload an LFS object (raw file) via streaming.
