@@ -14,7 +14,9 @@ use crate::config::ServerConfig;
 use crate::format::shard::MDBShardFile;
 use crate::index::MetadataIndex;
 use crate::metrics::GLOBAL_METRICS;
+use crate::reconstruction_plan::build_file_chunk_plan;
 use crate::storage::StorageBackend;
+use crate::types::MerkleHash;
 
 // V1 Response structures
 #[derive(Serialize)]
@@ -112,10 +114,30 @@ pub async fn get_reconstruction_v1(
         }));
     }
 
-    // Look up shards for this file
-    let shard_ids = match index.get_shards_for_file(&file_id) {
-        Some(ids) => ids,
+    let target_hash = match MerkleHash::from_hex(&file_id) {
+        Ok(hash) => hash,
+        Err(e) => {
+            error!("Invalid file_id {}: {}", file_id, e);
+            GLOBAL_METRICS.record_request(400);
+            GLOBAL_METRICS.record_latency(start);
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "Invalid file_id format, expected 64-character hex string"
+            }));
+        }
+    };
+
+    // Look up verified shard references for this file. Each ref is a full-file
+    // candidate, so use one complete plan rather than merging candidate metadata.
+    let file_refs = match index.get_file_refs(&file_id) {
+        Some(refs) if !refs.is_empty() => refs,
         None => {
+            GLOBAL_METRICS.record_request(404);
+            GLOBAL_METRICS.record_latency(start);
+            return HttpResponse::NotFound().json(serde_json::json!({
+                "error": "File not found"
+            }));
+        }
+        Some(_) => {
             GLOBAL_METRICS.record_request(404);
             GLOBAL_METRICS.record_latency(start);
             return HttpResponse::NotFound().json(serde_json::json!({
@@ -124,58 +146,96 @@ pub async fn get_reconstruction_v1(
         }
     };
 
-    // Collect xorb information from all shards
-    let mut xorbs = Vec::new();
-    let mut seen_xorbs = HashSet::new();
-
-    for shard_id in shard_ids {
+    let mut selected_xorbs = None;
+    let mut first_candidate_error: Option<String> = None;
+    'candidate: for file_ref in file_refs {
         // Fetch and parse shard using shared helper
-        let shard = match fetch_and_parse_shard(&shard_id, &***storage).await {
+        let shard = match fetch_and_parse_shard(&file_ref.shard_id, &***storage).await {
             Ok(s) => s,
             Err(e) => {
-                // Log detailed error with shard_id, but return generic message to client
-                error!("Failed to fetch/parse shard {}: {}", shard_id, e);
-                GLOBAL_METRICS.record_request(500);
-                GLOBAL_METRICS.record_error();
-                GLOBAL_METRICS.record_latency(start);
-                return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": "Failed to fetch or parse shard data"
-                }));
+                if first_candidate_error.is_none() {
+                    first_candidate_error = Some(format!(
+                        "failed to fetch/parse shard {}: {}",
+                        file_ref.shard_id, e
+                    ));
+                }
+                continue;
             }
         };
 
-        // Extract xorb information (deduplicated)
-        let mut chunk_index_offset = 0;
-        for xorb_entry in &shard.xorb_entries {
-            let xorb_hash = xorb_entry.xorb_hash.to_hex();
-            let xorb_size = xorb_entry.num_bytes_in_xorb as u64;
-            if seen_xorbs.insert(xorb_hash.clone()) {
-                // Collect chunks for this xorb
-                let mut chunks = Vec::new();
-                for i in 0..xorb_entry.num_entries as usize {
-                    if chunk_index_offset + i < shard.xorb_chunk_entries.len() {
-                        let chunk_entry = &shard.xorb_chunk_entries[chunk_index_offset + i];
-                        chunks.push(ChunkInfoV1 {
-                            chunk_hash: chunk_entry.chunk_hash.to_hex(),
-                            offset: chunk_entry.chunk_byte_range_start as u64,
-                            length: chunk_entry.unpacked_segment_bytes as u64,
-                        });
-                    }
+        let plan = match build_file_chunk_plan(&shard, &target_hash, Some(file_ref.file_index)) {
+            Ok(plan) => plan,
+            Err(e) => {
+                if first_candidate_error.is_none() {
+                    first_candidate_error = Some(format!(
+                        "failed to build reconstruction plan for shard {} file index {}: {}",
+                        file_ref.shard_id, file_ref.file_index, e
+                    ));
                 }
-                chunk_index_offset += xorb_entry.num_entries as usize;
-
-                let xorb_info = XorbInfoV1 {
-                    xorb_hash,
-                    size: xorb_size,
-                    chunks,
-                };
-                xorbs.push(xorb_info);
-            } else {
-                // Skip chunks for duplicate xorbs
-                chunk_index_offset += xorb_entry.num_entries as usize;
+                continue;
             }
+        };
+
+        let xorb_sizes: HashMap<String, u64> = shard
+            .xorb_entries
+            .iter()
+            .map(|entry| (entry.xorb_hash.to_hex(), entry.num_bytes_in_xorb as u64))
+            .collect();
+        let mut xorbs = Vec::new();
+        let mut seen_xorbs = HashSet::new();
+        let mut xorb_positions = HashMap::new();
+
+        for planned in &plan.chunks {
+            let xorb_hash = planned.xorb_hash.to_hex();
+            if seen_xorbs.insert(xorb_hash.clone()) {
+                let Some(xorb_size) = xorb_sizes.get(&xorb_hash).copied() else {
+                    if first_candidate_error.is_none() {
+                        first_candidate_error = Some(format!(
+                            "planned xorb {} for file {} missing from shard {}",
+                            xorb_hash, file_id, file_ref.shard_id
+                        ));
+                    }
+                    continue 'candidate;
+                };
+
+                xorb_positions.insert(xorb_hash.clone(), xorbs.len());
+                xorbs.push(XorbInfoV1 {
+                    xorb_hash: xorb_hash.clone(),
+                    size: xorb_size,
+                    chunks: Vec::new(),
+                });
+            }
+
+            let xorb_position = xorb_positions[&xorb_hash];
+            xorbs[xorb_position].chunks.push(ChunkInfoV1 {
+                chunk_hash: planned.raw_chunk_hash.to_hex(),
+                offset: planned.chunk_byte_range_start as u64,
+                length: planned.unpacked_segment_bytes as u64,
+            });
         }
+
+        selected_xorbs = Some(xorbs);
+        break;
     }
+
+    let xorbs = match selected_xorbs {
+        Some(xorbs) => xorbs,
+        None => {
+            error!(
+                "Failed to build reconstruction metadata for {}: {}",
+                file_id,
+                first_candidate_error
+                    .as_deref()
+                    .unwrap_or("no verified shard reference could be planned")
+            );
+            GLOBAL_METRICS.record_request(500);
+            GLOBAL_METRICS.record_error();
+            GLOBAL_METRICS.record_latency(start);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Failed to build reconstruction plan"
+            }));
+        }
+    };
 
     // Calculate total download bytes (sum of all xorb sizes)
     let total_download_bytes: u64 = xorbs.iter().map(|x| x.size).sum();
@@ -221,10 +281,30 @@ pub async fn get_reconstruction(
         }));
     }
 
-    // Look up shards for this file
-    let shard_ids = match index.get_shards_for_file(&file_id) {
-        Some(ids) => ids,
+    let target_hash = match MerkleHash::from_hex(&file_id) {
+        Ok(hash) => hash,
+        Err(e) => {
+            error!("Invalid file_id {}: {}", file_id, e);
+            GLOBAL_METRICS.record_request(400);
+            GLOBAL_METRICS.record_latency(start);
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "Invalid file_id format, expected 64-character hex string"
+            }));
+        }
+    };
+
+    // Look up verified shard references for this file. Each ref is a full-file
+    // candidate, so use one complete plan rather than merging candidate metadata.
+    let file_refs = match index.get_file_refs(&file_id) {
+        Some(refs) if !refs.is_empty() => refs,
         None => {
+            GLOBAL_METRICS.record_request(404);
+            GLOBAL_METRICS.record_latency(start);
+            return HttpResponse::NotFound().json(serde_json::json!({
+                "error": "File not found"
+            }));
+        }
+        Some(_) => {
             GLOBAL_METRICS.record_request(404);
             GLOBAL_METRICS.record_latency(start);
             return HttpResponse::NotFound().json(serde_json::json!({
@@ -233,30 +313,52 @@ pub async fn get_reconstruction(
         }
     };
 
-    // Collect xorb information from all shards (deduplicated)
-    let mut xorbs = Vec::new();
-    let mut fetch_info = HashMap::new();
-    let mut seen_xorbs = HashSet::new();
-
-    for shard_id in shard_ids {
+    let mut selected = None;
+    let mut first_candidate_error: Option<String> = None;
+    for file_ref in file_refs {
         // Fetch and parse shard using shared helper
-        let shard = match fetch_and_parse_shard(&shard_id, &***storage).await {
+        let shard = match fetch_and_parse_shard(&file_ref.shard_id, &***storage).await {
             Ok(s) => s,
             Err(e) => {
-                // Log detailed error with shard_id, but return generic message to client
-                error!("Failed to fetch/parse shard {}: {}", shard_id, e);
-                GLOBAL_METRICS.record_request(500);
-                GLOBAL_METRICS.record_error();
-                GLOBAL_METRICS.record_latency(start);
-                return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": "Failed to fetch or parse shard data"
-                }));
+                if first_candidate_error.is_none() {
+                    first_candidate_error = Some(format!(
+                        "failed to fetch/parse shard {}: {}",
+                        file_ref.shard_id, e
+                    ));
+                }
+                continue;
             }
         };
 
-        // Extract xorb information (deduplicated)
+        let plan = match build_file_chunk_plan(&shard, &target_hash, Some(file_ref.file_index)) {
+            Ok(plan) => plan,
+            Err(e) => {
+                if first_candidate_error.is_none() {
+                    first_candidate_error = Some(format!(
+                        "failed to build reconstruction plan for shard {} file index {}: {}",
+                        file_ref.shard_id, file_ref.file_index, e
+                    ));
+                }
+                continue;
+            }
+        };
+
+        let planned_xorbs: HashSet<String> = plan
+            .chunks
+            .iter()
+            .map(|chunk| chunk.xorb_hash.to_hex())
+            .collect();
+
+        // Extract planned xorb information (deduplicated)
+        let mut xorbs = Vec::new();
+        let mut fetch_info = HashMap::new();
+        let mut seen_xorbs = HashSet::new();
         for xorb_entry in &shard.xorb_entries {
             let xorb_hash = xorb_entry.xorb_hash.to_hex();
+            if !planned_xorbs.contains(&xorb_hash) {
+                continue;
+            }
+
             let xorb_size = xorb_entry.num_bytes_in_xorb as u64;
             // C1 fix: Use xorbs/{hash} format to match conversion pipeline and LFS download.
             let storage_path = format!("xorbs/{}", xorb_hash);
@@ -277,7 +379,29 @@ pub async fn get_reconstruction(
                 );
             }
         }
+
+        selected = Some((xorbs, fetch_info));
+        break;
     }
+
+    let (xorbs, fetch_info) = match selected {
+        Some(selected) => selected,
+        None => {
+            error!(
+                "Failed to build reconstruction metadata for {}: {}",
+                file_id,
+                first_candidate_error
+                    .as_deref()
+                    .unwrap_or("no verified shard reference could be planned")
+            );
+            GLOBAL_METRICS.record_request(500);
+            GLOBAL_METRICS.record_error();
+            GLOBAL_METRICS.record_latency(start);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Failed to build reconstruction plan"
+            }));
+        }
+    };
 
     // Calculate total download bytes (sum of all xorb sizes)
     let total_download_bytes: u64 = xorbs.iter().map(|x| x.size).sum();
@@ -484,5 +608,130 @@ mod tests {
 
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), 400);
+    }
+
+    #[actix_web::test]
+    async fn test_reconstruction_v1_returns_only_requested_file_chunks() {
+        use crate::format::compression::CompressionScheme;
+        use crate::format::shard_builder::{FileSegment, ShardBuilder, XorbChunkBuildEntry};
+        use crate::format::xorb_builder::XorbBuilder;
+        use crate::hash::compute_data_hash;
+        use crate::index::{VerifiedChunkMapping, VerifiedFileMapping, VerifiedShardRegistration};
+        use crate::types::MerkleHash;
+
+        let dir = tempdir().unwrap();
+        let storage: Box<dyn StorageBackend> =
+            Box::new(LocalStorage::new(dir.path().to_str().unwrap()).unwrap());
+        let (kp, auth, config) = create_test_config();
+        let token = create_test_token(&kp, "read");
+        let index = MetadataIndex::new();
+
+        let raw_a = b"aaa";
+        let raw_b = b"bbb";
+        let mut xb = XorbBuilder::new(CompressionScheme::None);
+        let mut xorb_chunks = Vec::new();
+        let mut raw_hashes = Vec::new();
+        let mut offset = 0u32;
+        for raw in [raw_a.as_slice(), raw_b.as_slice()] {
+            raw_hashes.push(compute_data_hash(raw));
+            let (serialized_hash, compressed_len) = xb.add_chunk(raw).unwrap();
+            xorb_chunks.push(XorbChunkBuildEntry {
+                chunk_hash: serialized_hash,
+                chunk_byte_range_start: offset,
+                unpacked_segment_bytes: raw.len() as u32,
+            });
+            offset += 8 + compressed_len;
+        }
+        let xorb = xb.build().unwrap();
+        let file_a = MerkleHash::from([1u8; 32]);
+        let file_b = MerkleHash::from([2u8; 32]);
+        let mut sb = ShardBuilder::new();
+        let xorb_index = sb
+            .add_xorb_with_raw_chunk_hashes(
+                xorb.xorb_hash,
+                xorb.total_uncompressed_size as u32,
+                xorb.total_compressed_size as u32,
+                xorb_chunks,
+                raw_hashes.clone(),
+            )
+            .unwrap();
+        sb.add_file(
+            file_a,
+            vec![FileSegment {
+                xorb_hash: xorb.xorb_hash,
+                xorb_index,
+                chunk_index_start: 0,
+                chunk_index_end: 1,
+                unpacked_segment_bytes: 3,
+            }],
+        );
+        sb.add_file(
+            file_b,
+            vec![FileSegment {
+                xorb_hash: xorb.xorb_hash,
+                xorb_index,
+                chunk_index_start: 1,
+                chunk_index_end: 2,
+                unpacked_segment_bytes: 3,
+            }],
+        );
+        let shard_data = sb.build().unwrap();
+        let shard_id = compute_data_hash(&shard_data).to_hex();
+        storage
+            .put(
+                &format!("shards/{}", shard_id),
+                bytes::Bytes::from(shard_data),
+            )
+            .await
+            .unwrap();
+        index.register_verified_shard(VerifiedShardRegistration {
+            shard_id,
+            files: vec![
+                VerifiedFileMapping {
+                    file_hash: file_a.to_hex(),
+                    file_index: 0,
+                },
+                VerifiedFileMapping {
+                    file_hash: file_b.to_hex(),
+                    file_index: 1,
+                },
+            ],
+            chunks: vec![
+                VerifiedChunkMapping {
+                    chunk_hash: raw_hashes[0].to_hex(),
+                    xorb_hash: xorb.xorb_hash.to_hex(),
+                    chunk_index: 0,
+                },
+                VerifiedChunkMapping {
+                    chunk_hash: raw_hashes[1].to_hex(),
+                    xorb_hash: xorb.xorb_hash.to_hex(),
+                    chunk_index: 1,
+                },
+            ],
+        });
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(index))
+                .app_data(web::Data::new(storage))
+                .app_data(web::Data::new(config))
+                .app_data(web::Data::new(auth))
+                .route(
+                    "/v1/reconstructions/{file_id}",
+                    web::get().to(get_reconstruction_v1),
+                ),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri(&format!("/v1/reconstructions/{}", file_b.to_hex()))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        let chunks = body["xorbs"][0]["chunks"].as_array().unwrap();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0]["chunk_hash"], raw_hashes[1].to_hex());
     }
 }
