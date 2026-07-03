@@ -13,6 +13,7 @@ use crate::config::ServerConfig;
 use crate::format::shard::MDBShardFile;
 use crate::index::MetadataIndex;
 use crate::metrics::GLOBAL_METRICS;
+use crate::shard_validation::validate_shard_for_index;
 use crate::storage::StorageBackend;
 use crate::util::{StreamingHasher, TempFile};
 
@@ -153,6 +154,30 @@ pub async fn upload_shard(
     };
 
     if already_exists {
+        let validation_temp_dir = config.storage.resolve_reconstruction_temp_dir();
+        let registration = match validate_shard_for_index(
+            &shard_id,
+            &shard,
+            storage.get_ref().as_ref(),
+            &validation_temp_dir,
+        )
+        .await
+        {
+            Ok(registration) => registration,
+            Err(e) => {
+                error!(
+                    "Shard validation failed for existing shard {}: {}",
+                    shard_id, e
+                );
+                GLOBAL_METRICS.record_request(400);
+                GLOBAL_METRICS.record_latency(start);
+                return HttpResponse::BadRequest().json(serde_json::json!({
+                    "error": format!("Shard validation failed: {}", e)
+                }));
+            }
+        };
+        index.register_verified_shard(registration);
+
         GLOBAL_METRICS.record_request(200);
         GLOBAL_METRICS.record_storage_operation();
         GLOBAL_METRICS.record_latency(start);
@@ -175,21 +200,33 @@ pub async fn upload_shard(
         }));
     }
 
-    // Update metadata index with actual file/chunk data from full parse
-    let file_hashes: Vec<String> = shard.file_hashes().iter().map(|h| h.to_hex()).collect();
-    let chunk_mappings: Vec<(String, String, u32)> = shard
-        .chunk_mappings()
-        .iter()
-        .map(|(c, x, i)| (c.to_hex(), x.to_hex(), *i))
-        .collect();
+    let validation_temp_dir = config.storage.resolve_reconstruction_temp_dir();
+    let registration = match validate_shard_for_index(
+        &shard_id,
+        &shard,
+        storage.get_ref().as_ref(),
+        &validation_temp_dir,
+    )
+    .await
+    {
+        Ok(registration) => registration,
+        Err(e) => {
+            error!("Shard validation failed for shard {}: {}", shard_id, e);
+            GLOBAL_METRICS.record_request(400);
+            GLOBAL_METRICS.record_latency(start);
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Shard validation failed: {}", e)
+            }));
+        }
+    };
 
-    index.register_shard(shard_id.clone(), file_hashes.clone(), chunk_mappings);
+    let file_count = registration.files.len();
+    let chunk_count = registration.chunks.len();
+    index.register_verified_shard(registration);
 
     info!(
         "Uploaded shard {} with {} files and {} chunks",
-        shard_id,
-        file_hashes.len(),
-        shard.chunk_mappings().len()
+        shard_id, file_count, chunk_count
     );
 
     GLOBAL_METRICS.record_request(200);
