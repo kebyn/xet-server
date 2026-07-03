@@ -238,14 +238,19 @@ pub async fn download_xorb(
         }));
     }
 
-    // Validate hash format
-    if hash_str.len() != 64 || !hash_str.chars().all(|c| c.is_ascii_hexdigit()) {
-        GLOBAL_METRICS.record_request(400);
-        GLOBAL_METRICS.record_latency(start);
-        return HttpResponse::BadRequest().json(serde_json::json!({
-            "error": "Invalid hash format, expected 64-character hex string"
-        }));
-    }
+    // Parse and canonicalize the hash so downloads use the same storage key as
+    // uploads, which store verified xorb identities in lowercase hex.
+    let xorb_hash = match MerkleHash::from_hex(&hash_str) {
+        Ok(h) => h,
+        Err(e) => {
+            GLOBAL_METRICS.record_request(400);
+            GLOBAL_METRICS.record_latency(start);
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Invalid hash format: {}", e)
+            }));
+        }
+    };
+    let xorb_hash_hex = xorb_hash.to_hex();
 
     // Extract, verify, and authorize the caller in one step.
     if let Err(rej) = require_auth(&req, &auth, AuthNeed::Scope("read")) {
@@ -255,7 +260,7 @@ pub async fn download_xorb(
     // C2 fix: Use streaming download instead of loading entire xorb into memory.
     // This prevents DoS via large xorb downloads (xorbs can be up to 512MB).
     // Try file-based streaming first (local storage), fall back to in-memory for S3.
-    let xorb_key = format!("xorbs/{}", hash_str);
+    let xorb_key = format!("xorbs/{}", xorb_hash_hex);
 
     // Try streaming path (local storage: zero-copy file access)
     match storage.get_path(&xorb_key).await {
