@@ -561,4 +561,79 @@ mod tests {
             "unexpected error: {err}"
         );
     }
+
+    #[tokio::test]
+    async fn test_validate_shard_rejects_xorb_compressed_size_mismatch() {
+        let raw_chunk = b"content with incorrect declared compressed payload size";
+        let declared_file_hash = sha256_merkle_hash(raw_chunk);
+        let xorb = build_xorb(&[raw_chunk]);
+        let shard = build_shard_from_xorb(
+            xorb.xorb_hash,
+            &xorb,
+            declared_file_hash,
+            xorb.chunks.clone(),
+            xorb.raw_hashes.clone(),
+            xorb.total_uncompressed_size,
+            xorb.total_compressed_size + 1,
+        );
+
+        let storage_dir = tempdir().unwrap();
+        let temp_dir = tempdir().unwrap();
+        let storage = LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap();
+        storage
+            .put(
+                &format!("xorbs/{}", xorb.xorb_hash.to_hex()),
+                Bytes::from(xorb.data),
+            )
+            .await
+            .unwrap();
+
+        let err = validate_shard_for_index("test-shard", &shard, &storage, temp_dir.path())
+            .await
+            .unwrap_err();
+
+        let err = err.to_lowercase();
+        assert!(
+            err.contains("xorb") && err.contains("size"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_validate_shard_rejects_xorb_num_entries_mismatch() {
+        let first = b"first chunk for count mismatch".as_slice();
+        let second = b"second chunk for count mismatch".as_slice();
+        let xorb = build_xorb(&[first, second]);
+        let declared_file_hash = sha256_merkle_hash(&[first, second].concat());
+        let shard = build_shard_from_xorb(
+            xorb.xorb_hash,
+            &xorb,
+            declared_file_hash,
+            vec![xorb.chunks[0].clone()],
+            vec![xorb.raw_hashes[0]],
+            xorb.total_uncompressed_size,
+            xorb.total_compressed_size,
+        );
+
+        let storage_dir = tempdir().unwrap();
+        let temp_dir = tempdir().unwrap();
+        let storage = LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap();
+        storage
+            .put(
+                &format!("xorbs/{}", xorb.xorb_hash.to_hex()),
+                Bytes::from(xorb.data),
+            )
+            .await
+            .unwrap();
+
+        let err = validate_shard_for_index("test-shard", &shard, &storage, temp_dir.path())
+            .await
+            .unwrap_err();
+
+        let err = err.to_lowercase();
+        assert!(
+            err.contains("xorb") && err.contains("count"),
+            "unexpected error: {err}"
+        );
+    }
 }

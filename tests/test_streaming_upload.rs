@@ -11,7 +11,8 @@ use tempfile::tempdir;
 
 use common::{TestContext, test_token_for_keypair};
 use xet_server::api::auth::{AuthVerifier, KeyPair};
-use xet_server::format::xorb::XorbObjectInfoV1;
+use xet_server::format::compression::CompressionScheme;
+use xet_server::format::xorb_builder::XorbBuilder;
 use xet_server::hash::compute_data_hash;
 use xet_server::index::MetadataIndex;
 use xet_server::storage::StorageBackend;
@@ -85,22 +86,10 @@ fn create_test_config_small_limit(temp_dir: &str) -> TestContext {
 
 /// Helper to create a valid xorb with proper structure and hash
 fn create_valid_xorb(content: &[u8]) -> (Vec<u8>, String) {
-    let chunk_hash = compute_data_hash(content);
-
-    let footer = XorbObjectInfoV1 {
-        xorb_hash: chunk_hash,
-        chunk_hashes: vec![chunk_hash],
-        chunk_boundary_offsets: vec![content.len() as u32],
-        unpacked_chunk_offsets: vec![content.len() as u32],
-    };
-
-    let footer_bytes = footer.to_bytes();
-    let mut xorb_data = Vec::new();
-    xorb_data.extend_from_slice(content);
-    xorb_data.extend_from_slice(&footer_bytes);
-
-    let xorb_hash = compute_data_hash(&xorb_data);
-    (xorb_data, xorb_hash.to_hex())
+    let mut builder = XorbBuilder::new(CompressionScheme::None);
+    builder.add_chunk(content).unwrap();
+    let xorb = builder.build().unwrap();
+    (xorb.data, xorb.xorb_hash.to_hex())
 }
 
 #[actix_web::test]
