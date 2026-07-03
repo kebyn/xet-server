@@ -13,7 +13,7 @@ use crate::config::ServerConfig;
 use crate::metrics::GLOBAL_METRICS;
 use crate::storage::{StorageBackend, StorageError};
 use crate::types::MerkleHash;
-use crate::util::{StreamingHasher, TempFile};
+use crate::util::TempFile;
 
 #[derive(Serialize)]
 struct XorbUploadResponse {
@@ -94,7 +94,6 @@ pub async fn upload_xorb(
         }
     };
 
-    let mut hasher = StreamingHasher::new();
     let max_bytes = config.server.max_body_size_bytes() as u64;
     let mut total_bytes: u64 = 0;
 
@@ -120,7 +119,6 @@ pub async fn upload_xorb(
             }));
         }
 
-        hasher.update(&chunk);
         if let Err(e) = temp_file.write_all(&chunk).await {
             error!("Failed to write to temp file: {}", e);
             GLOBAL_METRICS.record_request(500);
@@ -142,23 +140,24 @@ pub async fn upload_xorb(
         }));
     }
 
-    // Verify xorb hash
-    let actual_hash = hasher.finalize();
-    if actual_hash != expected_hash {
-        GLOBAL_METRICS.record_request(400);
-        GLOBAL_METRICS.record_latency(start);
-        return HttpResponse::BadRequest().json(serde_json::json!({
-            "error": format!("Hash mismatch: expected {}, got {}", expected_hash.to_hex(), actual_hash.to_hex())
-        }));
-    }
-
-    // Verify xorb structure and chunk hashes from temp file on disk
+    // Verify xorb structure and identity from temp file on disk.
     let temp_path = temp_file.path().to_path_buf();
-    if let Err(e) = crate::format::xorb::verify_xorb_from_file(&temp_path) {
+    let xorb_info = match crate::format::xorb::verify_xorb_from_file_with_info(&temp_path) {
+        Ok(info) => info,
+        Err(e) => {
+            GLOBAL_METRICS.record_request(400);
+            GLOBAL_METRICS.record_latency(start);
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Xorb verification failed: {}", e)
+            }));
+        }
+    };
+
+    if xorb_info.xorb_hash != expected_hash {
         GLOBAL_METRICS.record_request(400);
         GLOBAL_METRICS.record_latency(start);
         return HttpResponse::BadRequest().json(serde_json::json!({
-            "error": format!("Xorb verification failed: {}", e)
+            "error": format!("Hash mismatch: expected {}, got {}", expected_hash.to_hex(), xorb_info.xorb_hash.to_hex())
         }));
     }
 
@@ -171,7 +170,8 @@ pub async fn upload_xorb(
     //    affects metrics/dedup accounting, not data integrity.
     // For strict dedup accounting, storage backends should implement put_if_absent.
     // C1 fix: Use xorbs/{hash} format to match conversion pipeline and LFS download.
-    let xorb_key = format!("xorbs/{}", hash_str);
+    let xorb_hash_hex = xorb_info.xorb_hash.to_hex();
+    let xorb_key = format!("xorbs/{}", xorb_hash_hex);
     let already_exists = match storage.exists(&xorb_key).await {
         Ok(exists) => exists,
         Err(e) => {
@@ -208,7 +208,7 @@ pub async fn upload_xorb(
         }));
     }
 
-    info!("Uploaded xorb {} ({} bytes)", hash_str, total_bytes);
+    info!("Uploaded xorb {} ({} bytes)", xorb_hash_hex, total_bytes);
 
     GLOBAL_METRICS.record_request(200);
     GLOBAL_METRICS.record_storage_operation();

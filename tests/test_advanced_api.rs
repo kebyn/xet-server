@@ -13,29 +13,30 @@ use bytes::Bytes;
 use tempfile::tempdir;
 
 use common::{TestContext, test_config_with_new_key, test_token_for_keypair};
-use xet_server::format::xorb::XorbObjectInfoV1;
+use xet_server::format::compression::CompressionScheme;
+use xet_server::format::shard_builder::{FileSegment, ShardBuilder, XorbChunkBuildEntry};
+use xet_server::format::xorb_builder::XorbBuilder;
+use xet_server::hash::compute_data_hash;
 use xet_server::index::MetadataIndex;
 use xet_server::storage::StorageBackend;
 use xet_server::storage::local::LocalStorage;
+use xet_server::types::MerkleHash;
 
 /// Helper to create a valid xorb with proper structure and hash
 fn create_valid_xorb(content: &[u8]) -> (Vec<u8>, String) {
-    let chunk_hash = xet_server::hash::compute_data_hash(content);
+    let mut builder = XorbBuilder::new(CompressionScheme::None);
+    builder.add_chunk(content).unwrap();
+    let xorb = builder.build().unwrap();
+    (xorb.data, xorb.xorb_hash.to_hex())
+}
 
-    let footer = XorbObjectInfoV1 {
-        xorb_hash: chunk_hash,
-        chunk_hashes: vec![chunk_hash],
-        chunk_boundary_offsets: vec![content.len() as u32],
-        unpacked_chunk_offsets: vec![content.len() as u32],
-    };
+fn sha256_merkle_hash(data: &[u8]) -> MerkleHash {
+    use sha2::{Digest, Sha256};
 
-    let footer_bytes = footer.to_bytes();
-    let mut xorb_data = Vec::new();
-    xorb_data.extend_from_slice(content);
-    xorb_data.extend_from_slice(&footer_bytes);
-
-    let xorb_hash = xet_server::hash::compute_data_hash(&xorb_data);
-    (xorb_data, xorb_hash.to_hex())
+    let digest = Sha256::digest(data);
+    let mut bytes = [0u8; 32];
+    bytes.copy_from_slice(&digest);
+    MerkleHash::from(bytes)
 }
 
 #[actix_web::test]
@@ -75,13 +76,18 @@ async fn test_full_upload_workflow() {
     )
     .await;
 
-    // Step 1: Upload a xorb
-    let (xorb_data, xorb_hash) = create_valid_xorb(b"test xorb data with some content");
+    // Step 1: Upload a xorb through the public API.
+    let raw_chunk = b"test xorb data with some content";
+    let mut xorb_builder = XorbBuilder::new(CompressionScheme::None);
+    let (serialized_chunk_hash, _compressed_len) = xorb_builder.add_chunk(raw_chunk).unwrap();
+    let xorb = xorb_builder.build().unwrap();
+    let xorb_hash = xorb.xorb_hash.to_hex();
+    let raw_chunk_hash = compute_data_hash(raw_chunk);
 
     let req = test::TestRequest::post()
         .uri(&format!("/v1/xorbs/default/{}", xorb_hash))
         .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_payload(Bytes::from(xorb_data.clone()))
+        .set_payload(Bytes::from(xorb.data.clone()))
         .to_request();
 
     let resp = test::call_service(&app, req).await;
@@ -91,7 +97,7 @@ async fn test_full_upload_workflow() {
     let req = test::TestRequest::post()
         .uri(&format!("/v1/xorbs/default/{}", xorb_hash))
         .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_payload(Bytes::from(xorb_data))
+        .set_payload(Bytes::from(xorb.data.clone()))
         .to_request();
 
     let resp = test::call_service(&app, req).await;
@@ -107,29 +113,57 @@ async fn test_full_upload_workflow() {
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), 400);
 
-    // Step 4: Query reconstruction (should return 404 since no shard uploaded)
-    let file_id = "b".repeat(64);
-    let req = test::TestRequest::get()
-        .uri(&format!("/v2/reconstructions/{}", file_id))
+    // Step 4: Upload a shard that references the public xorb.
+    let mut shard_builder = ShardBuilder::new();
+    let xorb_index = shard_builder
+        .add_xorb_with_raw_chunk_hashes(
+            xorb.xorb_hash,
+            xorb.total_uncompressed_size as u32,
+            xorb.total_compressed_size as u32,
+            vec![XorbChunkBuildEntry {
+                chunk_hash: serialized_chunk_hash,
+                chunk_byte_range_start: 0,
+                unpacked_segment_bytes: raw_chunk.len() as u32,
+            }],
+            vec![raw_chunk_hash],
+        )
+        .unwrap();
+    shard_builder.add_file(
+        sha256_merkle_hash(raw_chunk),
+        vec![FileSegment {
+            xorb_hash: xorb.xorb_hash,
+            xorb_index,
+            chunk_index_start: 0,
+            chunk_index_end: 1,
+            unpacked_segment_bytes: raw_chunk.len() as u32,
+        }],
+    );
+    let shard_data = shard_builder.build().unwrap();
+    let req = test::TestRequest::post()
+        .uri("/v1/shards")
         .insert_header(("Authorization", format!("Bearer {}", token)))
-        .to_request();
-
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), 404);
-
-    // Step 5: Query global dedup for a chunk
-    let chunk_hash = "c".repeat(64);
-    let req = test::TestRequest::get()
-        .uri(&format!("/v1/chunks/default/{}", chunk_hash))
-        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_payload(Bytes::from(shard_data))
         .to_request();
 
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), 200);
 
+    // Step 5: Query global dedup for the raw chunk hash registered by the shard.
+    let req = test::TestRequest::get()
+        .uri(&format!("/v1/chunks/default/{}", raw_chunk_hash.to_hex()))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["found"], true);
+    assert_eq!(body["xorb_hash"], xorb_hash);
+    assert_eq!(body["chunk_index"], 0);
+
     // Step 6: Query global dedup with invalid prefix
     let req = test::TestRequest::get()
-        .uri(&format!("/v1/chunks/invalid/{}", chunk_hash))
+        .uri(&format!("/v1/chunks/invalid/{}", raw_chunk_hash.to_hex()))
         .insert_header(("Authorization", format!("Bearer {}", token)))
         .to_request();
 

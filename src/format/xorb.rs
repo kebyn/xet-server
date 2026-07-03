@@ -83,6 +83,21 @@ impl XorbObjectInfoV1 {
     pub const IDENT_MAIN: [u8; 7] = *b"XETBLOB";
     pub const IDENT_HASHES: [u8; 7] = *b"XBLBHSH";
     pub const IDENT_BOUNDARIES: [u8; 7] = *b"XBLBBND";
+    // A 16MB xorb with 8KB min chunks gives max ~2048 chunks in normal use.
+    // Keep this higher for compatibility while bounding verifier allocations.
+    pub const MAX_CHUNKS_PER_XORB: u32 = 100_000;
+
+    pub fn serialized_len_for_num_chunks(num_chunks: usize) -> u64 {
+        60 + 40 * num_chunks as u64
+    }
+
+    pub fn max_serialized_len() -> u64 {
+        Self::serialized_len_for_num_chunks(Self::MAX_CHUNKS_PER_XORB as usize)
+    }
+
+    pub fn serialized_len(&self) -> u64 {
+        Self::serialized_len_for_num_chunks(self.chunk_hashes.len())
+    }
 
     /// Serialize to bytes
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -141,15 +156,11 @@ impl XorbObjectInfoV1 {
         reader.read_exact(&mut num_buf)?;
         let num_chunks = u32::from_le_bytes(num_buf);
 
-        // I7 fix: Reduce MAX_CHUNKS_PER_XORB from 1M to 100K to limit per-parse allocation.
-        // A 16MB xorb with 8KB min chunks gives max ~2048 chunks (realistic).
-        // At 100K limit: max allocation is ~4MB per parse (vs 40MB at 1M).
-        // Concurrent parse of 10 shards: ~40MB total (vs 400MB at 1M).
-        const MAX_CHUNKS_PER_XORB: u32 = 100_000;
-        if num_chunks > MAX_CHUNKS_PER_XORB {
+        if num_chunks > Self::MAX_CHUNKS_PER_XORB {
             return Err(XetError::ParseError(format!(
                 "Too many chunks: {} exceeds maximum {}",
-                num_chunks, MAX_CHUNKS_PER_XORB
+                num_chunks,
+                Self::MAX_CHUNKS_PER_XORB
             )));
         }
 
@@ -344,8 +355,8 @@ pub fn verify_xorb_from_file_with_info(path: &Path) -> XetResult<VerifiedXorbInf
         )));
     }
 
-    // Read last 64KB (or entire file if smaller) to find the footer
-    let scan_size = std::cmp::min(file_len, 64 * 1024) as usize;
+    // Read the largest possible footer window (or entire file if smaller) to find the footer.
+    let scan_size = std::cmp::min(file_len, XorbObjectInfoV1::max_serialized_len()) as usize;
     let mut tail_buf = vec![0u8; scan_size];
     file.seek(SeekFrom::End(-(scan_size as i64))).map_err(|e| {
         XetError::IoError(std::io::Error::other(format!(
@@ -385,6 +396,16 @@ pub fn verify_xorb_from_file_with_info(path: &Path) -> XetResult<VerifiedXorbInf
     // Parse footer from tail_buf at the position where IDENT_HASHES was found
     let footer_offset_in_tail = (footer_start - tail_file_offset) as usize;
     let footer = XorbObjectInfoV1::from_bytes(&tail_buf[footer_offset_in_tail..])?;
+    let expected_footer_len = footer.serialized_len();
+    let footer_end = footer_start
+        .checked_add(expected_footer_len)
+        .ok_or_else(|| XetError::ParseError("Xorb footer end offset overflow".to_string()))?;
+    if footer_end != file_len {
+        return Err(XetError::ParseError(format!(
+            "Xorb footer/trailing bytes mismatch: footer starts at {}, expected footer length {}, file length {}",
+            footer_start, expected_footer_len, file_len
+        )));
+    }
 
     // Verify chunk hashes by reading each chunk from the file incrementally
     let mut chunk_info: Vec<(MerkleHash, u64)> = Vec::with_capacity(footer.chunk_hashes.len());
@@ -522,4 +543,49 @@ pub fn verify_xorb_from_file_with_info(path: &Path) -> XetResult<VerifiedXorbInf
         total_unpacked_bytes,
         total_compressed_payload_bytes,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::format::compression::CompressionScheme;
+    use crate::format::xorb_builder::XorbBuilder;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_verify_xorb_from_file_with_info_handles_large_footer_window() {
+        let mut builder = XorbBuilder::new(CompressionScheme::None);
+        for i in 0..1700 {
+            let chunk = [i as u8];
+            builder.add_chunk(&chunk).unwrap();
+        }
+        let xorb = builder.build().unwrap();
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("large-footer.xorb");
+        std::fs::write(&path, &xorb.data).unwrap();
+
+        let info = verify_xorb_from_file_with_info(&path).unwrap();
+        assert_eq!(info.xorb_hash, xorb.xorb_hash);
+        assert_eq!(info.chunks.len(), 1700);
+    }
+
+    #[test]
+    fn test_verify_xorb_from_file_with_info_rejects_trailing_bytes() {
+        let mut builder = XorbBuilder::new(CompressionScheme::None);
+        builder.add_chunk(b"chunk").unwrap();
+        let mut xorb = builder.build().unwrap().data;
+        xorb.extend_from_slice(b"trailing bytes");
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("trailing.xorb");
+        std::fs::write(&path, &xorb).unwrap();
+
+        let err = verify_xorb_from_file_with_info(&path).unwrap_err();
+        assert!(
+            err.to_string().to_lowercase().contains("trailing")
+                || err.to_string().to_lowercase().contains("footer"),
+            "unexpected error: {err}"
+        );
+    }
 }
