@@ -174,6 +174,13 @@ fn row_to_file_entry(row: &sqlx::sqlite::SqliteRow) -> Result<FileEntry, Metadat
     })
 }
 
+fn escape_like_pattern(input: &str) -> String {
+    input
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
 impl SqliteMetadataStore {
     /// Create a new SQLite metadata store with connection pool
     pub async fn new(path: &str, pool_size: u32) -> Result<Self, MetadataError> {
@@ -560,19 +567,39 @@ impl MetadataStore for SqliteMetadataStore {
         commit_id: &str,
         prefix: &str,
     ) -> Result<Vec<FileEntry>, MetadataError> {
-        // I10: Escape SQL LIKE metacharacters to prevent logic bugs
-        let escaped_prefix = prefix.replace('%', "\\%").replace('_', "\\_");
-        let prefix_pattern = format!("{}%", escaped_prefix);
+        let normalized_prefix = prefix.trim_matches('/');
 
-        let rows = sqlx::query(
-            "SELECT path, repo_id, commit_id, size, cas_hash, is_lfs FROM file_tree WHERE repo_id = ?1 AND commit_id = ?2 AND path LIKE ?3 ESCAPE '\\' ORDER BY path"
-        )
-        .bind(repo_id)
-        .bind(commit_id)
-        .bind(&prefix_pattern)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+        let rows = if normalized_prefix.is_empty() {
+            sqlx::query(
+                "SELECT path, repo_id, commit_id, size, cas_hash, is_lfs \
+                 FROM file_tree \
+                 WHERE repo_id = ?1 AND commit_id = ?2 \
+                 ORDER BY path",
+            )
+            .bind(repo_id)
+            .bind(commit_id)
+            .fetch_all(&self.pool)
+            .await
+        } else {
+            let escaped_prefix = escape_like_pattern(normalized_prefix);
+            let child_pattern = format!("{}/%", escaped_prefix);
+            sqlx::query(
+                "SELECT path, repo_id, commit_id, size, cas_hash, is_lfs \
+                 FROM file_tree \
+                 WHERE repo_id = ?1 \
+                   AND commit_id = ?2 \
+                   AND (path = ?3 OR path LIKE ?4 ESCAPE '\\') \
+                 ORDER BY path",
+            )
+            .bind(repo_id)
+            .bind(commit_id)
+            .bind(normalized_prefix)
+            .bind(&child_pattern)
+            .fetch_all(&self.pool)
+            .await
+        };
+
+        let rows = rows.map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
         rows.iter().map(row_to_file_entry).collect()
     }
@@ -711,4 +738,59 @@ fn chrono_timestamp() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metadata::{FileEntry, MetadataStore, RepoType};
+
+    #[tokio::test]
+    async fn test_get_file_tree_prefix_respects_path_boundary() {
+        let store = SqliteMetadataStore::in_memory().await.unwrap();
+        let repo = store
+            .create_repo("ns", "repo", RepoType::Model, false)
+            .await
+            .unwrap();
+        let commit_id = "c1";
+        store
+            .add_revision(Revision {
+                commit_id: commit_id.to_string(),
+                repo_id: repo.id,
+                parent: None,
+                message: "Initial".to_string(),
+                author: "ns".to_string(),
+                created_at: 1000,
+            })
+            .await
+            .unwrap();
+        store
+            .add_file_entries(vec![
+                FileEntry {
+                    path: "models/a.bin".to_string(),
+                    repo_id: repo.id,
+                    commit_id: commit_id.to_string(),
+                    size: 1,
+                    cas_hash: "h1".to_string(),
+                    is_lfs: true,
+                },
+                FileEntry {
+                    path: "models2/b.bin".to_string(),
+                    repo_id: repo.id,
+                    commit_id: commit_id.to_string(),
+                    size: 1,
+                    cas_hash: "h2".to_string(),
+                    is_lfs: true,
+                },
+            ])
+            .await
+            .unwrap();
+
+        let entries = store
+            .get_file_tree_prefix(repo.id, commit_id, "models")
+            .await
+            .unwrap();
+        let paths: Vec<_> = entries.into_iter().map(|e| e.path).collect();
+        assert_eq!(paths, vec!["models/a.bin".to_string()]);
+    }
 }

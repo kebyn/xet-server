@@ -15,22 +15,40 @@ pub struct TreeEntry {
     pub path: String,
 }
 
+fn normalize_tree_path(path: &str) -> String {
+    path.trim_matches('/').to_string()
+}
+
+fn strip_tree_prefix<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
+    if prefix.is_empty() {
+        return Some(path);
+    }
+    if path == prefix {
+        return Some("");
+    }
+    path.strip_prefix(&format!("{}/", prefix))
+}
+
+fn join_tree_path(prefix: &str, name: &str) -> String {
+    if prefix.is_empty() {
+        name.to_string()
+    } else {
+        format!("{}/{}", prefix, name)
+    }
+}
+
 /// Infer directories from file paths
 fn infer_directories(entries: &[FileEntry], prefix: &str) -> Vec<String> {
     let mut dirs = HashSet::new();
 
     for entry in entries.iter() {
-        // Remove prefix from path
-        let rel_path = if prefix.is_empty() {
-            entry.path.clone()
-        } else {
-            let prefix_with_slash = format!("{}/", prefix);
-            entry
-                .path
-                .strip_prefix(&prefix_with_slash)
-                .unwrap_or(&entry.path)
-                .to_string()
+        let rel_path = match strip_tree_prefix(&entry.path, prefix) {
+            Some(p) => p,
+            None => continue,
         };
+        if rel_path.is_empty() {
+            continue;
+        }
 
         // If path contains '/', the part before '/' is a directory
         if let Some(pos) = rel_path.find('/') {
@@ -51,6 +69,7 @@ async fn handle_tree(
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
     let (namespace, repo_name, revision, tree_path) = path.into_inner();
+    let tree_path = normalize_tree_path(&tree_path);
 
     // Get the repo
     let repo = match metadata.get_repo(&namespace, &repo_name, repo_type).await {
@@ -121,24 +140,19 @@ async fn handle_tree(
         .unwrap_or(false);
 
     if recursive {
-        // Recursive mode: return all files with full paths, no directory inference
+        // Recursive mode: return all files under the requested tree path, no directory inference.
         for entry in entries.iter() {
-            let rel_path = if tree_path.is_empty() {
-                entry.path.clone()
-            } else {
-                // M2 fix: Strip prefix with trailing slash to avoid leading '/' in result
-                let prefix_with_slash = format!("{}/", tree_path);
-                entry
-                    .path
-                    .strip_prefix(&prefix_with_slash)
-                    .unwrap_or(entry.path.strip_prefix(&tree_path).unwrap_or(&entry.path))
-                    .to_string()
+            let Some(rel_path) = strip_tree_prefix(&entry.path, &tree_path) else {
+                continue;
             };
+            if rel_path.is_empty() {
+                continue;
+            }
             tree_entries.push(TreeEntry {
                 entry_type: "file".to_string(),
                 oid: Some(entry.cas_hash.clone()),
                 size: entry.size,
-                path: rel_path,
+                path: rel_path.to_string(),
             });
         }
     } else {
@@ -149,26 +163,15 @@ async fn handle_tree(
                 entry_type: "directory".to_string(),
                 oid: None,
                 size: 0,
-                path: if tree_path.is_empty() {
-                    dir
-                } else {
-                    format!("{}{}", tree_path, dir)
-                },
+                path: join_tree_path(&tree_path, &dir),
             });
         }
 
         for entry in entries.iter() {
-            let rel_path = if tree_path.is_empty() {
-                entry.path.clone()
-            } else {
-                let prefix_with_slash = format!("{}/", tree_path);
-                entry
-                    .path
-                    .strip_prefix(&prefix_with_slash)
-                    .unwrap_or(&entry.path)
-                    .to_string()
+            let Some(rel_path) = strip_tree_prefix(&entry.path, &tree_path) else {
+                continue;
             };
-            if !rel_path.contains('/') {
+            if !rel_path.is_empty() && !rel_path.contains('/') {
                 tree_entries.push(TreeEntry {
                     entry_type: "file".to_string(),
                     oid: Some(entry.cas_hash.clone()),
@@ -462,6 +465,66 @@ mod tests {
             .to_request();
         let resp = actix_test::call_service(&app, req).await;
         assert!(resp.status().is_success());
+    }
+
+    #[actix_web::test]
+    async fn test_tree_non_recursive_joins_nested_directory_with_slash() {
+        let (token_store, metadata) = setup_test_env_with_files().await;
+        let token = token_store
+            .create_token("testuser", "test-token", "read")
+            .await
+            .unwrap();
+        let repo = metadata
+            .create_repo("testuser", "my-model", RepoType::Model, false)
+            .await
+            .unwrap();
+        let commit_id = "abc123";
+        metadata
+            .add_revision(Revision {
+                commit_id: commit_id.to_string(),
+                repo_id: repo.id,
+                parent: None,
+                message: "Initial".to_string(),
+                author: "testuser".to_string(),
+                created_at: 1000,
+            })
+            .await
+            .unwrap();
+        metadata.set_head(repo.id, commit_id).await.unwrap();
+        metadata
+            .add_file_entries(vec![FileEntry {
+                path: "models/sub/a.bin".to_string(),
+                repo_id: repo.id,
+                commit_id: commit_id.to_string(),
+                size: 1,
+                cas_hash: "hash".to_string(),
+                is_lfs: true,
+            }])
+            .await
+            .unwrap();
+
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(token_store.clone()))
+                .app_data(web::Data::new(metadata.clone()))
+                .route(
+                    "/api/models/{ns}/{repo}/tree/{revision}/{path:.*}",
+                    web::get().to(tree_model),
+                ),
+        )
+        .await;
+
+        let req = actix_test::TestRequest::get()
+            .uri("/api/models/testuser/my-model/tree/main/models")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request();
+
+        let resp = actix_test::call_service(&app, req).await;
+        assert!(resp.status().is_success());
+        let body: Vec<TreeEntry> = actix_test::read_body_json(resp).await;
+        assert_eq!(body.len(), 1);
+        assert_eq!(body[0].entry_type, "directory");
+        assert_eq!(body[0].path, "models/sub");
     }
 
     #[actix_web::test]
