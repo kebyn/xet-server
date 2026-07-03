@@ -85,41 +85,6 @@ impl MetadataIndex {
         }
     }
 
-    /// Temporary Task 3 bridge for existing declaration-based call sites.
-    ///
-    /// Task 6 replaces these raw declaration registrations with validated shard content.
-    pub fn register_shard(
-        &self,
-        shard_id: String,
-        file_hashes: Vec<String>,
-        chunk_mappings: Vec<(String, String, u32)>,
-    ) {
-        let files = file_hashes
-            .into_iter()
-            .enumerate()
-            .map(|(file_index, file_hash)| VerifiedFileMapping {
-                file_hash,
-                file_index,
-            })
-            .collect();
-        let chunks = chunk_mappings
-            .into_iter()
-            .map(
-                |(chunk_hash, xorb_hash, chunk_index)| VerifiedChunkMapping {
-                    chunk_hash,
-                    xorb_hash,
-                    chunk_index,
-                },
-            )
-            .collect();
-
-        self.register_verified_shard(VerifiedShardRegistration {
-            shard_id,
-            files,
-            chunks,
-        });
-    }
-
     /// Get verified shard references for a file hash
     pub fn get_file_refs(&self, file_hash: &str) -> Option<Vec<FileShardRef>> {
         let file_map = self.file_to_shards.read();
@@ -174,6 +139,7 @@ impl MetadataIndex {
     pub async fn rebuild_from_storage(
         &self,
         storage: Arc<Box<dyn crate::storage::StorageBackend>>,
+        temp_dir: std::path::PathBuf,
     ) -> Result<usize, String> {
         use crate::format::shard::MDBShardFile;
 
@@ -192,6 +158,7 @@ impl MetadataIndex {
 
             for shard_key in chunk {
                 let storage_clone = storage.clone();
+                let temp_dir_clone = temp_dir.clone();
                 let key = shard_key.clone();
 
                 let handle = tokio::spawn(async move {
@@ -206,37 +173,27 @@ impl MetadataIndex {
                     // Parse shard and extract mappings
                     match MDBShardFile::parse(&shard_data) {
                         Ok(shard) => {
-                            // Extract file hashes and convert to verified registration entries.
-                            // Task 6 will replace declaration registration with validation.
-                            let files: Vec<VerifiedFileMapping> = shard
-                                .file_hashes()
-                                .iter()
-                                .enumerate()
-                                .map(|(file_index, h)| VerifiedFileMapping {
-                                    file_hash: h.to_hex(),
-                                    file_index,
-                                })
-                                .collect();
-
-                            // Extract chunk mappings and convert to verified registration entries.
-                            let chunks: Vec<VerifiedChunkMapping> = shard
-                                .chunk_mappings()
-                                .iter()
-                                .map(|(chunk, xorb, idx)| VerifiedChunkMapping {
-                                    chunk_hash: chunk.to_hex(),
-                                    xorb_hash: xorb.to_hex(),
-                                    chunk_index: *idx,
-                                })
-                                .collect();
-
                             // Extract shard_id from key (shards/{shard_id})
                             let shard_id = key.strip_prefix("shards/").unwrap_or(&key).to_string();
 
-                            Some(VerifiedShardRegistration {
-                                shard_id,
-                                files,
-                                chunks,
-                            })
+                            match crate::shard_validation::validate_shard_for_index(
+                                &shard_id,
+                                &shard,
+                                &**storage_clone,
+                                &temp_dir_clone,
+                            )
+                            .await
+                            {
+                                Ok(registration) => Some(registration),
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Skipping unverified shard {} during rebuild: {}",
+                                        shard_id,
+                                        e
+                                    );
+                                    None
+                                }
+                            }
                         }
                         Err(e) => {
                             tracing::warn!("Failed to parse shard {}: {}", key, e);
@@ -286,6 +243,61 @@ pub struct IndexStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
+    use sha2::{Digest, Sha256};
+    use tempfile::tempdir;
+
+    use crate::format::compression::CompressionScheme;
+    use crate::format::shard_builder::{FileSegment, ShardBuilder, XorbChunkBuildEntry};
+    use crate::format::xorb_builder::XorbBuilder;
+    use crate::hash::compute_data_hash;
+    use crate::storage::StorageBackend;
+    use crate::storage::local::LocalStorage;
+    use crate::types::MerkleHash;
+
+    fn sha256_merkle_hash(data: &[u8]) -> MerkleHash {
+        let digest = Sha256::digest(data);
+        let mut bytes = [0u8; 32];
+        bytes.copy_from_slice(&digest);
+        MerkleHash::from(bytes)
+    }
+
+    fn build_one_chunk_shard(raw_chunk: &[u8]) -> (Vec<u8>, String) {
+        let raw_hash = compute_data_hash(raw_chunk);
+        let file_hash = sha256_merkle_hash(raw_chunk);
+        let mut xorb_builder = XorbBuilder::new(CompressionScheme::None);
+        let (serialized_chunk_hash, compressed_len) = xorb_builder.add_chunk(raw_chunk).unwrap();
+        let xorb = xorb_builder.build().unwrap();
+
+        let mut shard_builder = ShardBuilder::new();
+        let xorb_index = shard_builder
+            .add_xorb_with_raw_chunk_hashes(
+                xorb.xorb_hash,
+                xorb.total_uncompressed_size as u32,
+                xorb.total_compressed_size as u32,
+                vec![XorbChunkBuildEntry {
+                    chunk_hash: serialized_chunk_hash,
+                    chunk_byte_range_start: 0,
+                    unpacked_segment_bytes: raw_chunk.len() as u32,
+                }],
+                vec![raw_hash],
+            )
+            .unwrap();
+
+        shard_builder.add_file(
+            file_hash,
+            vec![FileSegment {
+                xorb_hash: xorb.xorb_hash,
+                xorb_index,
+                chunk_index_start: 0,
+                chunk_index_end: 1,
+                unpacked_segment_bytes: raw_chunk.len() as u32,
+            }],
+        );
+
+        assert_eq!(compressed_len, raw_chunk.len() as u32);
+        (shard_builder.build().unwrap(), file_hash.to_hex())
+    }
 
     #[test]
     fn test_register_verified_shard_and_query_file_refs() {
@@ -443,27 +455,30 @@ mod tests {
         assert!(!index.chunk_exists("chunk-2"));
     }
 
-    #[test]
-    fn test_register_shard_compat_bridge_preserves_old_api() {
+    #[tokio::test]
+    async fn test_rebuild_from_storage_skips_shard_when_referenced_xorb_missing() {
+        let raw = b"rebuild should not trust shard declarations without xorb validation";
+        let (shard_data, file_hash) = build_one_chunk_shard(raw);
+
+        let storage_dir = tempdir().unwrap();
+        let rebuild_temp_dir = tempdir().unwrap();
+        let storage: Arc<Box<dyn StorageBackend>> = Arc::new(Box::new(
+            LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap(),
+        ));
+
+        let shard_id = compute_data_hash(&shard_data).to_hex();
+        storage
+            .put(&format!("shards/{}", shard_id), Bytes::from(shard_data))
+            .await
+            .unwrap();
+
         let index = MetadataIndex::new();
+        let count = index
+            .rebuild_from_storage(storage, rebuild_temp_dir.path().to_path_buf())
+            .await
+            .unwrap();
 
-        index.register_shard(
-            "shard-001".to_string(),
-            vec!["file-a".to_string(), "file-b".to_string()],
-            vec![("chunk-1".to_string(), "xorb-1".to_string(), 0)],
-        );
-
-        let refs = index.get_file_refs("file-b").unwrap();
-        assert_eq!(
-            refs,
-            vec![FileShardRef {
-                shard_id: "shard-001".to_string(),
-                file_index: 1,
-            }]
-        );
-        assert_eq!(
-            index.get_xorb_for_chunk("chunk-1"),
-            Some(("xorb-1".to_string(), 0))
-        );
+        assert_eq!(count, 0);
+        assert!(index.get_shards_for_file(&file_hash).is_none());
     }
 }

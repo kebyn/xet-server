@@ -16,7 +16,7 @@ use common::{TestContext, test_token_for_keypair};
 use xet_server::config::ConversionConfig;
 use xet_server::conversion::{ConversionPipeline, ConvertingOids};
 use xet_server::hash::compute_data_hash;
-use xet_server::index::MetadataIndex;
+use xet_server::index::{MetadataIndex, VerifiedFileMapping, VerifiedShardRegistration};
 use xet_server::storage::StorageBackend;
 use xet_server::storage::local::LocalStorage;
 
@@ -184,7 +184,14 @@ async fn test_internal_head_blob_xet() {
 
     // Register a xet_only blob in MetadataIndex
     let oid = "b".repeat(64);
-    index.register_shard("shard-test".to_string(), vec![oid.clone()], vec![]);
+    index.register_verified_shard(VerifiedShardRegistration {
+        shard_id: "shard-test".to_string(),
+        files: vec![VerifiedFileMapping {
+            file_hash: oid.clone(),
+            file_index: 0,
+        }],
+        chunks: vec![],
+    });
 
     let app = test::init_service(
         App::new()

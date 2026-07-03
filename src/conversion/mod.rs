@@ -311,10 +311,14 @@ impl ConversionPipeline {
 
         let mut shard_builder = ShardBuilder::new();
 
-        // Build chunk mappings for index registration BEFORE add_xorb consumes chunk_entries
-        let mut chunk_mappings: Vec<(String, String, u32)> = Vec::new();
+        // Build verified chunk mappings for index registration BEFORE add_xorb consumes chunk_entries
+        let mut verified_chunks: Vec<crate::index::VerifiedChunkMapping> = Vec::new();
         for (i, chunk_hash) in raw_chunk_hashes.iter().enumerate() {
-            chunk_mappings.push((chunk_hash.to_hex(), xorb_hash.clone(), i as u32));
+            verified_chunks.push(crate::index::VerifiedChunkMapping {
+                chunk_hash: chunk_hash.to_hex(),
+                xorb_hash: xorb_hash.clone(),
+                chunk_index: i as u32,
+            });
         }
 
         let xorb_index = shard_builder
@@ -358,7 +362,14 @@ impl ConversionPipeline {
 
         // 8. Register in MetadataIndex
         self.index
-            .register_shard(shard_hash.clone(), vec![oid.to_string()], chunk_mappings);
+            .register_verified_shard(crate::index::VerifiedShardRegistration {
+                shard_id: shard_hash.clone(),
+                files: vec![crate::index::VerifiedFileMapping {
+                    file_hash: oid.to_string(),
+                    file_index: 0,
+                }],
+                chunks: verified_chunks,
+            });
 
         // 10. Delete raw blob (if configured)
         if self.config.delete_raw_after_conversion {

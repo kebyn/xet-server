@@ -10,7 +10,9 @@ use tempfile::tempdir;
 
 use xet_server::chunking::{ChunkConfig, Chunker};
 use xet_server::hash::{compute_data_hash, xorb_hash};
-use xet_server::index::MetadataIndex;
+use xet_server::index::{
+    MetadataIndex, VerifiedChunkMapping, VerifiedFileMapping, VerifiedShardRegistration,
+};
 use xet_server::storage::StorageBackend;
 use xet_server::storage::local::LocalStorage;
 
@@ -216,13 +218,25 @@ async fn test_e2e_metadata_index() {
     // Register a shard
     let shard_id = "test-shard-123".to_string();
     let file_hash = "a".repeat(64);
-    let file_hashes = vec![file_hash.clone()];
-    let chunk_mappings = vec![
-        ("b".repeat(64), "c".repeat(64), 0u32),
-        ("d".repeat(64), "c".repeat(64), 1u32),
-    ];
-
-    index.register_shard(shard_id.clone(), file_hashes, chunk_mappings);
+    index.register_verified_shard(VerifiedShardRegistration {
+        shard_id: shard_id.clone(),
+        files: vec![VerifiedFileMapping {
+            file_hash: file_hash.clone(),
+            file_index: 0,
+        }],
+        chunks: vec![
+            VerifiedChunkMapping {
+                chunk_hash: "b".repeat(64),
+                xorb_hash: "c".repeat(64),
+                chunk_index: 0,
+            },
+            VerifiedChunkMapping {
+                chunk_hash: "d".repeat(64),
+                xorb_hash: "c".repeat(64),
+                chunk_index: 1,
+            },
+        ],
+    });
 
     // Query for file shards
     let shards = index.get_shards_for_file(&file_hash);
