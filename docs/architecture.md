@@ -210,6 +210,10 @@ src/
    客户端 → CAS API → 查询 chunk 存在 → 返回结果
    ```
 
+**MetadataIndex 验证不变量**：
+
+`MetadataIndex` 是 verified mappings 的内存缓存。服务启动时会从已存储的 shards 重建索引，但只有通过内容验证的 shard 才会被索引。Shard 声明不能直接成为 file/chunk 可发现性来源；handler 必须通过验证流程注册映射，不能直接从 shard 声明写入 file 或 chunk mappings。
+
 ### 3. 存储后端
 
 **本地存储** (`storage/local.rs`)：

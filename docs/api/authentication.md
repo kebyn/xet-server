@@ -83,6 +83,7 @@ hf_a1b2c3d4e5f678901234567890123456
 - 由 Hub 使用私钥签发
 - CAS 使用公钥验证签名
 - 绑定到特定仓库和修订版本
+- CAS 公共端点接受普通 `read` / `write` CAS token。Git LFS batch action 也可能返回短期 proxy token，proxy token 只对绑定的 `oid` 和 `operation` 有效，缺失或不匹配的绑定会被拒绝。
 
 **JWT Header**：
 ```json
@@ -113,6 +114,9 @@ hf_a1b2c3d4e5f678901234567890123456
 2. Hub 验证用户的 Hub Token
 3. Hub 使用私钥签发 CAS JWT
 4. 返回 `xet_xxx` 令牌给客户端
+
+**当前授权语义**：
+`repo_id`、`repo_type` 和 `revision` claims 标识签发 token 的 Hub 上下文。本版本 CAS 内容授权是 content-capability based：持有有效 CAS token 的客户端可按 token scope 访问对应内容能力；这些 repo claims 不强制实现 repository-scoped CAS object isolation。
 
 **示例**：
 ```
