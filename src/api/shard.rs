@@ -187,19 +187,6 @@ pub async fn upload_shard(
         });
     }
 
-    // Move temp file to final storage (zero-copy rename for local storage)
-    let temp_path = temp_file.into_path();
-    if let Err(e) = storage.put_from_path(&shard_key, &temp_path).await {
-        error!("Failed to store shard: {}", e);
-        let _ = std::fs::remove_file(&temp_path);
-        GLOBAL_METRICS.record_request(500);
-        GLOBAL_METRICS.record_error();
-        GLOBAL_METRICS.record_latency(start);
-        return HttpResponse::InternalServerError().json(serde_json::json!({
-            "error": format!("Storage error: {}", e)
-        }));
-    }
-
     let validation_temp_dir = config.storage.resolve_reconstruction_temp_dir();
     let registration = match validate_shard_for_index(
         &shard_id,
@@ -219,6 +206,19 @@ pub async fn upload_shard(
             }));
         }
     };
+
+    // Move temp file to final storage only after validation succeeds.
+    let temp_path = temp_file.into_path();
+    if let Err(e) = storage.put_from_path(&shard_key, &temp_path).await {
+        error!("Failed to store shard: {}", e);
+        let _ = std::fs::remove_file(&temp_path);
+        GLOBAL_METRICS.record_request(500);
+        GLOBAL_METRICS.record_error();
+        GLOBAL_METRICS.record_latency(start);
+        return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Storage error: {}", e)
+        }));
+    }
 
     let file_count = registration.files.len();
     let chunk_count = registration.chunks.len();
@@ -245,8 +245,13 @@ mod tests {
     use super::*;
     use crate::api::auth::{AuthVerifier, KeyPair, XetClaims, sign_xet_token};
     use crate::config::AuthConfig;
+    use crate::format::compression::CompressionScheme;
+    use crate::format::shard_builder::{FileSegment, ShardBuilder, XorbChunkBuildEntry};
+    use crate::format::xorb_builder::XorbBuilder;
+    use crate::hash::compute_data_hash;
     use crate::storage::local::LocalStorage;
     use actix_web::{App, test, web};
+    use sha2::{Digest, Sha256};
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
     use tempfile::tempdir;
@@ -300,6 +305,49 @@ mod tests {
             operation: None,
         };
         sign_xet_token(&claims, kp).unwrap()
+    }
+
+    fn sha256_merkle_hash(data: &[u8]) -> crate::types::MerkleHash {
+        let digest = Sha256::digest(data);
+        let mut bytes = [0u8; 32];
+        bytes.copy_from_slice(&digest);
+        crate::types::MerkleHash::from(bytes)
+    }
+
+    fn build_one_chunk_shard_data(raw_chunk: &[u8]) -> Vec<u8> {
+        let mut xorb_builder = XorbBuilder::new(CompressionScheme::None);
+        let (serialized_chunk_hash, compressed_len) = xorb_builder.add_chunk(raw_chunk).unwrap();
+        let xorb = xorb_builder.build().unwrap();
+        let raw_chunk_hash = compute_data_hash(raw_chunk);
+
+        let mut shard_builder = ShardBuilder::new();
+        let xorb_index = shard_builder
+            .add_xorb_with_raw_chunk_hashes(
+                xorb.xorb_hash,
+                xorb.total_uncompressed_size as u32,
+                xorb.total_compressed_size as u32,
+                vec![XorbChunkBuildEntry {
+                    chunk_hash: serialized_chunk_hash,
+                    chunk_byte_range_start: 0,
+                    unpacked_segment_bytes: raw_chunk.len() as u32,
+                }],
+                vec![raw_chunk_hash],
+            )
+            .unwrap();
+
+        assert_eq!(compressed_len as usize, raw_chunk.len());
+        shard_builder.add_file(
+            sha256_merkle_hash(raw_chunk),
+            vec![FileSegment {
+                xorb_hash: xorb.xorb_hash,
+                xorb_index,
+                chunk_index_start: 0,
+                chunk_index_end: 1,
+                unpacked_segment_bytes: raw_chunk.len() as u32,
+            }],
+        );
+
+        shard_builder.build().unwrap()
     }
 
     #[actix_web::test]
@@ -362,5 +410,43 @@ mod tests {
 
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), 400);
+    }
+
+    #[actix_web::test]
+    async fn test_upload_shard_validation_failure_does_not_persist_new_shard() {
+        let dir = tempdir().unwrap();
+        let storage: Box<dyn StorageBackend> =
+            Box::new(LocalStorage::new(dir.path().to_str().unwrap()).unwrap());
+        let storage_arc: Arc<Box<dyn StorageBackend>> = Arc::new(storage);
+
+        let (kp, auth, mut config) = create_test_config();
+        config.storage.local_path = Some(dir.path().to_str().unwrap().to_string());
+        let token = create_test_token(&kp, "read write");
+
+        let index = MetadataIndex::new();
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::from(storage_arc.clone()))
+                .app_data(web::Data::new(index))
+                .app_data(web::Data::new(auth))
+                .app_data(web::Data::new(config))
+                .route("/v1/shards", web::post().to(upload_shard)),
+        )
+        .await;
+
+        let shard_data = build_one_chunk_shard_data(b"valid shard but missing referenced xorb");
+        let shard_id = compute_data_hash(&shard_data).to_hex();
+        let shard_key = format!("shards/{}", shard_id);
+
+        let req = test::TestRequest::post()
+            .uri("/v1/shards")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_payload(shard_data)
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 400);
+        assert!(!storage_arc.exists(&shard_key).await.unwrap());
     }
 }

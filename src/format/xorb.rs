@@ -201,6 +201,27 @@ impl XorbObjectInfoV1 {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedXorbChunkInfo {
+    pub serialized_chunk_hash: MerkleHash,
+    pub serialized_start: u64,
+    pub serialized_end: u64,
+    pub serialized_len: u64,
+    pub unpacked_start: u64,
+    pub unpacked_len: u64,
+    pub compressed_payload_len: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedXorbInfo {
+    pub xorb_hash: MerkleHash,
+    pub file_len: u64,
+    pub footer_start: u64,
+    pub chunks: Vec<VerifiedXorbChunkInfo>,
+    pub total_unpacked_bytes: u64,
+    pub total_compressed_payload_bytes: u64,
+}
+
 /// Verify xorb integrity by checking chunk hashes and xorb hash
 ///
 /// This function:
@@ -291,6 +312,14 @@ pub fn verify_xorb(data: &[u8]) -> XetResult<()> {
 /// 2. For each chunk: seeks to offset, reads incrementally, hashes, verifies
 /// 3. Computes the aggregated xorb hash and verifies it matches
 pub fn verify_xorb_from_file(path: &Path) -> XetResult<()> {
+    verify_xorb_from_file_with_info(path).map(|_| ())
+}
+
+/// Verify xorb integrity from a file on disk and return verified footer/chunk metadata.
+///
+/// The returned [`VerifiedXorbInfo`] binds the verified xorb hash to each serialized
+/// chunk's hash, byte range, and unpacked size from the footer and chunk headers.
+pub fn verify_xorb_from_file_with_info(path: &Path) -> XetResult<VerifiedXorbInfo> {
     let mut file = File::open(path).map_err(|e| {
         XetError::IoError(std::io::Error::other(format!(
             "Failed to open xorb file {}: {}",
@@ -360,6 +389,10 @@ pub fn verify_xorb_from_file(path: &Path) -> XetResult<()> {
     // Verify chunk hashes by reading each chunk from the file incrementally
     let mut chunk_info: Vec<(MerkleHash, u64)> = Vec::with_capacity(footer.chunk_hashes.len());
     let mut current_offset: u64 = 0;
+    let mut current_unpacked_offset: u64 = 0;
+    let mut verified_chunks = Vec::with_capacity(footer.chunk_hashes.len());
+    let mut total_unpacked_bytes = 0u64;
+    let mut total_compressed_payload_bytes = 0u64;
     let mut read_buf = [0u8; 64 * 1024]; // 64KB read buffer
 
     for (i, expected_hash) in footer.chunk_hashes.iter().enumerate() {
@@ -370,16 +403,16 @@ pub fn verify_xorb_from_file(path: &Path) -> XetResult<()> {
             footer_start
         };
 
-        if chunk_end > file_len || chunk_end < current_offset {
+        if chunk_end > footer_start || chunk_end < current_offset {
             return Err(XetError::ParseError(format!(
-                "Invalid chunk boundary: chunk {} at {}-{} exceeds file bounds (len={})",
-                i, current_offset, chunk_end, file_len
+                "Invalid chunk boundary: chunk {} at {}-{} exceeds chunk data bounds (footer_start={})",
+                i, current_offset, chunk_end, footer_start
             )));
         }
 
         let chunk_size = chunk_end - current_offset;
 
-        // Seek to chunk start and hash incrementally
+        // Seek to chunk start, parse the chunk header, and hash incrementally.
         file.seek(SeekFrom::Start(current_offset)).map_err(|e| {
             XetError::IoError(std::io::Error::other(format!(
                 "Failed to seek to chunk {}: {}",
@@ -387,13 +420,44 @@ pub fn verify_xorb_from_file(path: &Path) -> XetResult<()> {
             )))
         })?;
 
+        let mut header_bytes = [0u8; XorbChunkHeader::SIZE];
+        file.read_exact(&mut header_bytes).map_err(|e| {
+            XetError::IoError(std::io::Error::other(format!(
+                "Failed to read chunk {} header: {}",
+                i, e
+            )))
+        })?;
+        let mut header_cursor = std::io::Cursor::new(&header_bytes);
+        let chunk_header = XorbChunkHeader::deserialize(&mut header_cursor)?;
+
+        let expected_chunk_size =
+            XorbChunkHeader::SIZE as u64 + chunk_header.compressed_length as u64;
+        if chunk_size != expected_chunk_size {
+            return Err(XetError::ParseError(format!(
+                "Chunk {} serialized length mismatch: footer declares {} bytes, header declares {} bytes",
+                i, chunk_size, expected_chunk_size
+            )));
+        }
+
+        let unpacked_start = *footer.unpacked_chunk_offsets.get(i).ok_or_else(|| {
+            XetError::ParseError(format!("Missing unpacked offset for chunk {}", i))
+        })? as u64;
+        if unpacked_start != current_unpacked_offset {
+            return Err(XetError::ParseError(format!(
+                "Chunk {} unpacked offset mismatch: footer declares {}, expected {}",
+                i, unpacked_start, current_unpacked_offset
+            )));
+        }
+
         let mut hasher = blake3::Hasher::new_keyed(&crate::hash::DATA_KEY);
-        let mut remaining = chunk_size;
+        hasher.update(&header_bytes);
+
+        let mut remaining = chunk_header.compressed_length as u64;
         while remaining > 0 {
             let to_read = std::cmp::min(remaining, read_buf.len() as u64) as usize;
             let n = file.read(&mut read_buf[..to_read]).map_err(|e| {
                 XetError::IoError(std::io::Error::other(format!(
-                    "Failed to read chunk {} data: {}",
+                    "Failed to read chunk {} compressed payload: {}",
                     i, e
                 )))
             })?;
@@ -418,7 +482,26 @@ pub fn verify_xorb_from_file(path: &Path) -> XetResult<()> {
         }
 
         chunk_info.push((actual_hash, chunk_size));
+        verified_chunks.push(VerifiedXorbChunkInfo {
+            serialized_chunk_hash: actual_hash,
+            serialized_start: current_offset,
+            serialized_end: chunk_end,
+            serialized_len: chunk_size,
+            unpacked_start,
+            unpacked_len: chunk_header.uncompressed_length as u64,
+            compressed_payload_len: chunk_header.compressed_length as u64,
+        });
+        total_unpacked_bytes += chunk_header.uncompressed_length as u64;
+        total_compressed_payload_bytes += chunk_header.compressed_length as u64;
+        current_unpacked_offset += chunk_header.uncompressed_length as u64;
         current_offset = chunk_end;
+    }
+
+    if current_offset != footer_start {
+        return Err(XetError::ParseError(format!(
+            "Xorb has unverified bytes before footer: chunks end at {}, footer starts at {}",
+            current_offset, footer_start
+        )));
     }
 
     // Verify xorb hash (computed from chunk hashes and sizes)
@@ -431,5 +514,12 @@ pub fn verify_xorb_from_file(path: &Path) -> XetResult<()> {
         )));
     }
 
-    Ok(())
+    Ok(VerifiedXorbInfo {
+        xorb_hash: computed_xorb_hash,
+        file_len,
+        footer_start,
+        chunks: verified_chunks,
+        total_unpacked_bytes,
+        total_compressed_payload_bytes,
+    })
 }
