@@ -8,6 +8,11 @@ pub fn can_access_repo(repo: &Repo, username: &str) -> bool {
     !repo.private || repo.namespace == username
 }
 
+/// 写权限目前仅授予 repo owner。公开 repo 可读不代表可写。
+pub fn can_write_repo(repo: &Repo, username: &str) -> bool {
+    repo.namespace == username
+}
+
 /// Resolve a revision name/branch to a commit ID
 /// Shared helper used by multiple API handlers (resolve, tree, preupload)
 pub async fn resolve_revision(
@@ -66,5 +71,13 @@ mod tests {
         // 私有 repo:仅 owner
         assert!(can_access_repo(&repo("owner", true), "owner"));
         assert!(!can_access_repo(&repo("owner", true), "stranger"));
+    }
+
+    #[test]
+    fn test_can_write_repo() {
+        assert!(can_write_repo(&repo("owner", false), "owner"));
+        assert!(!can_write_repo(&repo("owner", false), "stranger"));
+        assert!(can_write_repo(&repo("owner", true), "owner"));
+        assert!(!can_write_repo(&repo("owner", true), "stranger"));
     }
 }
