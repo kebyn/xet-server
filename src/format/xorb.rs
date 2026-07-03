@@ -151,6 +151,12 @@ impl XorbObjectInfoV1 {
 
         let mut version = [0u8; 1];
         reader.read_exact(&mut version)?;
+        if version[0] != 0 {
+            return Err(XetError::ParseError(format!(
+                "Unsupported hashes section version: {}",
+                version[0]
+            )));
+        }
 
         let mut num_buf = [0u8; 4];
         reader.read_exact(&mut num_buf)?;
@@ -178,6 +184,12 @@ impl XorbObjectInfoV1 {
         }
 
         reader.read_exact(&mut version)?;
+        if version[0] != 1 {
+            return Err(XetError::ParseError(format!(
+                "Unsupported boundaries section version: {}",
+                version[0]
+            )));
+        }
 
         let mut chunk_boundary_offsets = Vec::with_capacity(num_chunks as usize);
         for _ in 0..num_chunks {
@@ -198,6 +210,12 @@ impl XorbObjectInfoV1 {
         }
 
         reader.read_exact(&mut version)?;
+        if version[0] != 1 {
+            return Err(XetError::ParseError(format!(
+                "Unsupported xorb footer version: {}",
+                version[0]
+            )));
+        }
 
         let mut hash_bytes = [0u8; 32];
         reader.read_exact(&mut hash_bytes)?;
@@ -316,7 +334,8 @@ pub fn verify_xorb(data: &[u8]) -> XetResult<()> {
 
 /// Verify xorb integrity from a file on disk without loading the entire file into RAM.
 ///
-/// Peak memory usage: O(64KB) regardless of xorb or chunk size.
+/// Peak memory usage is bounded by the maximum supported footer size plus a
+/// 64KB chunk read buffer, regardless of xorb payload size.
 ///
 /// This function:
 /// 1. Reads the tail of the file to locate and parse the footer

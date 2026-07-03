@@ -115,6 +115,31 @@ fn test_xorb_footer_roundtrip() {
 }
 
 #[test]
+fn test_xorb_footer_rejects_unknown_section_versions() {
+    let footer = XorbObjectInfoV1 {
+        xorb_hash: MerkleHash::from([0xAB; 32]),
+        chunk_hashes: vec![MerkleHash::from([0x11; 32])],
+        chunk_boundary_offsets: vec![1000],
+        unpacked_chunk_offsets: vec![0],
+    };
+
+    let mut buf = Vec::new();
+    footer.serialize(&mut buf).unwrap();
+
+    let mut bad_hashes_version = buf.clone();
+    bad_hashes_version[7] = 99;
+    assert!(XorbObjectInfoV1::from_bytes(&bad_hashes_version).is_err());
+
+    let mut bad_boundaries_version = buf.clone();
+    bad_boundaries_version[51] = 99;
+    assert!(XorbObjectInfoV1::from_bytes(&bad_boundaries_version).is_err());
+
+    let mut bad_main_version = buf;
+    bad_main_version[67] = 99;
+    assert!(XorbObjectInfoV1::from_bytes(&bad_main_version).is_err());
+}
+
+#[test]
 fn test_xorb_footer_empty_chunks() {
     let footer = XorbObjectInfoV1 {
         xorb_hash: MerkleHash::default(),

@@ -159,6 +159,43 @@ impl StorageBackend for LocalStorage {
         Ok(Some(path))
     }
 
+    /// Download a local object to `dest` without routing through `get()`.
+    ///
+    /// This keeps shard validation bounded-memory for the default local backend:
+    /// the object is copied by the filesystem into a temp file and then renamed
+    /// into place, rather than being read fully into RAM.
+    async fn download_to_path(&self, key: &str, dest: &Path) -> StorageResult<()> {
+        let source = self.object_path(key)?;
+
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent)
+                .await
+                .map_err(|e| StorageError::Internal(format!("Failed to create dirs: {}", e)))?;
+        }
+
+        match fs::metadata(&source).await {
+            Ok(meta) if meta.is_file() => {}
+            Ok(_) => {
+                return Err(StorageError::Internal(format!(
+                    "Object path is not a file: {}",
+                    source.display()
+                )));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(StorageError::NotFound(key.to_string()));
+            }
+            Err(e) => {
+                return Err(StorageError::Internal(format!(
+                    "Failed to stat object {}: {}",
+                    source.display(),
+                    e
+                )));
+            }
+        }
+
+        copy_then_rename(&source, dest).await
+    }
+
     async fn exists(&self, key: &str) -> StorageResult<bool> {
         let path = self.object_path(key)?;
         Ok(path.exists())
@@ -295,6 +332,20 @@ mod tests {
 
         assert_eq!(store.get(key).await.unwrap(), data);
         assert_no_tmp_files(&dir.path().join("objects"));
+    }
+
+    #[tokio::test]
+    async fn test_download_to_path_creates_parent_and_copies_without_tmp_leftover() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalStorage::new(dir.path().join("store").to_str().unwrap()).unwrap();
+        let data = Bytes::from_static(b"download without default get allocation");
+        store.put("xorbs/object", data.clone()).await.unwrap();
+
+        let dest = dir.path().join("downloads/nested/object.bin");
+        store.download_to_path("xorbs/object", &dest).await.unwrap();
+
+        assert_eq!(tokio::fs::read(&dest).await.unwrap(), data);
+        assert_no_tmp_files(dest.parent().unwrap());
     }
 
     fn assert_no_tmp_files(dir: &Path) {
