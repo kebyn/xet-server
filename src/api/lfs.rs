@@ -14,6 +14,7 @@ use futures_util::{Stream, StreamExt};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use tokio_util::io::ReaderStream;
 use tracing::{debug, error, info};
 
 use crate::api::auth::AuthVerifier;
@@ -28,6 +29,7 @@ use crate::format::shard::MDBShardFile;
 use crate::format::xorb::XorbChunkHeader;
 use crate::index::MetadataIndex;
 use crate::metrics::GLOBAL_METRICS;
+use crate::reconstruction_io::reconstruct_verified_file_to_temp;
 use crate::storage::{StorageBackend, StorageError};
 #[cfg(test)]
 use crate::types::MerkleHash;
@@ -273,8 +275,8 @@ pub async fn upload_lfs_object(
 /// Download an LFS object.
 ///
 /// Stateless download logic:
-/// - Check MetadataIndex for xet data → reconstruct from xorbs/shards
-/// - Otherwise → serve raw blob and trigger lazy conversion in background
+/// - Check raw blob first → serve it and trigger lazy conversion in background
+/// - Otherwise check MetadataIndex for verified xet data → reconstruct from xorbs/shards
 // All arguments are actix-web extractors (web::Data / web::Path / HttpRequest).
 // Refactoring into a shared AppState struct would require reworking all route configs;
 // the allow attribute is the pragmatic choice here.
@@ -314,16 +316,6 @@ pub async fn download_lfs_object(
         return rej.respond(start);
     }
 
-    // STATELESS: Check MetadataIndex for xet data
-    if index.get_shards_for_file(&oid).is_some() {
-        let temp_dir = config.storage.resolve_reconstruction_temp_dir();
-        return reconstruct_from_xet(&oid, index, storage, temp_dir, start).await;
-    }
-
-    // Raw blob path — check existence first to handle race with concurrent conversion.
-    // A background conversion (triggered by an earlier download) may have deleted the
-    // raw blob between our index check above and now. In that case, the index should
-    // now have the xet data, so we retry reconstruction.
     let object_key = format!("lfs/objects/{}", oid);
     match storage.exists(&object_key).await {
         Ok(true) => {
@@ -379,29 +371,28 @@ pub async fn download_lfs_object(
                 });
             }
 
-            response
+            return response;
         }
-        Ok(false) => {
-            // Raw blob gone — re-check index (conversion may have completed)
-            if index.get_shards_for_file(&oid).is_some() {
-                let temp_dir = config.storage.resolve_reconstruction_temp_dir();
-                reconstruct_from_xet(&oid, index, storage, temp_dir, start).await
-            } else {
-                GLOBAL_METRICS.record_request(404);
-                GLOBAL_METRICS.record_latency(start);
-                HttpResponse::NotFound().json(serde_json::json!({
-                    "error": format!("Object not found: {}", oid)
-                }))
-            }
-        }
+        Ok(false) => {}
         Err(e) => {
             GLOBAL_METRICS.record_request(500);
             GLOBAL_METRICS.record_latency(start);
-            HttpResponse::InternalServerError().json(serde_json::json!({
+            return HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": format!("Storage error: {}", e)
-            }))
+            }));
         }
     }
+
+    if let Some(file_refs) = index.get_file_refs(&oid) {
+        let temp_dir = config.storage.resolve_reconstruction_temp_dir();
+        return serve_verified_xet_reconstruction(&oid, file_refs, storage, temp_dir, start).await;
+    }
+
+    GLOBAL_METRICS.record_request(404);
+    GLOBAL_METRICS.record_latency(start);
+    HttpResponse::NotFound().json(serde_json::json!({
+        "error": format!("Object not found: {}", oid)
+    }))
 }
 
 /// Serve a raw blob from storage with optional streaming integrity verification.
@@ -708,6 +699,78 @@ async fn serve_raw_blob_inmemory(
         .body(object_data)
 }
 
+async fn serve_verified_xet_reconstruction(
+    oid: &str,
+    file_refs: Vec<crate::index::FileShardRef>,
+    storage: web::Data<Box<dyn StorageBackend>>,
+    temp_dir: std::path::PathBuf,
+    start: std::time::Instant,
+) -> HttpResponse {
+    let reconstruction =
+        match reconstruct_verified_file_to_temp(oid, file_refs, &***storage, &temp_dir).await {
+            Ok(reconstruction) => reconstruction,
+            Err(e) => {
+                error!("Verified xet reconstruction failed for {}: {}", oid, e);
+                GLOBAL_METRICS.record_request(404);
+                GLOBAL_METRICS.record_latency(start);
+                return HttpResponse::NotFound().json(serde_json::json!({
+                    "error": format!("Object not found: {}", oid)
+                }));
+            }
+        };
+
+    let size = reconstruction.size();
+    let path = reconstruction.path().to_path_buf();
+    let guard = reconstruction.into_guard();
+    let file = match tokio::fs::File::open(&path).await {
+        Ok(file) => file,
+        Err(e) => {
+            error!(
+                "Failed to open verified reconstruction {}: {}",
+                path.display(),
+                e
+            );
+            GLOBAL_METRICS.record_request(500);
+            GLOBAL_METRICS.record_error();
+            GLOBAL_METRICS.record_latency(start);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Failed to open reconstructed object"
+            }));
+        }
+    };
+
+    let stream = GuardedFileStream {
+        inner: ReaderStream::new(file),
+        _guard: guard,
+    };
+    let body = actix_web::body::SizedStream::new(size, stream);
+
+    GLOBAL_METRICS.record_request(200);
+    GLOBAL_METRICS.record_storage_operation();
+    GLOBAL_METRICS.record_download_bytes(size);
+    GLOBAL_METRICS.record_latency(start);
+
+    HttpResponse::Ok()
+        .content_type("application/octet-stream")
+        .body(body)
+}
+
+struct GuardedFileStream<S> {
+    inner: S,
+    _guard: crate::xorb_reader::TempPathGuard,
+}
+
+impl<S> Stream for GuardedFileStream<S>
+where
+    S: Stream<Item = Result<bytes::Bytes, std::io::Error>> + Unpin,
+{
+    type Item = Result<bytes::Bytes, std::io::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut self.inner).poll_next(cx)
+    }
+}
+
 /// Reconstruct a file from xorb/shard storage
 ///
 /// This function:
@@ -719,6 +782,7 @@ async fn serve_raw_blob_inmemory(
 ///
 /// I4: True streaming implementation using custom ReconstructionStream.
 /// Processes one chunk at a time, avoiding temp files and minimizing memory usage.
+#[allow(dead_code)]
 async fn reconstruct_from_xet(
     file_id: &str,
     index: web::Data<crate::index::MetadataIndex>,
@@ -773,6 +837,7 @@ async fn reconstruct_from_xet(
 ///
 /// Tracks total bytes yielded and records download_bytes + latency metrics
 /// when the underlying stream returns None (completes) or errors.
+#[allow(dead_code)]
 struct MetricsRecordingStream<S> {
     inner: S,
     start: std::time::Instant,
@@ -780,6 +845,7 @@ struct MetricsRecordingStream<S> {
     completed: bool,
 }
 
+#[allow(dead_code)]
 impl<S> MetricsRecordingStream<S> {
     fn new(inner: S, start: std::time::Instant) -> Self {
         Self {
@@ -880,6 +946,7 @@ where
 ///
 /// For high-latency backends, prefetch depth > 1 can be added by replacing
 /// `Option<JoinHandle>` with `VecDeque<JoinHandle>` or `tokio::task::JoinSet`.
+#[allow(dead_code)]
 fn create_reconstruction_stream(
     storage: Arc<Box<dyn StorageBackend>>,
     shard_ids: Vec<String>,
