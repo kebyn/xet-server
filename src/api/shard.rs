@@ -154,10 +154,45 @@ pub async fn upload_shard(
     };
 
     if already_exists {
+        let stored_shard_data = match storage.get(&shard_key).await {
+            Ok(data) => data,
+            Err(e) => {
+                error!("Failed to read existing shard {}: {}", shard_id, e);
+                GLOBAL_METRICS.record_request(500);
+                GLOBAL_METRICS.record_error();
+                GLOBAL_METRICS.record_latency(start);
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("Storage error: {}", e)
+                }));
+            }
+        };
+        let stored_shard_id = crate::hash::compute_data_hash(&stored_shard_data).to_hex();
+        if stored_shard_id != shard_id {
+            error!(
+                "Existing shard {} has mismatched stored content hash {}",
+                shard_id, stored_shard_id
+            );
+            GLOBAL_METRICS.record_request(400);
+            GLOBAL_METRICS.record_latency(start);
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "Existing shard content does not match requested shard id"
+            }));
+        }
+        let stored_shard = match MDBShardFile::parse(&stored_shard_data) {
+            Ok(shard) => shard,
+            Err(e) => {
+                error!("Failed to parse existing shard {}: {}", shard_id, e);
+                GLOBAL_METRICS.record_request(400);
+                GLOBAL_METRICS.record_latency(start);
+                return HttpResponse::BadRequest().json(serde_json::json!({
+                    "error": format!("Invalid existing shard format: {}", e)
+                }));
+            }
+        };
         let validation_temp_dir = config.storage.resolve_reconstruction_temp_dir();
         let registration = match validate_shard_for_index(
             &shard_id,
-            &shard,
+            &stored_shard,
             storage.get_ref().as_ref(),
             &validation_temp_dir,
         )
@@ -251,6 +286,7 @@ mod tests {
     use crate::hash::compute_data_hash;
     use crate::storage::local::LocalStorage;
     use actix_web::{App, test, web};
+    use bytes::Bytes;
     use sha2::{Digest, Sha256};
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -348,6 +384,47 @@ mod tests {
         );
 
         shard_builder.build().unwrap()
+    }
+
+    fn build_one_chunk_xorb_and_shard_data(raw_chunk: &[u8]) -> (Vec<u8>, Vec<u8>, String) {
+        let mut xorb_builder = XorbBuilder::new(CompressionScheme::None);
+        let (serialized_chunk_hash, compressed_len) = xorb_builder.add_chunk(raw_chunk).unwrap();
+        let xorb = xorb_builder.build().unwrap();
+        let raw_chunk_hash = compute_data_hash(raw_chunk);
+        let file_hash = sha256_merkle_hash(raw_chunk);
+
+        let mut shard_builder = ShardBuilder::new();
+        let xorb_index = shard_builder
+            .add_xorb_with_raw_chunk_hashes(
+                xorb.xorb_hash,
+                xorb.total_uncompressed_size as u32,
+                xorb.total_compressed_size as u32,
+                vec![XorbChunkBuildEntry {
+                    chunk_hash: serialized_chunk_hash,
+                    chunk_byte_range_start: 0,
+                    unpacked_segment_bytes: raw_chunk.len() as u32,
+                }],
+                vec![raw_chunk_hash],
+            )
+            .unwrap();
+
+        assert_eq!(compressed_len as usize, raw_chunk.len());
+        shard_builder.add_file(
+            file_hash,
+            vec![FileSegment {
+                xorb_hash: xorb.xorb_hash,
+                xorb_index,
+                chunk_index_start: 0,
+                chunk_index_end: 1,
+                unpacked_segment_bytes: raw_chunk.len() as u32,
+            }],
+        );
+
+        (
+            xorb.data,
+            shard_builder.build().unwrap(),
+            file_hash.to_hex(),
+        )
     }
 
     #[actix_web::test]
@@ -448,5 +525,56 @@ mod tests {
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), 400);
         assert!(!storage_arc.exists(&shard_key).await.unwrap());
+    }
+
+    #[actix_web::test]
+    async fn test_upload_existing_shard_validates_durable_storage_before_indexing() {
+        let dir = tempdir().unwrap();
+        let storage: Box<dyn StorageBackend> =
+            Box::new(LocalStorage::new(dir.path().to_str().unwrap()).unwrap());
+        let storage_arc: Arc<Box<dyn StorageBackend>> = Arc::new(storage);
+
+        let (kp, auth, mut config) = create_test_config();
+        config.storage.local_path = Some(dir.path().to_str().unwrap().to_string());
+        let token = create_test_token(&kp, "read write");
+
+        let index = MetadataIndex::new();
+        let index_for_assert = index.clone();
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::from(storage_arc.clone()))
+                .app_data(web::Data::new(index))
+                .app_data(web::Data::new(auth))
+                .app_data(web::Data::new(config))
+                .route("/v1/shards", web::post().to(upload_shard)),
+        )
+        .await;
+
+        let raw_chunk = b"valid shard payload with present xorb";
+        let (xorb_data, shard_data, file_hash) = build_one_chunk_xorb_and_shard_data(raw_chunk);
+        let shard_id = compute_data_hash(&shard_data).to_hex();
+        let shard_key = format!("shards/{}", shard_id);
+        let parsed_shard = MDBShardFile::parse(&shard_data).unwrap();
+        let xorb_hash = parsed_shard.xorb_entries[0].xorb_hash.to_hex();
+
+        storage_arc
+            .put(&format!("xorbs/{}", xorb_hash), Bytes::from(xorb_data))
+            .await
+            .unwrap();
+        storage_arc
+            .put(&shard_key, Bytes::from_static(b"not a valid durable shard"))
+            .await
+            .unwrap();
+
+        let req = test::TestRequest::post()
+            .uri("/v1/shards")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_payload(shard_data)
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 400);
+        assert!(index_for_assert.get_shards_for_file(&file_hash).is_none());
     }
 }

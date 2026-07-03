@@ -56,6 +56,54 @@ async fn test_upload_xorb() {
 }
 
 #[actix_web::test]
+async fn test_upload_and_download_xorb_with_uppercase_hash() {
+    let dir = tempdir().unwrap();
+    let storage: Box<dyn StorageBackend> =
+        Box::new(LocalStorage::new(dir.path().to_str().unwrap()).unwrap());
+
+    let ctx: TestContext = test_config_with_new_key();
+    let write_token = test_token_for_keypair(&ctx.keypair, "read write");
+    let read_token = test_token_for_keypair(&ctx.keypair, "read");
+
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(storage))
+            .app_data(web::Data::new(ctx.auth_verifier))
+            .app_data(web::Data::new(ctx.config))
+            .route(
+                "/v1/xorbs/{prefix}/{hash}",
+                web::post().to(xet_server::api::xorb::upload_xorb),
+            )
+            .route(
+                "/v1/xorbs/{prefix}/{hash}",
+                web::get().to(xet_server::api::xorb::download_xorb),
+            ),
+    )
+    .await;
+
+    let (xorb_data, hash) = create_valid_xorb(b"uppercase xorb hash regression");
+    let uppercase_hash = hash.to_uppercase();
+
+    let upload_req = test::TestRequest::post()
+        .uri(&format!("/v1/xorbs/default/{}", uppercase_hash))
+        .insert_header(("Authorization", format!("Bearer {}", write_token)))
+        .set_payload(Bytes::from(xorb_data.clone()))
+        .to_request();
+
+    let upload_resp = test::call_service(&app, upload_req).await;
+    assert!(upload_resp.status().is_success());
+
+    let download_req = test::TestRequest::get()
+        .uri(&format!("/v1/xorbs/default/{}", uppercase_hash))
+        .insert_header(("Authorization", format!("Bearer {}", read_token)))
+        .to_request();
+
+    let download_resp = test::call_service(&app, download_req).await;
+    assert!(download_resp.status().is_success());
+    assert_eq!(test::read_body(download_resp).await, Bytes::from(xorb_data));
+}
+
+#[actix_web::test]
 async fn test_upload_xorb_duplicate() {
     let dir = tempdir().unwrap();
     let storage: Box<dyn StorageBackend> =
