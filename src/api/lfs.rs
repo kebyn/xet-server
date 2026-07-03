@@ -805,6 +805,123 @@ fn check_disk_space(path: &std::path::Path, required_bytes: u64) -> Result<(), S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::auth::{AuthVerifier, KeyPair, XetClaims, sign_xet_token};
+    use crate::config::{AuthConfig, ConversionConfig};
+    use crate::conversion::ConvertingOids;
+    use crate::format::shard::MDBShardFile;
+    use crate::format::shard_builder::{FileSegment, ShardBuilder, XorbChunkBuildEntry};
+    use crate::format::xorb_builder::XorbBuilder;
+    use crate::hash::compute_data_hash;
+    use crate::shard_validation::validate_shard_for_index;
+    use crate::storage::local::LocalStorage;
+    use actix_web::{App, test as actix_test, web};
+    use bytes::Bytes;
+    use sha2::{Digest, Sha256};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use tempfile::tempdir;
+
+    fn create_test_config() -> (KeyPair, AuthVerifier, ServerConfig) {
+        let kp = KeyPair::generate();
+        let public_key_pem = KeyPair::public_key_to_pem(&kp.verifying_key()).unwrap();
+
+        let temp_dir = tempdir().unwrap();
+        let temp_path = temp_dir.path().join(format!("pubkey-{}.pem", kp.kid()));
+        std::fs::write(&temp_path, &public_key_pem).unwrap();
+
+        let temp_path_str = temp_path.to_str().unwrap().to_string();
+        std::mem::forget(temp_dir);
+
+        let auth_config = AuthConfig {
+            public_key_path: temp_path_str,
+            trusted_kids: vec![kp.kid()],
+            private_key_path: None,
+            signing_kid: None,
+        };
+
+        let auth_verifier = AuthVerifier::from_config(&auth_config).unwrap();
+        let config = ServerConfig {
+            auth: auth_config,
+            ..Default::default()
+        };
+
+        (kp, auth_verifier, config)
+    }
+
+    fn create_test_token(kp: &KeyPair, scope: &str) -> String {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let claims = XetClaims {
+            sub: "test".to_string(),
+            scope: scope.to_string(),
+            repo_id: "test/repo".to_string(),
+            repo_type: "model".to_string(),
+            revision: "main".to_string(),
+            exp: now + 3600,
+            iat: now,
+            kid: kp.kid(),
+            token_type: "user".to_string(),
+            oid: None,
+            operation: None,
+        };
+
+        sign_xet_token(&claims, kp).unwrap()
+    }
+
+    fn sha256_hex(data: &[u8]) -> String {
+        format!("{:x}", Sha256::digest(data))
+    }
+
+    fn sha256_merkle_hash(data: &[u8]) -> MerkleHash {
+        MerkleHash::from_hex(&sha256_hex(data)).unwrap()
+    }
+
+    fn build_mismatched_file_hash_xorb_and_shard(
+        attacker_bytes: &[u8],
+        victim_bytes: &[u8],
+    ) -> (Vec<u8>, Vec<u8>, String) {
+        let mut xorb_builder =
+            XorbBuilder::new(crate::format::compression::CompressionScheme::None);
+        let (serialized_chunk_hash, compressed_len) =
+            xorb_builder.add_chunk(attacker_bytes).unwrap();
+        let xorb = xorb_builder.build().unwrap();
+        let raw_chunk_hash = compute_data_hash(attacker_bytes);
+        let victim_hash = sha256_merkle_hash(victim_bytes);
+
+        let mut shard_builder = ShardBuilder::new();
+        let xorb_index = shard_builder
+            .add_xorb_with_raw_chunk_hashes(
+                xorb.xorb_hash,
+                xorb.total_uncompressed_size as u32,
+                xorb.total_compressed_size as u32,
+                vec![XorbChunkBuildEntry {
+                    chunk_hash: serialized_chunk_hash,
+                    chunk_byte_range_start: 0,
+                    unpacked_segment_bytes: attacker_bytes.len() as u32,
+                }],
+                vec![raw_chunk_hash],
+            )
+            .unwrap();
+        assert_eq!(compressed_len as usize, attacker_bytes.len());
+        shard_builder.add_file(
+            victim_hash,
+            vec![FileSegment {
+                xorb_hash: xorb.xorb_hash,
+                xorb_index,
+                chunk_index_start: 0,
+                chunk_index_end: 1,
+                unpacked_segment_bytes: attacker_bytes.len() as u32,
+            }],
+        );
+
+        (
+            xorb.data,
+            shard_builder.build().unwrap(),
+            victim_hash.to_hex(),
+        )
+    }
 
     #[test]
     fn test_extract_chunk_verified_detects_corruption() {
@@ -915,5 +1032,74 @@ mod tests {
             .await
             .is_err()
         );
+    }
+
+    #[actix_web::test]
+    async fn test_lfs_download_rejects_shard_poisoning_without_verified_index_entry() {
+        let storage_dir = tempdir().unwrap();
+        let upload_temp_dir = tempdir().unwrap();
+        let reconstruction_temp_dir = tempdir().unwrap();
+
+        let storage: Arc<Box<dyn StorageBackend>> = Arc::new(Box::new(
+            LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap(),
+        ));
+        let index = MetadataIndex::new();
+        let index_for_assert = index.clone();
+        let (kp, auth, mut config) = create_test_config();
+        config.storage.upload_temp_dir = Some(upload_temp_dir.path().to_str().unwrap().to_string());
+        config.storage.reconstruction_temp_dir =
+            Some(reconstruction_temp_dir.path().to_str().unwrap().to_string());
+        let token = create_test_token(&kp, "read");
+
+        let attacker_bytes = b"attacker controlled bytes";
+        let victim_bytes = b"victim bytes with different sha256";
+        let (xorb_data, shard_data, victim_oid) =
+            build_mismatched_file_hash_xorb_and_shard(attacker_bytes, victim_bytes);
+        assert_ne!(victim_oid, sha256_hex(attacker_bytes));
+
+        let shard_id = compute_data_hash(&shard_data).to_hex();
+        let parsed_shard = MDBShardFile::parse(&shard_data).unwrap();
+        let xorb_hash = parsed_shard.xorb_entries[0].xorb_hash.to_hex();
+
+        storage
+            .put(&format!("xorbs/{}", xorb_hash), Bytes::from(xorb_data))
+            .await
+            .unwrap();
+        storage
+            .put(
+                &format!("shards/{}", shard_id),
+                Bytes::from(shard_data.clone()),
+            )
+            .await
+            .unwrap();
+
+        let validate_result = validate_shard_for_index(
+            &shard_id,
+            &parsed_shard,
+            storage.as_ref().as_ref(),
+            reconstruction_temp_dir.path(),
+        )
+        .await;
+        assert!(validate_result.is_err());
+        assert!(index_for_assert.get_file_refs(&victim_oid).is_none());
+
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::from(storage))
+                .app_data(web::Data::new(index))
+                .app_data(web::Data::new(Arc::new(ConvertingOids::new())))
+                .app_data(web::Data::new(ConversionConfig::default()))
+                .app_data(web::Data::new(auth))
+                .app_data(web::Data::new(config))
+                .route("/lfs/objects/{oid}", web::get().to(download_lfs_object)),
+        )
+        .await;
+
+        let req = actix_test::TestRequest::get()
+            .uri(&format!("/lfs/objects/{}", victim_oid))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request();
+        let resp = actix_test::call_service(&app, req).await;
+        assert_eq!(resp.status(), actix_web::http::StatusCode::NOT_FOUND);
     }
 }

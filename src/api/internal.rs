@@ -190,3 +190,96 @@ pub async fn head_blob(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::auth::{AuthVerifier, KeyPair, XetClaims, sign_xet_token};
+    use crate::config::AuthConfig;
+    use crate::storage::local::LocalStorage;
+    use actix_web::{App, test, web};
+    use bytes::Bytes;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use tempfile::tempdir;
+
+    fn create_test_config() -> (KeyPair, AuthVerifier) {
+        let kp = KeyPair::generate();
+        let public_key_pem = KeyPair::public_key_to_pem(&kp.verifying_key()).unwrap();
+
+        let temp_dir = tempdir().unwrap();
+        let temp_path = temp_dir.path().join(format!("pubkey-{}.pem", kp.kid()));
+        std::fs::write(&temp_path, &public_key_pem).unwrap();
+
+        let temp_path_str = temp_path.to_str().unwrap().to_string();
+        std::mem::forget(temp_dir);
+
+        let auth_config = AuthConfig {
+            public_key_path: temp_path_str,
+            trusted_kids: vec![kp.kid()],
+            private_key_path: None,
+            signing_kid: None,
+        };
+
+        let auth_verifier = AuthVerifier::from_config(&auth_config).unwrap();
+        (kp, auth_verifier)
+    }
+
+    fn create_internal_token(kp: &KeyPair) -> String {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let claims = XetClaims {
+            sub: "hub-service".to_string(),
+            scope: "internal".to_string(),
+            repo_id: "test/repo".to_string(),
+            repo_type: "model".to_string(),
+            revision: "main".to_string(),
+            exp: now + 3600,
+            iat: now,
+            kid: kp.kid(),
+            token_type: "internal".to_string(),
+            oid: None,
+            operation: None,
+        };
+
+        sign_xet_token(&claims, kp).unwrap()
+    }
+
+    #[actix_web::test]
+    async fn test_internal_head_ignores_unverified_shard_poisoning() {
+        let dir = tempdir().unwrap();
+        let storage: Box<dyn StorageBackend> =
+            Box::new(LocalStorage::new(dir.path().to_str().unwrap()).unwrap());
+        storage
+            .put(
+                "shards/invalid-poison-shard",
+                Bytes::from_static(b"not a shard"),
+            )
+            .await
+            .unwrap();
+
+        let index = MetadataIndex::new();
+        let (kp, auth) = create_test_config();
+        let token = create_internal_token(&kp);
+        let victim_oid = "a".repeat(64);
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(auth))
+                .app_data(web::Data::new(storage))
+                .app_data(web::Data::new(index))
+                .route("/internal/blob/{oid}", web::head().to(head_blob)),
+        )
+        .await;
+
+        let req = test::TestRequest::default()
+            .method(actix_web::http::Method::HEAD)
+            .uri(&format!("/internal/blob/{}", victim_oid))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), actix_web::http::StatusCode::NOT_FOUND);
+    }
+}
