@@ -52,6 +52,15 @@ struct JwtHeader {
 /// here so existing `crate::api::auth::XetClaims` paths keep resolving.
 pub use xet_auth_types::XetClaims;
 
+pub const PROXY_TOKEN_TTL_SECONDS: u64 = 300;
+
+#[derive(Debug, Clone)]
+pub struct SignedProxyToken {
+    pub token: String,
+    pub exp: u64,
+    pub expires_in: u64,
+}
+
 /// Ed25519 key pair for signing and verification
 pub struct KeyPair {
     signing_key: SigningKey,
@@ -374,7 +383,12 @@ impl AuthVerifier {
     ///
     /// Returns None if signing key is not configured (CAS_PRIVATE_KEY_PATH not set).
     /// Proxy tokens are bound to a specific OID and operation, limiting blast radius.
-    pub fn sign_proxy_token(&self, sub: &str, oid: &str, operation: &str) -> Option<String> {
+    pub fn sign_proxy_token(
+        &self,
+        sub: &str,
+        oid: &str,
+        operation: &str,
+    ) -> Option<SignedProxyToken> {
         let signing_key = self.signing_key.as_ref()?;
         let kid = self.signing_kid.as_deref().unwrap_or("cas-key");
 
@@ -382,7 +396,7 @@ impl AuthVerifier {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let exp = now + 300; // 5-minute TTL (same as Hub proxy tokens)
+        let exp = now + PROXY_TOKEN_TTL_SECONDS;
 
         let claims = XetClaims {
             sub: sub.to_string(),
@@ -415,7 +429,11 @@ impl AuthVerifier {
         let signature = signing_key.sign(message.as_bytes());
         let sig_b64 = URL_SAFE_NO_PAD.encode(signature.to_bytes());
 
-        Some(format!("proxy_{}.{}.{}", header_b64, payload_b64, sig_b64))
+        Some(SignedProxyToken {
+            token: format!("proxy_{}.{}.{}", header_b64, payload_b64, sig_b64),
+            exp,
+            expires_in: PROXY_TOKEN_TTL_SECONDS,
+        })
     }
 
     /// Check if proxy token generation is enabled
@@ -474,5 +492,62 @@ mod tests {
         assert!(!key_permissions_too_open(&p));
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert!(key_permissions_too_open(&p));
+    }
+
+    #[test]
+    fn test_sign_proxy_token_returns_token_and_expiry_data() {
+        let keypair = KeyPair::generate();
+        let public_key = keypair.verifying_key();
+        let kid = "test-kid".to_string();
+        let verifier = AuthVerifier {
+            public_key,
+            trusted_kids: vec![kid.clone()],
+            signing_key: Some(keypair.signing_key),
+            signing_kid: Some(kid.clone()),
+        };
+        let oid = "a".repeat(64);
+
+        let before = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let signed = verifier
+            .sign_proxy_token("alice", &oid, "download")
+            .expect("proxy token should be signed");
+        let after = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        assert!(signed.token.starts_with("proxy_"));
+        assert_eq!(signed.expires_in, PROXY_TOKEN_TTL_SECONDS);
+        assert!(signed.exp >= before + PROXY_TOKEN_TTL_SECONDS);
+        assert!(signed.exp <= after + PROXY_TOKEN_TTL_SECONDS);
+
+        let claims = verifier.verify_token(&signed.token).unwrap();
+        assert_eq!(claims.sub, "alice");
+        assert_eq!(claims.scope, "lfs-download");
+        assert_eq!(claims.kid, kid);
+        assert_eq!(claims.token_type, "proxy");
+        assert_eq!(claims.oid.as_deref(), Some(oid.as_str()));
+        assert_eq!(claims.operation.as_deref(), Some("download"));
+        assert_eq!(claims.exp, signed.exp);
+    }
+
+    #[test]
+    fn test_sign_proxy_token_without_signing_key_returns_none() {
+        let keypair = KeyPair::generate();
+        let verifier = AuthVerifier {
+            public_key: keypair.verifying_key(),
+            trusted_kids: vec!["test-kid".to_string()],
+            signing_key: None,
+            signing_kid: Some("test-kid".to_string()),
+        };
+
+        assert!(
+            verifier
+                .sign_proxy_token("alice", &"a".repeat(64), "download")
+                .is_none()
+        );
     }
 }
