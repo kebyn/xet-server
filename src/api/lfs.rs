@@ -29,7 +29,7 @@ use crate::format::shard::MDBShardFile;
 use crate::format::xorb::XorbChunkHeader;
 use crate::index::MetadataIndex;
 use crate::metrics::GLOBAL_METRICS;
-use crate::reconstruction_io::reconstruct_verified_file_to_temp;
+use crate::reconstruction_io::{ReconstructionError, reconstruct_verified_file_to_temp};
 use crate::storage::{StorageBackend, StorageError};
 #[cfg(test)]
 use crate::types::MerkleHash;
@@ -320,58 +320,62 @@ pub async fn download_lfs_object(
     match storage.exists(&object_key).await {
         Ok(true) => {
             // Raw blob exists — serve it and trigger lazy conversion in background
-            let response = serve_raw_blob(&oid, storage.clone(), config.clone(), start).await;
+            match serve_raw_blob(&oid, storage.clone(), config.clone(), start).await {
+                RawBlobResult::Served(response) => {
+                    if conversion_config.enabled && converting.try_acquire(&oid) {
+                        let pipeline = crate::conversion::ConversionPipeline::new(
+                            storage.clone().into_inner(),
+                            index.clone().into_inner(),
+                            conversion_config.get_ref().clone(),
+                        );
+                        let converting_clone = converting.clone();
+                        let oid_clone = oid.clone();
+                        tokio::spawn(async move {
+                            // I4 fix: Use scope guard to ensure OID lock is always released,
+                            // even if convert() panics. Previously, a panic would skip the
+                            // release() call, permanently locking the OID until server restart.
+                            struct OidGuard {
+                                converting: Arc<ConvertingOids>,
+                                oid: String,
+                            }
+                            impl Drop for OidGuard {
+                                fn drop(&mut self) {
+                                    self.converting.release(&self.oid);
+                                }
+                            }
+                            let _guard = OidGuard {
+                                converting: converting_clone.get_ref().clone(),
+                                oid: oid_clone.clone(),
+                            };
 
-            if conversion_config.enabled && converting.try_acquire(&oid) {
-                let pipeline = crate::conversion::ConversionPipeline::new(
-                    storage.clone().into_inner(),
-                    index.clone().into_inner(),
-                    conversion_config.get_ref().clone(),
-                );
-                let converting_clone = converting.clone();
-                let oid_clone = oid.clone();
-                tokio::spawn(async move {
-                    // I4 fix: Use scope guard to ensure OID lock is always released,
-                    // even if convert() panics. Previously, a panic would skip the
-                    // release() call, permanently locking the OID until server restart.
-                    struct OidGuard {
-                        converting: Arc<ConvertingOids>,
-                        oid: String,
+                            match pipeline.convert(&oid_clone).await {
+                                Ok(result) => {
+                                    tracing::info!(
+                                        "Lazy converted {}: {} chunks, {} deduped, {} → {} bytes",
+                                        oid_clone,
+                                        result.num_chunks,
+                                        result.num_deduped_chunks,
+                                        result.raw_size,
+                                        result.xorb_size
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Lazy conversion failed for {}: {} (raw blob preserved)",
+                                        oid_clone,
+                                        e
+                                    );
+                                }
+                            }
+                            // _guard.drop() releases the OID lock, even on panic
+                        });
                     }
-                    impl Drop for OidGuard {
-                        fn drop(&mut self) {
-                            self.converting.release(&self.oid);
-                        }
-                    }
-                    let _guard = OidGuard {
-                        converting: converting_clone.get_ref().clone(),
-                        oid: oid_clone.clone(),
-                    };
 
-                    match pipeline.convert(&oid_clone).await {
-                        Ok(result) => {
-                            tracing::info!(
-                                "Lazy converted {}: {} chunks, {} deduped, {} → {} bytes",
-                                oid_clone,
-                                result.num_chunks,
-                                result.num_deduped_chunks,
-                                result.raw_size,
-                                result.xorb_size
-                            );
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "Lazy conversion failed for {}: {} (raw blob preserved)",
-                                oid_clone,
-                                e
-                            );
-                        }
-                    }
-                    // _guard.drop() releases the OID lock, even on panic
-                });
+                    return response;
+                }
+                RawBlobResult::Missing => {}
+                RawBlobResult::Error(response) => return response,
             }
-
-            return response;
         }
         Ok(false) => {}
         Err(e) => {
@@ -400,12 +404,18 @@ pub async fn download_lfs_object(
 /// to avoid loading multi-gigabyte files entirely into RAM.
 /// I3: When integrity verification is enabled, computes SHA-256 hash incrementally
 /// during streaming (not a separate pre-read), then verifies after stream completes.
+enum RawBlobResult {
+    Served(HttpResponse),
+    Missing,
+    Error(HttpResponse),
+}
+
 async fn serve_raw_blob(
     oid: &str,
     storage: web::Data<Box<dyn StorageBackend>>,
     config: web::Data<ServerConfig>,
     start: std::time::Instant,
-) -> HttpResponse {
+) -> RawBlobResult {
     let object_key = format!("lfs/objects/{}", oid);
     let verify_integrity = config.storage.verify_download_integrity;
 
@@ -415,6 +425,9 @@ async fn serve_raw_blob(
             // Stream from file
             let file = match tokio::fs::File::open(&path).await {
                 Ok(f) => f,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    return RawBlobResult::Missing;
+                }
                 Err(e) => {
                     error!(
                         "Failed to open file for streaming {}: {}",
@@ -424,21 +437,28 @@ async fn serve_raw_blob(
                     GLOBAL_METRICS.record_request(500);
                     GLOBAL_METRICS.record_error();
                     GLOBAL_METRICS.record_latency(start);
-                    return HttpResponse::InternalServerError().json(serde_json::json!({
-                        "error": format!("Failed to open file: {}", e)
-                    }));
+                    return RawBlobResult::Error(HttpResponse::InternalServerError().json(
+                        serde_json::json!({
+                            "error": format!("Failed to open file: {}", e)
+                        }),
+                    ));
                 }
             };
             let metadata = match file.metadata().await {
                 Ok(m) => m,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    return RawBlobResult::Missing;
+                }
                 Err(e) => {
                     error!("Failed to get file metadata: {}", e);
                     GLOBAL_METRICS.record_request(500);
                     GLOBAL_METRICS.record_error();
                     GLOBAL_METRICS.record_latency(start);
-                    return HttpResponse::InternalServerError().json(serde_json::json!({
-                        "error": format!("Failed to get metadata: {}", e)
-                    }));
+                    return RawBlobResult::Error(HttpResponse::InternalServerError().json(
+                        serde_json::json!({
+                            "error": format!("Failed to get metadata: {}", e)
+                        }),
+                    ));
                 }
             };
             let file_size = metadata.len();
@@ -466,9 +486,11 @@ async fn serve_raw_blob(
                 GLOBAL_METRICS.record_download_bytes(file_size);
                 GLOBAL_METRICS.record_latency(start);
 
-                HttpResponse::Ok()
-                    .content_type("application/octet-stream")
-                    .body(body)
+                RawBlobResult::Served(
+                    HttpResponse::Ok()
+                        .content_type("application/octet-stream")
+                        .body(body),
+                )
             } else {
                 let body = actix_web::body::SizedStream::new(file_size, base_stream);
 
@@ -478,30 +500,26 @@ async fn serve_raw_blob(
                 GLOBAL_METRICS.record_download_bytes(file_size);
                 GLOBAL_METRICS.record_latency(start);
 
-                HttpResponse::Ok()
-                    .content_type("application/octet-stream")
-                    .body(body)
+                RawBlobResult::Served(
+                    HttpResponse::Ok()
+                        .content_type("application/octet-stream")
+                        .body(body),
+                )
             }
         }
         Ok(None) => {
             // Non-file backend: fall back to in-memory get
             serve_raw_blob_inmemory(oid, storage, config, start).await
         }
-        Err(StorageError::NotFound(_)) => {
-            GLOBAL_METRICS.record_request(404);
-            GLOBAL_METRICS.record_latency(start);
-            HttpResponse::NotFound().json(serde_json::json!({
-                "error": format!("Object not found: {}", oid)
-            }))
-        }
+        Err(StorageError::NotFound(_)) => RawBlobResult::Missing,
         Err(e) => {
             error!("Failed to get path for {}: {}", oid, e);
             GLOBAL_METRICS.record_request(500);
             GLOBAL_METRICS.record_error();
             GLOBAL_METRICS.record_latency(start);
-            HttpResponse::InternalServerError().json(serde_json::json!({
+            RawBlobResult::Error(HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": format!("Storage error: {}", e)
-            }))
+            })))
         }
     }
 }
@@ -629,28 +647,24 @@ async fn serve_raw_blob_inmemory(
     storage: web::Data<Box<dyn StorageBackend>>,
     config: web::Data<ServerConfig>,
     start: std::time::Instant,
-) -> HttpResponse {
+) -> RawBlobResult {
     let object_key = format!("lfs/objects/{}", oid);
     let object_data = match storage.get(&object_key).await {
         Ok(data) => {
             GLOBAL_METRICS.record_storage_operation();
             data
         }
-        Err(StorageError::NotFound(_)) => {
-            GLOBAL_METRICS.record_request(404);
-            GLOBAL_METRICS.record_latency(start);
-            return HttpResponse::NotFound().json(serde_json::json!({
-                "error": format!("Object not found: {}", oid)
-            }));
-        }
+        Err(StorageError::NotFound(_)) => return RawBlobResult::Missing,
         Err(e) => {
             error!("Failed to fetch object: {}", e);
             GLOBAL_METRICS.record_request(500);
             GLOBAL_METRICS.record_error();
             GLOBAL_METRICS.record_latency(start);
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Storage error: {}", e)
-            }));
+            return RawBlobResult::Error(HttpResponse::InternalServerError().json(
+                serde_json::json!({
+                    "error": format!("Storage error: {}", e)
+                }),
+            ));
         }
     };
 
@@ -672,9 +686,11 @@ async fn serve_raw_blob_inmemory(
             GLOBAL_METRICS.record_request(500);
             GLOBAL_METRICS.record_error();
             GLOBAL_METRICS.record_latency(start);
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Integrity verification failed: stored content does not match OID"
-            }));
+            return RawBlobResult::Error(HttpResponse::InternalServerError().json(
+                serde_json::json!({
+                    "error": "Integrity verification failed: stored content does not match OID"
+                }),
+            ));
         }
 
         info!(
@@ -694,9 +710,11 @@ async fn serve_raw_blob_inmemory(
     GLOBAL_METRICS.record_download_bytes(object_data.len() as u64);
     GLOBAL_METRICS.record_latency(start);
 
-    HttpResponse::Ok()
-        .content_type("application/octet-stream")
-        .body(object_data)
+    RawBlobResult::Served(
+        HttpResponse::Ok()
+            .content_type("application/octet-stream")
+            .body(object_data),
+    )
 }
 
 async fn serve_verified_xet_reconstruction(
@@ -711,10 +729,18 @@ async fn serve_verified_xet_reconstruction(
             Ok(reconstruction) => reconstruction,
             Err(e) => {
                 error!("Verified xet reconstruction failed for {}: {}", oid, e);
-                GLOBAL_METRICS.record_request(404);
+                if matches!(e, ReconstructionError::Stale(_)) {
+                    GLOBAL_METRICS.record_request(404);
+                    GLOBAL_METRICS.record_latency(start);
+                    return HttpResponse::NotFound().json(serde_json::json!({
+                        "error": format!("Object not found: {}", oid)
+                    }));
+                }
+                GLOBAL_METRICS.record_request(500);
+                GLOBAL_METRICS.record_error();
                 GLOBAL_METRICS.record_latency(start);
-                return HttpResponse::NotFound().json(serde_json::json!({
-                    "error": format!("Object not found: {}", oid)
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": "Failed to reconstruct verified object"
                 }));
             }
         };

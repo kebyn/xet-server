@@ -4,14 +4,45 @@ use std::path::Path;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 
-use crate::api::reconstruction::fetch_and_parse_shard;
+use crate::format::shard::MDBShardFile;
 use crate::hash::{compute_data_hash, file_hash};
 use crate::index::FileShardRef;
 use crate::reconstruction_plan::build_file_chunk_plan;
-use crate::storage::StorageBackend;
+use crate::storage::{StorageBackend, StorageError};
 use crate::types::MerkleHash;
 use crate::util::StreamingHasher;
 use crate::xorb_reader::{TempPathGuard, extract_chunk_verified_from_file};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReconstructionError {
+    InvalidInput(String),
+    Stale(String),
+    Storage(String),
+    TempIo(String),
+    Parse(String),
+    Integrity(String),
+}
+
+impl ReconstructionError {
+    pub fn is_stale(&self) -> bool {
+        matches!(self, Self::Stale(_))
+    }
+}
+
+impl std::fmt::Display for ReconstructionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidInput(e) => write!(f, "invalid input: {}", e),
+            Self::Stale(e) => write!(f, "stale reconstruction reference: {}", e),
+            Self::Storage(e) => write!(f, "storage error: {}", e),
+            Self::TempIo(e) => write!(f, "temporary file error: {}", e),
+            Self::Parse(e) => write!(f, "parse error: {}", e),
+            Self::Integrity(e) => write!(f, "integrity error: {}", e),
+        }
+    }
+}
+
+impl std::error::Error for ReconstructionError {}
 
 pub struct VerifiedReconstruction {
     path_guard: TempPathGuard,
@@ -37,19 +68,61 @@ pub async fn reconstruct_verified_file_to_temp(
     file_refs: Vec<FileShardRef>,
     storage: &dyn StorageBackend,
     temp_dir: &Path,
-) -> Result<VerifiedReconstruction, String> {
-    std::fs::create_dir_all(temp_dir)
-        .map_err(|e| format!("failed to create reconstruction temp dir: {}", e))?;
-    let target_hash =
-        MerkleHash::from_hex(file_id).map_err(|e| format!("invalid file id {}: {}", file_id, e))?;
+) -> Result<VerifiedReconstruction, ReconstructionError> {
+    std::fs::create_dir_all(temp_dir).map_err(|e| {
+        ReconstructionError::TempIo(format!("failed to create reconstruction temp dir: {}", e))
+    })?;
+    let target_hash = MerkleHash::from_hex(file_id).map_err(|e| {
+        ReconstructionError::InvalidInput(format!("invalid file id {}: {}", file_id, e))
+    })?;
+    let canonical_file_id = target_hash.to_hex();
+
+    let mut first_non_stale_error: Option<ReconstructionError> = None;
+    for file_ref in file_refs {
+        match reconstruct_single_file_ref_to_temp(
+            &canonical_file_id,
+            &target_hash,
+            file_ref,
+            storage,
+            temp_dir,
+        )
+        .await
+        {
+            Ok(reconstruction) => return Ok(reconstruction),
+            Err(e) if e.is_stale() => {}
+            Err(e) => {
+                if first_non_stale_error.is_none() {
+                    first_non_stale_error = Some(e);
+                }
+            }
+        }
+    }
+
+    Err(first_non_stale_error.unwrap_or_else(|| {
+        ReconstructionError::Stale(format!(
+            "no verified shard reference could reconstruct {}",
+            canonical_file_id
+        ))
+    }))
+}
+
+async fn reconstruct_single_file_ref_to_temp(
+    canonical_file_id: &str,
+    target_hash: &MerkleHash,
+    file_ref: FileShardRef,
+    storage: &dyn StorageBackend,
+    temp_dir: &Path,
+) -> Result<VerifiedReconstruction, ReconstructionError> {
     let output_guard = TempPathGuard::new(temp_dir.join(format!(
         "reconstruct-{}-{}.tmp",
-        file_id,
+        canonical_file_id,
         uuid::Uuid::new_v4()
     )));
     let mut output = tokio::fs::File::create(output_guard.path())
         .await
-        .map_err(|e| format!("failed to create reconstruction temp file: {}", e))?;
+        .map_err(|e| {
+            ReconstructionError::TempIo(format!("failed to create reconstruction temp file: {}", e))
+        })?;
 
     let mut sha = Sha256::new();
     let mut whole_blake3 = StreamingHasher::new();
@@ -57,81 +130,101 @@ pub async fn reconstruct_verified_file_to_temp(
     let mut total_size = 0u64;
     let mut xorb_cache: HashMap<MerkleHash, TempPathGuard> = HashMap::new();
 
-    for file_ref in file_refs {
-        let shard = fetch_and_parse_shard(&file_ref.shard_id, storage).await?;
-        let plan = build_file_chunk_plan(&shard, &target_hash, Some(file_ref.file_index))
-            .map_err(|e| e.to_string())?;
+    let shard = fetch_shard(&file_ref.shard_id, storage).await?;
+    let plan = build_file_chunk_plan(&shard, target_hash, Some(file_ref.file_index))
+        .map_err(|e| ReconstructionError::Integrity(e.to_string()))?;
 
-        for planned in plan.chunks {
-            if !xorb_cache.contains_key(&planned.xorb_hash) {
-                let key = format!("xorbs/{}", planned.xorb_hash.to_hex());
-                let guard = TempPathGuard::new(temp_dir.join(format!(
-                    "reconstruct-xorb-{}-{}.tmp",
-                    planned.xorb_hash.to_hex(),
-                    uuid::Uuid::new_v4()
-                )));
-                storage
-                    .download_to_path(&key, guard.path())
-                    .await
-                    .map_err(|e| {
-                        format!(
-                            "failed to download xorb {}: {}",
-                            planned.xorb_hash.to_hex(),
-                            e
-                        )
-                    })?;
-                xorb_cache.insert(planned.xorb_hash, guard);
-            }
-
-            let guard = xorb_cache.get(&planned.xorb_hash).unwrap();
-            let mut xorb_file = tokio::fs::File::open(guard.path()).await.map_err(|e| {
-                format!("failed to open xorb {}: {}", planned.xorb_hash.to_hex(), e)
-            })?;
-            let bytes = extract_chunk_verified_from_file(
-                &mut xorb_file,
-                planned.chunk_byte_range_start as u64,
-                planned.unpacked_segment_bytes,
-                &planned.serialized_chunk_hash,
-            )
-            .await?;
-            let raw_hash = compute_data_hash(&bytes);
-            if raw_hash != planned.raw_chunk_hash {
-                return Err(format!(
-                    "raw chunk hash mismatch for xorb {} chunk {}",
-                    planned.xorb_hash.to_hex(),
-                    planned.xorb_chunk_index
-                ));
-            }
-            output
-                .write_all(&bytes)
+    for planned in plan.chunks {
+        if !xorb_cache.contains_key(&planned.xorb_hash) {
+            let key = format!("xorbs/{}", planned.xorb_hash.to_hex());
+            let guard = TempPathGuard::new(temp_dir.join(format!(
+                "reconstruct-xorb-{}-{}.tmp",
+                planned.xorb_hash.to_hex(),
+                uuid::Uuid::new_v4()
+            )));
+            storage
+                .download_to_path(&key, guard.path())
                 .await
-                .map_err(|e| format!("failed to write reconstructed bytes: {}", e))?;
-            sha.update(&bytes);
-            whole_blake3.update(&bytes);
-            total_size += bytes.len() as u64;
-            chunk_nodes.push((raw_hash, bytes.len() as u64));
+                .map_err(|e| map_storage_error(&key, e))?;
+            xorb_cache.insert(planned.xorb_hash, guard);
         }
+
+        let guard = xorb_cache.get(&planned.xorb_hash).unwrap();
+        let mut xorb_file = tokio::fs::File::open(guard.path()).await.map_err(|e| {
+            ReconstructionError::TempIo(format!(
+                "failed to open xorb {}: {}",
+                planned.xorb_hash.to_hex(),
+                e
+            ))
+        })?;
+        let bytes = extract_chunk_verified_from_file(
+            &mut xorb_file,
+            planned.chunk_byte_range_start as u64,
+            planned.unpacked_segment_bytes,
+            &planned.serialized_chunk_hash,
+        )
+        .await
+        .map_err(ReconstructionError::Integrity)?;
+        let raw_hash = compute_data_hash(&bytes);
+        if raw_hash != planned.raw_chunk_hash {
+            return Err(ReconstructionError::Integrity(format!(
+                "raw chunk hash mismatch for xorb {} chunk {}",
+                planned.xorb_hash.to_hex(),
+                planned.xorb_chunk_index
+            )));
+        }
+        output.write_all(&bytes).await.map_err(|e| {
+            ReconstructionError::TempIo(format!("failed to write reconstructed bytes: {}", e))
+        })?;
+        sha.update(&bytes);
+        whole_blake3.update(&bytes);
+        total_size += bytes.len() as u64;
+        chunk_nodes.push((raw_hash, bytes.len() as u64));
     }
 
-    output
-        .sync_all()
-        .await
-        .map_err(|e| format!("failed to sync reconstructed file: {}", e))?;
+    output.sync_all().await.map_err(|e| {
+        ReconstructionError::TempIo(format!("failed to sync reconstructed file: {}", e))
+    })?;
 
     let sha_hex = format!("{:x}", sha.finalize());
     let blake3_hex = whole_blake3.finalize().to_hex();
     let xet_file_hash = file_hash(&chunk_nodes).to_hex();
-    if file_id != sha_hex && file_id != blake3_hex && file_id != xet_file_hash {
-        return Err(format!(
+    if canonical_file_id != sha_hex
+        && canonical_file_id != blake3_hex
+        && canonical_file_id != xet_file_hash
+    {
+        return Err(ReconstructionError::Integrity(format!(
             "reconstructed file hash mismatch for {}: sha256={}, blake3={}, xet_file_hash={}",
-            file_id, sha_hex, blake3_hex, xet_file_hash
-        ));
+            canonical_file_id, sha_hex, blake3_hex, xet_file_hash
+        )));
     }
 
     Ok(VerifiedReconstruction {
         path_guard: output_guard,
         size: total_size,
     })
+}
+
+async fn fetch_shard(
+    shard_id: &str,
+    storage: &dyn StorageBackend,
+) -> Result<MDBShardFile, ReconstructionError> {
+    let key = format!("shards/{}", shard_id);
+    let shard_data = storage
+        .get(&key)
+        .await
+        .map_err(|e| map_storage_error(&key, e))?;
+    MDBShardFile::parse(&shard_data).map_err(|e| {
+        ReconstructionError::Parse(format!("failed to parse shard {}: {}", shard_id, e))
+    })
+}
+
+fn map_storage_error(key: &str, error: StorageError) -> ReconstructionError {
+    match error {
+        StorageError::NotFound(_) => ReconstructionError::Stale(format!("missing {}", key)),
+        StorageError::Internal(e) => ReconstructionError::Storage(format!("{}: {}", key, e)),
+        StorageError::InvalidArgument(e) => ReconstructionError::Storage(format!("{}: {}", key, e)),
+    }
 }
 
 #[cfg(test)]
@@ -147,6 +240,43 @@ mod tests {
     use crate::types::MerkleHash;
     use sha2::{Digest, Sha256};
     use tempfile::tempdir;
+
+    fn build_single_file_shard(raw: &[u8], scheme: CompressionScheme) -> (Vec<u8>, MerkleHash) {
+        let mut xb = XorbBuilder::new(scheme);
+        let raw_hash = compute_data_hash(raw);
+        let (serialized_hash, _compressed_len) = xb.add_chunk(raw).unwrap();
+        let xorb = xb.build().unwrap();
+
+        let file_oid = format!("{:x}", Sha256::digest(raw));
+        let file_hash = MerkleHash::from_hex(&file_oid).unwrap();
+
+        let mut sb = ShardBuilder::new();
+        let xorb_index = sb
+            .add_xorb_with_raw_chunk_hashes(
+                xorb.xorb_hash,
+                xorb.total_uncompressed_size as u32,
+                xorb.total_compressed_size as u32,
+                vec![XorbChunkBuildEntry {
+                    chunk_hash: serialized_hash,
+                    chunk_byte_range_start: 0,
+                    unpacked_segment_bytes: raw.len() as u32,
+                }],
+                vec![raw_hash],
+            )
+            .unwrap();
+        sb.add_file(
+            file_hash,
+            vec![FileSegment {
+                xorb_hash: xorb.xorb_hash,
+                xorb_index,
+                chunk_index_start: 0,
+                chunk_index_end: 1,
+                unpacked_segment_bytes: raw.len() as u32,
+            }],
+        );
+
+        (sb.build().unwrap(), xorb.xorb_hash)
+    }
 
     #[tokio::test]
     async fn test_reconstruct_verified_file_uses_only_requested_file_segments() {
@@ -238,5 +368,84 @@ mod tests {
 
         let bytes = tokio::fs::read(result.path()).await.unwrap();
         assert_eq!(bytes, raw_b);
+    }
+
+    #[tokio::test]
+    async fn test_reconstruct_verified_file_treats_multiple_refs_as_candidates() {
+        let raw = b"same file may appear in multiple verified shards";
+        let file_oid = format!("{:x}", Sha256::digest(raw));
+        let dir = tempdir().unwrap();
+        let storage: Box<dyn StorageBackend> =
+            Box::new(LocalStorage::new(dir.path().to_str().unwrap()).unwrap());
+
+        let (shard_data_a, xorb_hash_a) = build_single_file_shard(raw, CompressionScheme::None);
+        let shard_id_a = compute_data_hash(&shard_data_a).to_hex();
+        let (xorb_data_a, rebuilt_xorb_hash_a) = {
+            let mut xb = XorbBuilder::new(CompressionScheme::None);
+            xb.add_chunk(raw).unwrap();
+            let xorb = xb.build().unwrap();
+            (xorb.data, xorb.xorb_hash)
+        };
+        assert_eq!(xorb_hash_a, rebuilt_xorb_hash_a);
+
+        let (shard_data_b, xorb_hash_b) = build_single_file_shard(raw, CompressionScheme::LZ4);
+        let shard_id_b = compute_data_hash(&shard_data_b).to_hex();
+        let (xorb_data_b, rebuilt_xorb_hash_b) = {
+            let mut xb = XorbBuilder::new(CompressionScheme::LZ4);
+            xb.add_chunk(raw).unwrap();
+            let xorb = xb.build().unwrap();
+            (xorb.data, xorb.xorb_hash)
+        };
+        assert_eq!(xorb_hash_b, rebuilt_xorb_hash_b);
+
+        storage
+            .put(
+                &format!("xorbs/{}", xorb_hash_a.to_hex()),
+                bytes::Bytes::from(xorb_data_a),
+            )
+            .await
+            .unwrap();
+        storage
+            .put(
+                &format!("shards/{}", shard_id_a),
+                bytes::Bytes::from(shard_data_a),
+            )
+            .await
+            .unwrap();
+        storage
+            .put(
+                &format!("xorbs/{}", xorb_hash_b.to_hex()),
+                bytes::Bytes::from(xorb_data_b),
+            )
+            .await
+            .unwrap();
+        storage
+            .put(
+                &format!("shards/{}", shard_id_b),
+                bytes::Bytes::from(shard_data_b),
+            )
+            .await
+            .unwrap();
+
+        let result = reconstruct_verified_file_to_temp(
+            &file_oid,
+            vec![
+                FileShardRef {
+                    shard_id: shard_id_a,
+                    file_index: 0,
+                },
+                FileShardRef {
+                    shard_id: shard_id_b,
+                    file_index: 0,
+                },
+            ],
+            &*storage,
+            dir.path(),
+        )
+        .await
+        .unwrap();
+
+        let bytes = tokio::fs::read(result.path()).await.unwrap();
+        assert_eq!(bytes, raw);
     }
 }
