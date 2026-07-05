@@ -5,7 +5,9 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
-use xet_server::api::auth::{AuthVerifier, KeyPair, XetClaims, sign_xet_token};
+use xet_server::api::auth::{
+    AuthVerifier, KeyPair, XetClaims, sign_internal_token, sign_proxy_claims_token, sign_xet_token,
+};
 use xet_server::config::{
     AuthConfig, ConversionConfig, ServerConfig, ServerSettings, StorageConfig,
 };
@@ -60,8 +62,17 @@ pub fn test_token(scope: &str) -> (KeyPair, String) {
 #[allow(dead_code)]
 pub fn test_token_with_claims(claims: XetClaims) -> (KeyPair, String) {
     let kp = KeyPair::generate();
-    let token = sign_xet_token(&claims, &kp).unwrap();
+    let token = sign_test_claims(&claims, &kp);
     (kp, token)
+}
+
+fn sign_test_claims(claims: &XetClaims, kp: &KeyPair) -> String {
+    match claims.token_type.as_str() {
+        "user" => sign_xet_token(claims, kp).unwrap(),
+        "internal" => sign_internal_token(claims, kp).unwrap(),
+        "proxy" => sign_proxy_claims_token(claims, kp).unwrap(),
+        other => panic!("unsupported test token_type: {other}"),
+    }
 }
 
 /// Create a test configuration with the given key pair
@@ -197,5 +208,5 @@ pub fn test_token_for_keypair(kp: &KeyPair, scope: &str) -> String {
         operation: None,
     };
 
-    sign_xet_token(&claims, kp).unwrap()
+    sign_test_claims(&claims, kp)
 }

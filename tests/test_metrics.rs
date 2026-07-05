@@ -44,7 +44,7 @@ async fn test_metrics_endpoint() {
         .unwrap()
         .as_secs();
     let claims = xet_server::api::auth::XetClaims {
-        sub: "monitoring-service".to_string(),
+        sub: "hub-service".to_string(),
         scope: "internal".to_string(),
         repo_id: "".to_string(),
         repo_type: "".to_string(),
@@ -56,7 +56,7 @@ async fn test_metrics_endpoint() {
         oid: None,
         operation: None,
     };
-    let token = xet_server::api::auth::sign_xet_token(&claims, &kp).unwrap();
+    let token = xet_server::api::auth::sign_internal_token(&claims, &kp).unwrap();
 
     let app = test::init_service(
         App::new()

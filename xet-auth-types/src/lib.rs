@@ -31,9 +31,8 @@ pub struct XetClaims {
     pub iat: u64,
     /// Key ID identifying the signing key
     pub kid: String,
-    /// Token type: "user" (default), "proxy", or "internal"
+    /// Token type: "user", "proxy", or "internal"
     /// Used for defense-in-depth to distinguish internal service tokens.
-    #[serde(default = "default_token_type")]
     pub token_type: String,
     /// LFS object ID (for proxy tokens, binds token to specific object)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -41,9 +40,4 @@ pub struct XetClaims {
     /// LFS operation: "upload" or "download" (for proxy tokens)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub operation: Option<String>,
-}
-
-/// Default token type for backward compatibility with older tokens.
-pub fn default_token_type() -> String {
-    "user".to_string()
 }

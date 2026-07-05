@@ -70,10 +70,6 @@ pub enum AuthNeed {
 }
 
 pub fn authorize_lfs_object(claims: &XetClaims, operation: LfsOperation, oid: &str) -> bool {
-    if is_internal_token(claims) {
-        return true;
-    }
-
     if claims.token_type == "proxy" {
         let has_proxy_scope = claims
             .scope
@@ -211,6 +207,22 @@ mod tests {
         }
     }
 
+    fn internal_claims() -> XetClaims {
+        XetClaims {
+            sub: "hub-service".to_string(),
+            scope: "internal".to_string(),
+            repo_id: "*".to_string(),
+            repo_type: "*".to_string(),
+            revision: "*".to_string(),
+            exp: 4_102_444_800,
+            iat: 1_700_000_000,
+            kid: "kid".to_string(),
+            token_type: "internal".to_string(),
+            oid: None,
+            operation: None,
+        }
+    }
+
     #[test]
     fn test_lfs_proxy_requires_oid_and_operation() {
         let c = claims("lfs-download", "proxy", None, Some("download"));
@@ -245,5 +257,12 @@ mod tests {
         let c = claims("write", "user", None, None);
         assert!(authorize_lfs_object(&c, LfsOperation::Upload, "a"));
         assert!(!authorize_lfs_object(&c, LfsOperation::Download, "a"));
+    }
+
+    #[test]
+    fn test_lfs_object_rejects_internal_token() {
+        let c = internal_claims();
+        assert!(!authorize_lfs_object(&c, LfsOperation::Download, "a"));
+        assert!(!authorize_lfs_object(&c, LfsOperation::Upload, "a"));
     }
 }

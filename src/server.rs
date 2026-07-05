@@ -235,12 +235,11 @@ pub async fn metrics_endpoint(
     let start = std::time::Instant::now();
 
     // Extract, verify, and authorize the caller in one step.
-    // authorize_endpoint(c, "internal") is equivalent to check_scope(c, "internal")
-    // here: the is_internal_token disjunct already implies the "internal" scope.
+    // Metrics are internal-only and require the full internal service token shape.
     if let Err(rej) = require_auth(
         &req,
         &auth,
-        AuthNeed::ScopeMsg("internal", "Insufficient scope: requires 'internal'"),
+        AuthNeed::Internal("Insufficient scope: requires 'internal'"),
     ) {
         return rej.respond(start);
     }
