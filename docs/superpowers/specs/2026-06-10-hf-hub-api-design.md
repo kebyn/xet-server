@@ -151,7 +151,7 @@ Internal auth: Hub signs service tokens using the same Ed25519 private key, with
   - `exp`: unix_timestamp (default 1 hour)
   - `kid`: key identifier for rotation
 - Used by: All CAS API endpoints
-- Scope "internal" supersedes "write", used for Hub->CAS internal calls
+- Scope "internal" is used only for Hub->CAS internal endpoints; it does not supersede "read" or "write"
 
 ### 3.2 Key Management
 

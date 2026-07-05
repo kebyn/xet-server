@@ -808,11 +808,11 @@ LFS 对象是原始文件的直接存储，使用 SHA-256 哈希标识。
 |--------|------|----------|
 | `read` | 读取 | 下载文件、列出仓库 |
 | `write` | 写入 | 上传文件、创建仓库 |
-| `internal` | 内部 | Hub → CAS 通信（超级权限） |
+| `internal` | 内部 | Hub → CAS 内部端点专用 |
 
 **权限检查**：
 - 每个 API 端点检查所需作用域
-- `internal` 自动包含 `read` 和 `write`
+- `internal` 不自动包含 `read` 或 `write`；公共端点需要 `token_type=user` 的普通 scope，内部端点需要完整 internal token 形状
 - `repo_id`、`repo_type` 和 `revision` claims 仅标识 Hub 签发上下文；CAS 内容授权按 scope 和内容能力执行，不强制 repository-scoped CAS object isolation。
 
 ### 3. 数据安全

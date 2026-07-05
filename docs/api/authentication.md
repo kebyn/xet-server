@@ -177,7 +177,7 @@ xet_eyJhbGciOiJFZDI1NTE5Iiwia2lkIjoiaHViLWtleS0xIiwidHlwIjoiSldUIn0.eyJzdWIiOiJh
 | `lfs-upload` | LFS 上传 | 上传 LFS 对象（proxy token） |
 | `lfs-download` | LFS 下载 | 下载 LFS 对象（proxy token） |
 
-**注意**：`internal` 作用域自动包含 `read` 和 `write` 权限。内部端点使用 defense-in-depth 验证，同时检查 `sub`、`scope` 和 `token_type` 三个字段，防止配置错误导致的权限绕过。
+**注意**：`internal` 作用域不包含 `read` 或 `write` 权限，只能用于 Hub → CAS 内部端点。内部端点使用 defense-in-depth 验证，同时检查 `sub`、`scope` 和 `token_type` 三个字段；公共 CAS 端点需要 `token_type=user` 的 `read`/`write` scope，LFS 对象代理使用 `token_type=proxy` 的 `lfs-upload`/`lfs-download` scope。
 
 ## 认证流程
 
