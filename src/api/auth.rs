@@ -288,26 +288,24 @@ pub fn verify_xet_token(
     Ok(claims)
 }
 
-/// Check if claims contain a required scope.
+/// Check whether user claims have a regular public endpoint scope.
 ///
-/// The "internal" scope is ONLY valid for /internal/* endpoints.
-/// Non-internal endpoints must explicitly reject internal tokens.
+/// Internal service authorization is intentionally excluded from this helper.
+/// Callers that need Hub-to-CAS internal access must use [`is_internal_token`].
 pub fn check_scope(claims: &XetClaims, required_scope: &str) -> bool {
-    // I5 fix: Use consistent check for internal scope
-    // Previously, this used split_whitespace().any() but is_internal_token used exact match.
-    // Now both use the same logic to prevent "dead zone" tokens.
-    let has_internal_scope = claims.scope.split_whitespace().any(|s| s == "internal");
-
-    // "internal" scope is NOT a wildcard - it only grants access to internal endpoints
-    if required_scope != "internal" && (has_internal_scope || claims.token_type == "internal") {
-        // Reject internal tokens for non-internal endpoints
+    if required_scope == "internal" || claims.token_type != "user" {
         return false;
     }
-    // Check for the specific required scope
+
+    let has_internal_scope = claims.scope.split_whitespace().any(|s| s == "internal");
+    if has_internal_scope {
+        return false;
+    }
+
     claims.scope.split_whitespace().any(|s| s == required_scope)
 }
 
-/// I1 fix: Check if claims represent an internal service token from Hub.
+/// Check if claims represent an internal service token from Hub.
 ///
 /// Internal tokens are issued by the Hub for Hub-to-CAS communication.
 /// They have: sub="hub-service", scope="internal", token_type="internal".
@@ -316,14 +314,13 @@ pub fn check_scope(claims: &XetClaims, required_scope: &str) -> bool {
 /// a buggy/misconfigured TokenStore from accidentally creating a user token
 /// with sub="hub-service" that could bypass scope checks.
 pub fn is_internal_token(claims: &XetClaims) -> bool {
-    // I5 fix: Use consistent internal scope check (split_whitespace)
     let has_internal_scope = claims.scope.split_whitespace().any(|s| s == "internal");
     claims.sub == "hub-service" && has_internal_scope && claims.token_type == "internal"
 }
 
 /// Unified authorization helper for public endpoints.
 ///
-/// Public endpoints require a non-internal token with the requested scope.
+/// Public endpoints require a user token with the requested scope.
 /// Internal service tokens are intentionally handled only by `AuthNeed::Internal`
 /// at explicitly internal endpoints.
 pub fn authorize_endpoint(claims: &XetClaims, required_scope: &str) -> bool {
