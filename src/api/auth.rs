@@ -108,55 +108,97 @@ impl KeyPair {
     }
 }
 
-/// Sign claims with the key pair to create a xet token
-///
-/// The token format is: `xet_{base64url(header).base64url(payload).base64url(signature)}`
-pub fn sign_xet_token(claims: &XetClaims, keypair: &KeyPair) -> Result<String, AuthError> {
-    // Create header with matching kid from claims
+fn sign_claims_with_prefix(
+    claims: &XetClaims,
+    signing_key: &SigningKey,
+    prefix: &str,
+) -> Result<String, AuthError> {
+    if prefix.is_empty() {
+        return Err(AuthError::InvalidToken);
+    }
+
     let header = JwtHeader {
         alg: "EdDSA".to_string(),
         typ: "JWT".to_string(),
         kid: claims.kid.clone(),
     };
 
-    // Serialize header and payload
     let header_json = serde_json::to_string(&header).map_err(|_| AuthError::InvalidToken)?;
     let payload_json = serde_json::to_string(claims).map_err(|_| AuthError::InvalidToken)?;
 
-    // Base64url encode (no padding)
     let header_b64 = URL_SAFE_NO_PAD.encode(header_json.as_bytes());
     let payload_b64 = URL_SAFE_NO_PAD.encode(payload_json.as_bytes());
 
-    // Sign the message "{header_b64}.{payload_b64}"
     let message = format!("{}.{}", header_b64, payload_b64);
-    let signature = keypair.signing_key.sign(message.as_bytes());
+    let signature = signing_key.sign(message.as_bytes());
     let sig_b64 = URL_SAFE_NO_PAD.encode(signature.to_bytes());
 
-    // Final token with "xet_" prefix
-    Ok(format!("xet_{}.{}.{}", header_b64, payload_b64, sig_b64))
+    Ok(format!(
+        "{}{}.{}.{}",
+        prefix, header_b64, payload_b64, sig_b64
+    ))
+}
+
+fn sign_claims_for_type(
+    claims: &XetClaims,
+    keypair: &KeyPair,
+    expected_token_type: &str,
+    prefix: &str,
+) -> Result<String, AuthError> {
+    if claims.token_type != expected_token_type {
+        return Err(AuthError::InvalidToken);
+    }
+
+    sign_claims_with_prefix(claims, &keypair.signing_key, prefix)
+}
+
+/// Sign user claims with the key pair to create a xet token
+///
+/// The token format is: `xet_{base64url(header).base64url(payload).base64url(signature)}`
+///
+/// This signer is intentionally limited to user tokens. Internal and proxy
+/// tokens have distinct prefixes and must not be emitted through this API.
+pub fn sign_xet_token(claims: &XetClaims, keypair: &KeyPair) -> Result<String, AuthError> {
+    sign_claims_for_type(claims, keypair, "user", "xet_")
+}
+
+/// Sign internal service claims with the key pair to create an internal token.
+///
+/// The token format is:
+/// `internal_{base64url(header).base64url(payload).base64url(signature)}`.
+pub fn sign_internal_token(claims: &XetClaims, keypair: &KeyPair) -> Result<String, AuthError> {
+    sign_claims_for_type(claims, keypair, "internal", "internal_")
+}
+
+/// Sign proxy claims with the key pair to create a proxy token.
+///
+/// The token format is: `proxy_{base64url(header).base64url(payload).base64url(signature)}`.
+pub fn sign_proxy_claims_token(claims: &XetClaims, keypair: &KeyPair) -> Result<String, AuthError> {
+    sign_claims_for_type(claims, keypair, "proxy", "proxy_")
 }
 
 /// Verify a xet token with a specific public key and expected kid
 ///
 /// Checks:
-/// 1. Token format (xet_ or internal_ prefix, three base64url parts)
+/// 1. Token format (xet_, internal_, or proxy_ prefix, three base64url parts)
 /// 2. Signature validity
 /// 3. Key ID matches expected kid
 /// 4. Token has not expired
-///
-/// C2 fix: Accept both xet_ and internal_ prefixes for backward compatibility
+/// 5. Token prefix matches the token_type claim
 pub fn verify_xet_token(
     token: &str,
     public_key: &VerifyingKey,
     expected_kid: &str,
 ) -> Result<XetClaims, AuthError> {
-    // C2 fix: Strip either "xet_" or "internal_" prefix
-    // I5 fix: Also accept "proxy_" prefix for short-lived LFS tokens
-    let token_body = token
-        .strip_prefix("xet_")
-        .or_else(|| token.strip_prefix("internal_"))
-        .or_else(|| token.strip_prefix("proxy_"))
-        .ok_or(AuthError::InvalidToken)?;
+    let (token_body, expected_token_type) = if let Some(body) = token.strip_prefix("xet_") {
+        (body, "user")
+    } else if let Some(body) = token.strip_prefix("internal_") {
+        (body, "internal")
+    } else if let Some(body) = token.strip_prefix("proxy_") {
+        (body, "proxy")
+    } else {
+        return Err(AuthError::InvalidToken);
+    };
 
     // Split into three parts
     let parts: Vec<&str> = token_body.split('.').collect();
@@ -204,6 +246,14 @@ pub fn verify_xet_token(
     let claims: XetClaims =
         serde_json::from_slice(&payload_bytes).map_err(|_| AuthError::InvalidToken)?;
 
+    if claims.kid != expected_kid {
+        return Err(AuthError::UnknownKid);
+    }
+
+    if claims.token_type != expected_token_type {
+        return Err(AuthError::InvalidToken);
+    }
+
     // Check expiration
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -249,7 +299,7 @@ pub fn check_scope(claims: &XetClaims, required_scope: &str) -> bool {
     let has_internal_scope = claims.scope.split_whitespace().any(|s| s == "internal");
 
     // "internal" scope is NOT a wildcard - it only grants access to internal endpoints
-    if required_scope != "internal" && has_internal_scope {
+    if required_scope != "internal" && (has_internal_scope || claims.token_type == "internal") {
         // Reject internal tokens for non-internal endpoints
         return false;
     }
@@ -271,20 +321,12 @@ pub fn is_internal_token(claims: &XetClaims) -> bool {
     claims.sub == "hub-service" && has_internal_scope && claims.token_type == "internal"
 }
 
-/// I1 fix: Unified authorization helper for public endpoints.
+/// Unified authorization helper for public endpoints.
 ///
-/// This function handles both regular user tokens and internal service tokens:
-/// - Internal tokens (from Hub) are allowed to access all public endpoints
-/// - User tokens must have the required scope
-///
-/// This eliminates the inconsistency where some endpoints checked is_internal_token
-/// first while others only checked check_scope, causing internal tokens to be rejected.
+/// Public endpoints require a non-internal token with the requested scope.
+/// Internal service tokens are intentionally handled only by `AuthNeed::Internal`
+/// at explicitly internal endpoints.
 pub fn authorize_endpoint(claims: &XetClaims, required_scope: &str) -> bool {
-    // Internal tokens bypass scope checks (they're trusted service-to-service tokens)
-    if is_internal_token(claims) {
-        return true;
-    }
-    // Regular tokens must have the required scope
     check_scope(claims, required_scope)
 }
 
@@ -412,25 +454,8 @@ impl AuthVerifier {
             operation: Some(operation.to_string()),
         };
 
-        // Use the proxy_ prefix for proxy tokens (matching Hub convention)
-        let header = JwtHeader {
-            alg: "EdDSA".to_string(),
-            typ: "JWT".to_string(),
-            kid: kid.to_string(),
-        };
-
-        let header_json = serde_json::to_string(&header).ok()?;
-        let payload_json = serde_json::to_string(&claims).ok()?;
-
-        let header_b64 = URL_SAFE_NO_PAD.encode(header_json.as_bytes());
-        let payload_b64 = URL_SAFE_NO_PAD.encode(payload_json.as_bytes());
-
-        let message = format!("{}.{}", header_b64, payload_b64);
-        let signature = signing_key.sign(message.as_bytes());
-        let sig_b64 = URL_SAFE_NO_PAD.encode(signature.to_bytes());
-
         Some(SignedProxyToken {
-            token: format!("proxy_{}.{}.{}", header_b64, payload_b64, sig_b64),
+            token: sign_claims_with_prefix(&claims, signing_key, "proxy_").ok()?,
             exp,
             expires_in: PROXY_TOKEN_TTL_SECONDS,
         })
@@ -480,6 +505,144 @@ pub fn extract_token_from_request(req: &actix_web::HttpRequest) -> Option<String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn now_secs_for_test() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    fn sign_payload_for_test(
+        payload: serde_json::Value,
+        keypair: &KeyPair,
+        kid: &str,
+        prefix: &str,
+    ) -> String {
+        let header = JwtHeader {
+            alg: "EdDSA".to_string(),
+            typ: "JWT".to_string(),
+            kid: kid.to_string(),
+        };
+        let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap());
+        let payload_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
+        let message = format!("{}.{}", header_b64, payload_b64);
+        let signature = keypair.signing_key.sign(message.as_bytes());
+        let sig_b64 = URL_SAFE_NO_PAD.encode(signature.to_bytes());
+        format!("{}{}.{}.{}", prefix, header_b64, payload_b64, sig_b64)
+    }
+
+    fn claims_for_test(kid: &str, scope: &str, token_type: &str) -> XetClaims {
+        let now = now_secs_for_test();
+        XetClaims {
+            sub: "test-user".to_string(),
+            scope: scope.to_string(),
+            repo_id: "test/repo".to_string(),
+            repo_type: "model".to_string(),
+            revision: "main".to_string(),
+            exp: now + 3600,
+            iat: now,
+            kid: kid.to_string(),
+            token_type: token_type.to_string(),
+            oid: None,
+            operation: None,
+        }
+    }
+
+    #[test]
+    fn test_verify_rejects_missing_token_type() {
+        let keypair = KeyPair::generate();
+        let kid = keypair.kid();
+        let now = now_secs_for_test();
+        let payload = serde_json::json!({
+            "sub": "test-user",
+            "scope": "read",
+            "repo_id": "test/repo",
+            "repo_type": "model",
+            "revision": "main",
+            "exp": now + 3600,
+            "iat": now,
+            "kid": kid,
+        });
+        let token = sign_payload_for_test(payload, &keypair, &kid, "xet_");
+
+        let result = verify_xet_token(&token, &keypair.verifying_key(), &kid);
+        assert_eq!(result, Err(AuthError::InvalidToken));
+    }
+
+    #[test]
+    fn test_verify_rejects_internal_token_with_xet_prefix() {
+        let keypair = KeyPair::generate();
+        let kid = keypair.kid();
+        let claims = claims_for_test(&kid, "internal", "internal");
+        let token = sign_payload_for_test(
+            serde_json::to_value(&claims).unwrap(),
+            &keypair,
+            &kid,
+            "xet_",
+        );
+
+        let result = verify_xet_token(&token, &keypair.verifying_key(), &kid);
+        assert_eq!(result, Err(AuthError::InvalidToken));
+    }
+
+    #[test]
+    fn test_verify_rejects_proxy_token_with_xet_prefix() {
+        let keypair = KeyPair::generate();
+        let kid = keypair.kid();
+        let mut claims = claims_for_test(&kid, "lfs-download", "proxy");
+        claims.oid = Some("a".repeat(64));
+        claims.operation = Some("download".to_string());
+        let token = sign_payload_for_test(
+            serde_json::to_value(&claims).unwrap(),
+            &keypair,
+            &kid,
+            "xet_",
+        );
+
+        let result = verify_xet_token(&token, &keypair.verifying_key(), &kid);
+        assert_eq!(result, Err(AuthError::InvalidToken));
+    }
+
+    #[test]
+    fn test_verify_rejects_payload_kid_mismatch() {
+        let keypair = KeyPair::generate();
+        let kid = keypair.kid();
+        let claims = claims_for_test("payload-kid", "read", "user");
+        let token = sign_payload_for_test(
+            serde_json::to_value(&claims).unwrap(),
+            &keypair,
+            &kid,
+            "xet_",
+        );
+
+        let result = verify_xet_token(&token, &keypair.verifying_key(), &kid);
+        assert_eq!(result, Err(AuthError::UnknownKid));
+    }
+
+    #[test]
+    fn test_sign_xet_token_rejects_internal_claims() {
+        let keypair = KeyPair::generate();
+        let kid = keypair.kid();
+        let claims = claims_for_test(&kid, "internal", "internal");
+
+        let result = sign_xet_token(&claims, &keypair);
+
+        assert_eq!(result, Err(AuthError::InvalidToken));
+    }
+
+    #[test]
+    fn test_sign_xet_token_rejects_proxy_claims() {
+        let keypair = KeyPair::generate();
+        let kid = keypair.kid();
+        let mut claims = claims_for_test(&kid, "lfs-download", "proxy");
+        claims.oid = Some("a".repeat(64));
+        claims.operation = Some("download".to_string());
+
+        let result = sign_xet_token(&claims, &keypair);
+
+        assert_eq!(result, Err(AuthError::InvalidToken));
+    }
 
     #[cfg(unix)]
     #[test]

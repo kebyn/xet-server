@@ -2,8 +2,8 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 use xet_server::api::auth::{
-    AuthError, KeyPair, XetClaims, check_scope, extract_bearer_token, sign_xet_token,
-    verify_xet_token,
+    AuthError, KeyPair, XetClaims, authorize_endpoint, check_scope, extract_bearer_token,
+    sign_internal_token, sign_xet_token, verify_xet_token,
 };
 
 fn create_test_claims(kid: &str, scope: &str) -> XetClaims {
@@ -202,6 +202,79 @@ fn test_check_scope_internal_restricted() {
     assert!(!check_scope(&claims, "read"));
     assert!(!check_scope(&claims, "write"));
     assert!(!check_scope(&claims, "admin"));
+}
+
+#[test]
+fn test_authorize_endpoint_rejects_malformed_internal_token_for_regular_scope() {
+    let claims = XetClaims {
+        sub: "test-user".to_string(),
+        scope: "read".to_string(),
+        repo_id: "test/repo".to_string(),
+        repo_type: "model".to_string(),
+        revision: "main".to_string(),
+        exp: 9999999999,
+        iat: 9999999999 - 3600,
+        kid: "test-kid".to_string(),
+        token_type: "internal".to_string(),
+        oid: None,
+        operation: None,
+    };
+
+    assert!(!authorize_endpoint(&claims, "read"));
+}
+
+#[test]
+fn test_authorize_endpoint_rejects_real_internal_token_for_regular_scope() {
+    let claims = XetClaims {
+        sub: "hub-service".to_string(),
+        scope: "internal".to_string(),
+        repo_id: "*".to_string(),
+        repo_type: "*".to_string(),
+        revision: "*".to_string(),
+        exp: 9999999999,
+        iat: 9999999999 - 3600,
+        kid: "test-kid".to_string(),
+        token_type: "internal".to_string(),
+        oid: None,
+        operation: None,
+    };
+
+    assert!(check_scope(&claims, "internal"));
+    assert!(!authorize_endpoint(&claims, "read"));
+    assert!(!authorize_endpoint(&claims, "write"));
+}
+
+#[test]
+fn test_sign_and_verify_internal_token() {
+    let kp = KeyPair::generate();
+    let kid = kp.kid();
+    let claims = XetClaims {
+        sub: "hub-service".to_string(),
+        scope: "internal".to_string(),
+        repo_id: "*".to_string(),
+        repo_type: "*".to_string(),
+        revision: "*".to_string(),
+        exp: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 3600,
+        iat: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        kid: kid.clone(),
+        token_type: "internal".to_string(),
+        oid: None,
+        operation: None,
+    };
+
+    let token = sign_internal_token(&claims, &kp).unwrap();
+    assert!(token.starts_with("internal_"));
+
+    let verified = verify_xet_token(&token, &kp.verifying_key(), &kid).unwrap();
+    assert_eq!(verified.token_type, "internal");
+    assert_eq!(verified.scope, "internal");
 }
 
 #[test]

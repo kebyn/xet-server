@@ -194,7 +194,7 @@ pub async fn head_blob(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::auth::{AuthVerifier, KeyPair, XetClaims, sign_xet_token};
+    use crate::api::auth::{AuthVerifier, KeyPair, XetClaims, sign_internal_token};
     use crate::config::AuthConfig;
     use crate::format::shard::MDBShardFile;
     use crate::format::shard_builder::{FileSegment, ShardBuilder, XorbChunkBuildEntry};
@@ -251,7 +251,7 @@ mod tests {
             operation: None,
         };
 
-        sign_xet_token(&claims, kp).unwrap()
+        sign_internal_token(&claims, kp).unwrap()
     }
 
     fn sha256_hex(data: &[u8]) -> String {
