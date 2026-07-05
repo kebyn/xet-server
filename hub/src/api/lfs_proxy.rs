@@ -271,8 +271,9 @@ fn validate_oid(oid: &str) -> bool {
 /// Validate a proxy token (short-lived LFS token)
 /// Returns true if the token is valid, false otherwise
 ///
-/// This function performs business-level validation (OID, operation, expiration, token type).
-/// Cryptographic verification (signature, prefix format) is handled by `signer.verify_proxy_token`.
+/// This function performs business-level validation (scope, OID, operation, expiration).
+/// Cryptographic verification (signature, prefix format, token type) is handled by
+/// `signer.verify_proxy_token`.
 fn validate_proxy_token(
     token: &str,
     expected_oid: &str,
@@ -293,11 +294,25 @@ fn validate_proxy_token(
         }
     };
 
-    // Check token type (not checked by verify_proxy_token)
+    // Defense in depth: verify_proxy_token already enforces this.
     if claims.token_type != "proxy" {
         tracing::error!(
             "validate_proxy_token: token_type mismatch: {} != proxy",
             claims.token_type
+        );
+        return false;
+    }
+
+    let expected_scope = format!("lfs-{}", expected_operation);
+    if !claims
+        .scope
+        .split_whitespace()
+        .any(|scope| scope == expected_scope.as_str())
+    {
+        tracing::error!(
+            "validate_proxy_token: scope mismatch: {} does not contain {}",
+            claims.scope,
+            expected_scope
         );
         return false;
     }
@@ -1002,6 +1017,50 @@ mod tests {
         XetSigner::new(signing_key, "test-key", 3600, 300)
     }
 
+    fn sign_proxy_token_with_type(
+        token_type: &str,
+    ) -> (String, crate::auth::xet_signer::XetSigner) {
+        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+        use ed25519_dalek::{Signer, SigningKey};
+        use rand::rngs::OsRng;
+
+        let mut csprng = OsRng;
+        let signing_key = SigningKey::generate(&mut csprng);
+        let signer =
+            crate::auth::xet_signer::XetSigner::new(signing_key.clone(), "test-key", 3600, 300);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let header = serde_json::json!({
+            "alg": "EdDSA",
+            "typ": "JWT",
+            "kid": "test-key",
+        });
+        let claims = serde_json::json!({
+            "sub": "testuser",
+            "scope": "lfs-upload",
+            "repo_id": "",
+            "repo_type": "",
+            "revision": "",
+            "exp": now + 300,
+            "iat": now,
+            "kid": "test-key",
+            "token_type": token_type,
+            "oid": "abc123def456",
+            "operation": "upload",
+        });
+
+        let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap());
+        let claims_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
+        let signing_input = format!("{}.{}", header_b64, claims_b64);
+        let signature = signing_key.sign(signing_input.as_bytes());
+        let sig_b64 = URL_SAFE_NO_PAD.encode(signature.to_bytes());
+
+        (format!("proxy_{}.{}", signing_input, sig_b64), signer)
+    }
+
     #[test]
     fn test_validate_proxy_token_valid() {
         let signer = create_test_signer();
@@ -1048,6 +1107,24 @@ mod tests {
         // Try to validate with wrong operation
         let result = validate_proxy_token(&token, "abc123def456", "download", &signer);
         assert!(!result, "Token with wrong operation should be rejected");
+    }
+
+    #[test]
+    fn test_validate_proxy_token_wrong_scope() {
+        let signer = create_test_signer();
+        let (token, _) = signer
+            .sign_proxy_claims_for_test(
+                "testuser",
+                "lfs-upload",
+                "abc123def456",
+                "download",
+                "",
+                "",
+            )
+            .unwrap();
+
+        let result = validate_proxy_token(&token, "abc123def456", "download", &signer);
+        assert!(!result, "Token with wrong scope should be rejected");
     }
 
     #[test]
@@ -1105,27 +1182,7 @@ mod tests {
 
     #[test]
     fn test_validate_proxy_token_wrong_token_type() {
-        let signer = create_test_signer();
-        let (token, _) = signer
-            .sign_proxy("testuser", "abc123def456", "upload", "", "")
-            .unwrap();
-
-        // Manually tamper with the token_type claim
-        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-
-        let token_body = token.strip_prefix("proxy_").unwrap();
-        let parts: Vec<&str> = token_body.split('.').collect();
-
-        // Decode claims
-        let claims_json = URL_SAFE_NO_PAD.decode(parts[1]).unwrap();
-        let mut claims: serde_json::Value = serde_json::from_slice(&claims_json).unwrap();
-
-        // Change token_type from "proxy" to "user"
-        claims["token_type"] = serde_json::json!("user");
-
-        // Re-encode
-        let new_claims_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
-        let tampered_token = format!("proxy_{}.{}.{}", parts[0], new_claims_b64, parts[2]);
+        let (tampered_token, signer) = sign_proxy_token_with_type("user");
 
         let result = validate_proxy_token(&tampered_token, "abc123def456", "upload", &signer);
         assert!(!result, "Token with wrong token_type should be rejected");
