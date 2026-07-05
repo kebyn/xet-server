@@ -189,8 +189,8 @@ pub struct ConversionConfig {
     /// Files smaller than this stay as raw blobs permanently.
     pub min_conversion_size: u64,
     /// Maximum file size (bytes) eligible for conversion.
-    /// Files larger than this stay as raw blobs permanently to prevent OOM
-    /// (conversion loads the entire blob into memory for CDC chunking).
+    /// Files larger than this stay as raw blobs permanently to bound conversion
+    /// latency, temporary disk usage, and xorb/shard generation work.
     pub max_conversion_size: u64,
 }
 
