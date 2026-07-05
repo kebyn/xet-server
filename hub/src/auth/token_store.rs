@@ -267,8 +267,6 @@ impl TokenStore {
     }
 
     /// Validate a token. Returns None if invalid/expired/revoked.
-    /// I4 fix: Falls back to legacy SHA-256 hash if HMAC hash doesn't match,
-    /// then transparently migrates the hash to HMAC for future lookups.
     pub async fn validate_token(&self, token: &str) -> Result<Option<TokenInfo>, sqlx::Error> {
         let token_hash = self.hash_token(token);
         let now = now_secs() as i64;
@@ -282,23 +280,6 @@ impl TokenStore {
         .fetch_optional(&self.pool)
         .await?;
 
-        // I4 fix: If HMAC hash not found, try legacy SHA-256 hash for backward compatibility
-        let (result, needs_migration) = match result {
-            Some(row) => (Some(row), false),
-            None => {
-                let legacy_hash = Self::legacy_hash_token(token);
-                let legacy_result: Option<TokenRow> = sqlx::query_as(
-                    "SELECT u.user_id, u.username, t.name, t.scope, t.expires_at, t.revoked_at
-                     FROM tokens t JOIN users u ON t.user_id = u.user_id
-                     WHERE t.token_hash = ?1",
-                )
-                .bind(&legacy_hash)
-                .fetch_optional(&self.pool)
-                .await?;
-                (legacy_result, true)
-            }
-        };
-
         match result {
             Some(row) => {
                 // Check if revoked
@@ -311,22 +292,6 @@ impl TokenStore {
                     && exp < now
                 {
                     return Ok(None);
-                }
-
-                // I4 fix: Transparently migrate legacy hash to HMAC hash
-                if needs_migration {
-                    let legacy_hash = Self::legacy_hash_token(token);
-                    if let Err(e) =
-                        sqlx::query("UPDATE tokens SET token_hash = ?1 WHERE token_hash = ?2")
-                            .bind(&token_hash)
-                            .bind(&legacy_hash)
-                            .execute(&self.pool)
-                            .await
-                    {
-                        tracing::warn!("Failed to migrate token hash (non-fatal): {}", e);
-                    } else {
-                        tracing::info!(user_id = %row.user_id, "Migrated token hash from SHA-256 to HMAC-SHA256");
-                    }
                 }
 
                 Ok(Some(TokenInfo {
@@ -394,15 +359,6 @@ impl TokenStore {
             .expect("HMAC can take key of any size");
         mac.update(token.as_bytes());
         hex::encode(mac.finalize().into_bytes())
-    }
-
-    /// I4 fix: Legacy SHA-256 hash for backward compatibility during migration.
-    /// Tokens created before the HMAC migration used plain SHA-256 without salt.
-    fn legacy_hash_token(token: &str) -> String {
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(token.as_bytes());
-        hex::encode(hasher.finalize())
     }
 
     /// Set expiration on a token (for testing)
@@ -486,6 +442,46 @@ mod tests {
         assert_eq!(info.username, "testuser");
         assert_eq!(info.token_name, "test-token");
         assert_eq!(info.scope, "read");
+    }
+
+    #[tokio::test]
+    async fn test_validate_token_rejects_legacy_sha256_hash() {
+        use sha2::{Digest, Sha256};
+
+        let store = TokenStore::in_memory().await.unwrap();
+        let token = "hf_legacy_token";
+        let user_id = "user_legacy";
+        let now = now_secs() as i64;
+
+        let mut hasher = Sha256::new();
+        hasher.update(token.as_bytes());
+        let legacy_hash = hex::encode(hasher.finalize());
+
+        sqlx::query("INSERT INTO users (user_id, username, created_at) VALUES (?1, ?2, ?3)")
+            .bind(user_id)
+            .bind("legacy-user")
+            .bind(now)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+
+        sqlx::query(
+            "INSERT INTO tokens (token_hash, user_id, name, scope, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+        )
+        .bind(&legacy_hash)
+        .bind(user_id)
+        .bind("legacy-token")
+        .bind("read")
+        .bind(now)
+        .execute(&store.pool)
+        .await
+        .unwrap();
+
+        let info = store.validate_token(token).await.unwrap();
+        assert!(
+            info.is_none(),
+            "legacy SHA-256 token hashes should no longer be accepted"
+        );
     }
 
     #[tokio::test]
