@@ -85,6 +85,18 @@ pub async fn batch_operation(
         body.objects.len()
     );
 
+    let required_scope = match body.operation.as_str() {
+        "upload" => "write",
+        "download" => "read",
+        _ => {
+            GLOBAL_METRICS.record_request(400);
+            GLOBAL_METRICS.record_latency(start);
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "message": format!("Unknown operation: {}", body.operation)
+            }));
+        }
+    };
+
     // I5 fix: Check if proxy token generation is available
     let can_sign_proxy = auth.can_sign_proxy_tokens();
     if !can_sign_proxy {
@@ -123,11 +135,6 @@ pub async fn batch_operation(
 
     // Extract, verify, and authorize the caller in one step.
     // Scope depends on the LFS operation; batch uses the Git-LFS {"message"} body shape.
-    let required_scope = if body.operation == "upload" {
-        "write"
-    } else {
-        "read"
-    };
     let claims = match require_auth(&req, &auth, AuthNeed::Scope(required_scope)) {
         Ok(c) => c,
         Err(rej) => return rej.respond_message(start),
@@ -274,4 +281,50 @@ pub async fn batch_operation(
     GLOBAL_METRICS.record_latency(start);
 
     HttpResponse::Ok().json(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use actix_web::{http::StatusCode, test, web};
+
+    fn test_auth_verifier() -> AuthVerifier {
+        let kp = crate::api::auth::KeyPair::generate();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let public_key_pem =
+            crate::api::auth::KeyPair::public_key_to_pem(&kp.verifying_key()).unwrap();
+        let public_key_path = temp_dir.path().join("public-key.pem");
+        std::fs::write(&public_key_path, public_key_pem).unwrap();
+
+        let auth_config = crate::config::AuthConfig {
+            public_key_path: public_key_path.to_string_lossy().into_owned(),
+            trusted_kids: vec![kp.kid()],
+            private_key_path: None,
+            signing_kid: None,
+        };
+        AuthVerifier::from_config(&auth_config).unwrap()
+    }
+
+    #[actix_web::test]
+    async fn test_unknown_operation_rejected_before_auth() {
+        let req = test::TestRequest::post().to_http_request();
+        let body = web::Json(BatchRequest {
+            operation: "delete".to_string(),
+            transfers: None,
+            objects: vec![BatchObject {
+                oid: "a".repeat(64),
+                size: 1,
+            }],
+        });
+
+        let response = batch_operation(
+            body,
+            web::Data::new(test_auth_verifier()),
+            web::Data::new(ServerConfig::default()),
+            req,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
 }
