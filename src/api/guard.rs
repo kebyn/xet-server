@@ -54,8 +54,8 @@ impl LfsOperation {
 }
 
 pub enum AuthNeed {
-    /// Caller must hold `scope` (or be an internal service token). 403 body uses
-    /// the default "Insufficient scope" message.
+    /// Caller must hold a regular user-token `scope`. 403 body uses the default
+    /// "Insufficient scope" message.
     Scope(&'static str),
     /// Like `Scope`, but with a custom 403 message.
     ScopeMsg(&'static str, &'static str),

@@ -196,8 +196,9 @@ fn test_check_scope_internal_restricted() {
         operation: None,
     };
 
-    // "internal" scope ONLY grants access to internal endpoints
-    assert!(check_scope(&claims, "internal"));
+    // "internal" is not a regular endpoint scope.
+    assert!(!check_scope(&claims, "internal"));
+    assert!(!authorize_endpoint(&claims, "internal"));
     // Internal tokens are rejected for non-internal endpoints (least privilege)
     assert!(!check_scope(&claims, "read"));
     assert!(!check_scope(&claims, "write"));
@@ -224,6 +225,26 @@ fn test_authorize_endpoint_rejects_malformed_internal_token_for_regular_scope() 
 }
 
 #[test]
+fn test_authorize_endpoint_rejects_proxy_token_for_regular_scope() {
+    let claims = XetClaims {
+        sub: "test-user".to_string(),
+        scope: "read".to_string(),
+        repo_id: "test/repo".to_string(),
+        repo_type: "model".to_string(),
+        revision: "main".to_string(),
+        exp: 9999999999,
+        iat: 9999999999 - 3600,
+        kid: "test-kid".to_string(),
+        token_type: "proxy".to_string(),
+        oid: Some("a".repeat(64)),
+        operation: Some("download".to_string()),
+    };
+
+    assert!(!check_scope(&claims, "read"));
+    assert!(!authorize_endpoint(&claims, "read"));
+}
+
+#[test]
 fn test_authorize_endpoint_rejects_real_internal_token_for_regular_scope() {
     let claims = XetClaims {
         sub: "hub-service".to_string(),
@@ -239,7 +260,8 @@ fn test_authorize_endpoint_rejects_real_internal_token_for_regular_scope() {
         operation: None,
     };
 
-    assert!(check_scope(&claims, "internal"));
+    assert!(!check_scope(&claims, "internal"));
+    assert!(!authorize_endpoint(&claims, "internal"));
     assert!(!authorize_endpoint(&claims, "read"));
     assert!(!authorize_endpoint(&claims, "write"));
 }
