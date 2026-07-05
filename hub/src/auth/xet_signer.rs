@@ -1,13 +1,13 @@
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::{Signer, SigningKey};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// JWT header for Xet tokens
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct JwtHeader {
-    alg: &'static str,
-    typ: &'static str,
+    alg: String,
+    typ: String,
     kid: String,
 }
 
@@ -103,8 +103,8 @@ impl XetSigner {
         let exp = claims.exp;
 
         let header = JwtHeader {
-            alg: "EdDSA",
-            typ: "JWT",
+            alg: "EdDSA".to_string(),
+            typ: "JWT".to_string(),
             kid: self.kid.clone(),
         };
 
@@ -201,6 +201,39 @@ impl XetSigner {
         self.sign_claims(claims, "proxy_")
     }
 
+    #[cfg(test)]
+    pub(crate) fn sign_proxy_claims_for_test(
+        &self,
+        sub: &str,
+        scope: &str,
+        oid: &str,
+        operation: &str,
+        repo_id: &str,
+        repo_type: &str,
+    ) -> Result<(String, u64), String> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .map_err(|_| "System clock is before UNIX_EPOCH, cannot sign tokens".to_string())?;
+        let exp = now + self.proxy_ttl_seconds;
+
+        let claims = XetClaims {
+            sub: sub.to_string(),
+            scope: scope.to_string(),
+            repo_id: repo_id.to_string(),
+            repo_type: repo_type.to_string(),
+            revision: String::new(),
+            exp,
+            iat: now,
+            kid: self.kid.clone(),
+            token_type: "proxy".to_string(),
+            oid: Some(oid.to_string()),
+            operation: Some(operation.to_string()),
+        };
+
+        self.sign_claims(claims, "proxy_")
+    }
+
     /// Sign and create an internal token for Hub-to-CAS communication
     /// Internal tokens are short-lived (60 seconds) and can only access /internal/* endpoints
     /// Returns (token, expiration_timestamp)
@@ -233,8 +266,13 @@ impl XetSigner {
     }
 
     /// Internal helper to verify a token's signature and decode its claims
-    /// Shared logic between verify_proxy_token and verify_xet_token
-    fn verify_token_inner(&self, token: &str, expected_prefix: &str) -> Option<XetClaims> {
+    /// Shared logic between token verifiers
+    fn verify_token_inner(
+        &self,
+        token: &str,
+        expected_prefix: &str,
+        expected_token_type: &str,
+    ) -> Option<XetClaims> {
         use ed25519_dalek::{Signature, Verifier};
 
         // Check if it has the expected prefix
@@ -247,6 +285,15 @@ impl XetSigner {
 
         let parts: Vec<&str> = token_body.split('.').collect();
         if parts.len() != 3 {
+            return None;
+        }
+
+        let header_json = match URL_SAFE_NO_PAD.decode(parts[0]) {
+            Ok(json) => json,
+            Err(_) => return None,
+        };
+        let header: JwtHeader = serde_json::from_slice(&header_json).ok()?;
+        if header.kid != self.kid || header.alg != "EdDSA" {
             return None;
         }
 
@@ -286,6 +333,10 @@ impl XetSigner {
             return None;
         }
 
+        if claims.token_type != expected_token_type {
+            return None;
+        }
+
         // Check expiration
         // M4 fix: If system clock is broken, reject all tokens (safe default)
         let now = SystemTime::now()
@@ -303,7 +354,7 @@ impl XetSigner {
     /// Returns Some(claims) if the signature is valid and claims can be decoded, None otherwise
     #[must_use = "the result of token verification should be checked"]
     pub fn verify_proxy_token(&self, token: &str) -> Option<XetClaims> {
-        self.verify_token_inner(token, "proxy_")
+        self.verify_token_inner(token, "proxy_", "proxy")
     }
 
     /// Get the key ID
@@ -315,7 +366,7 @@ impl XetSigner {
     /// Returns Some(claims) if the signature is valid and claims can be decoded, None otherwise
     #[must_use = "the result of token verification should be checked"]
     pub fn verify_xet_token(&self, token: &str) -> Option<XetClaims> {
-        self.verify_token_inner(token, "xet_")
+        self.verify_token_inner(token, "xet_", "user")
     }
 
     /// Verify an internal token's signature and decode its claims
@@ -323,7 +374,7 @@ impl XetSigner {
     /// Returns Some(claims) if the signature is valid and claims can be decoded, None otherwise
     #[must_use = "the result of token verification should be checked"]
     pub fn verify_internal_token(&self, token: &str) -> Option<XetClaims> {
-        self.verify_token_inner(token, "internal_")
+        self.verify_token_inner(token, "internal_", "internal")
     }
 }
 
@@ -336,6 +387,66 @@ mod tests {
     fn generate_test_key() -> SigningKey {
         let mut csprng = OsRng;
         SigningKey::generate(&mut csprng)
+    }
+
+    fn sign_token_with_type(signer: &XetSigner, prefix: &str, token_type: &str) -> String {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let claims = XetClaims {
+            sub: "user".to_string(),
+            scope: "read".to_string(),
+            repo_id: "namespace/model".to_string(),
+            repo_type: "model".to_string(),
+            revision: "main".to_string(),
+            exp: now + 3600,
+            iat: now,
+            kid: signer.kid().to_string(),
+            token_type: token_type.to_string(),
+            oid: None,
+            operation: None,
+        };
+
+        signer.sign_claims(claims, prefix).unwrap().0
+    }
+
+    fn sign_token_with_header(
+        signer: &XetSigner,
+        prefix: &str,
+        header_alg: &str,
+        header_kid: &str,
+    ) -> String {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let header = serde_json::json!({
+            "alg": header_alg,
+            "typ": "JWT",
+            "kid": header_kid,
+        });
+        let claims = XetClaims {
+            sub: "user".to_string(),
+            scope: "read".to_string(),
+            repo_id: "namespace/model".to_string(),
+            repo_type: "model".to_string(),
+            revision: "main".to_string(),
+            exp: now + 3600,
+            iat: now,
+            kid: signer.kid().to_string(),
+            token_type: "user".to_string(),
+            oid: None,
+            operation: None,
+        };
+
+        let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap());
+        let claims_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
+        let signing_input = format!("{}.{}", header_b64, claims_b64);
+        let signature = signer.signing_key.sign(signing_input.as_bytes());
+        let sig_b64 = URL_SAFE_NO_PAD.encode(signature.to_bytes());
+
+        format!("{}{}.{}", prefix, signing_input, sig_b64)
     }
 
     #[test]
@@ -586,6 +697,78 @@ mod tests {
         assert!(
             signer2.verify_proxy_token(&token).is_none(),
             "Token should not verify with different key"
+        );
+    }
+
+    #[test]
+    fn test_verify_xet_token_rejects_internal_token_type() {
+        let signing_key = generate_test_key();
+        let signer = XetSigner::new(signing_key, "test-key-xet-internal", 3600, 300);
+        let token = sign_token_with_type(&signer, "xet_", "internal");
+
+        assert!(
+            signer.verify_xet_token(&token).is_none(),
+            "xet_ token with internal token_type should not verify as a user token"
+        );
+    }
+
+    #[test]
+    fn test_verify_xet_token_rejects_proxy_token_type() {
+        let signing_key = generate_test_key();
+        let signer = XetSigner::new(signing_key, "test-key-xet-proxy", 3600, 300);
+        let token = sign_token_with_type(&signer, "xet_", "proxy");
+
+        assert!(
+            signer.verify_xet_token(&token).is_none(),
+            "xet_ token with proxy token_type should not verify as a user token"
+        );
+    }
+
+    #[test]
+    fn test_verify_internal_token_rejects_user_token_type() {
+        let signing_key = generate_test_key();
+        let signer = XetSigner::new(signing_key, "test-key-internal-user", 3600, 300);
+        let token = sign_token_with_type(&signer, "internal_", "user");
+
+        assert!(
+            signer.verify_internal_token(&token).is_none(),
+            "internal_ token with user token_type should not verify as an internal token"
+        );
+    }
+
+    #[test]
+    fn test_verify_proxy_token_rejects_user_token_type() {
+        let signing_key = generate_test_key();
+        let signer = XetSigner::new(signing_key, "test-key-proxy-user", 3600, 300);
+        let token = sign_token_with_type(&signer, "proxy_", "user");
+
+        assert!(
+            signer.verify_proxy_token(&token).is_none(),
+            "proxy_ token with user token_type should not verify as a proxy token"
+        );
+    }
+
+    #[test]
+    fn test_verify_xet_token_rejects_header_kid_mismatch() {
+        let signing_key = generate_test_key();
+        let signer = XetSigner::new(signing_key, "test-key-header-kid", 3600, 300);
+        let token = sign_token_with_header(&signer, "xet_", "EdDSA", "other-key");
+
+        assert!(
+            signer.verify_xet_token(&token).is_none(),
+            "token with mismatched header kid should not verify"
+        );
+    }
+
+    #[test]
+    fn test_verify_xet_token_rejects_header_alg_mismatch() {
+        let signing_key = generate_test_key();
+        let signer = XetSigner::new(signing_key, "test-key-header-alg", 3600, 300);
+        let token = sign_token_with_header(&signer, "xet_", "none", signer.kid());
+
+        assert!(
+            signer.verify_xet_token(&token).is_none(),
+            "token with non-EdDSA header alg should not verify"
         );
     }
 }
