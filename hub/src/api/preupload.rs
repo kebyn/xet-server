@@ -1,7 +1,12 @@
 use crate::auth::extract::{AuthUser, AuthWrite};
 use crate::metadata::{MetadataStore, RepoType};
+use crate::services::preupload::{
+    PreuploadFileInput, PreuploadRequest as ServicePreuploadRequest, PreuploadService,
+    PreuploadServiceError, UploadMode,
+};
 use actix_web::{HttpResponse, web};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// Preupload request
 #[derive(Debug, Deserialize, Serialize)]
@@ -30,13 +35,35 @@ pub struct PreuploadFileResponse {
     pub should_ignore: bool,
 }
 
-/// Determine upload mode based on file size
-/// Returns "regular" for small files (<=inline_threshold), "lfs" for larger files
-fn classify_upload_mode(size: u64, inline_threshold: u64) -> String {
-    if size <= inline_threshold {
-        "regular".to_string()
-    } else {
-        "lfs".to_string()
+fn preupload_service(metadata: &web::Data<Arc<dyn MetadataStore>>) -> PreuploadService {
+    PreuploadService::new(metadata.get_ref().clone())
+}
+
+fn error_json(error: String, error_type: &str) -> serde_json::Value {
+    serde_json::json!({
+        "error": error,
+        "error_type": error_type
+    })
+}
+
+fn preupload_service_error_response(err: PreuploadServiceError) -> HttpResponse {
+    match err {
+        PreuploadServiceError::Forbidden(msg) => {
+            HttpResponse::Forbidden().json(error_json(msg, "ForbiddenError"))
+        }
+        PreuploadServiceError::NotFound(msg) => {
+            HttpResponse::NotFound().json(error_json(msg, "NotFoundError"))
+        }
+        PreuploadServiceError::Internal(msg) => {
+            HttpResponse::InternalServerError().json(error_json(msg, "InternalError"))
+        }
+    }
+}
+
+fn upload_mode_to_api(mode: UploadMode) -> &'static str {
+    match mode {
+        UploadMode::Regular => "regular",
+        UploadMode::Lfs => "lfs",
     }
 }
 
@@ -50,49 +77,36 @@ async fn handle_preupload(
     config: web::Data<crate::config::HubConfig>,
 ) -> HttpResponse {
     let (namespace, repo_name, _revision) = path.into_inner();
-
-    // C-AUTH: preupload 是 commit 的写前置步骤,需校验对目标 namespace 的写权限
-    // (与 handle_commit 一致)。在 repo 查询前返回 403,不泄露私有 repo 存在性。
-    if namespace != auth.info.username {
-        let has_access = metadata
-            .is_namespace_member(&auth.info.username, &namespace)
-            .await
-            .unwrap_or(false);
-        if !has_access {
-            return HttpResponse::Forbidden().json(serde_json::json!({
-                "error": format!("User '{}' cannot access namespace '{}'", auth.info.username, namespace),
-                "error_type": "ForbiddenError"
-            }));
-        }
-    }
-
-    // Check repo exists
-    match metadata.get_repo(&namespace, &repo_name, repo_type).await {
-        Ok(_) => {}
-        Err(e) => {
-            return match e {
-                crate::metadata::MetadataError::RepoNotFound(_) => {
-                    HttpResponse::NotFound().json(serde_json::json!({
-                        "error": e.to_string(),
-                        "error_type": "NotFoundError"
-                    }))
-                }
-                _ => HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": e.to_string(),
-                    "error_type": "InternalError"
-                })),
-            };
-        }
+    let service = preupload_service(&metadata);
+    let response = match service
+        .prepare_upload(ServicePreuploadRequest {
+            username: &auth.info.username,
+            namespace: &namespace,
+            repo_name: &repo_name,
+            repo_type,
+            inline_threshold: config.storage.inline_threshold_bytes,
+            files: body
+                .files
+                .iter()
+                .map(|file| PreuploadFileInput {
+                    path: file.path.clone(),
+                    size: file.size,
+                })
+                .collect(),
+        })
+        .await
+    {
+        Ok(response) => response,
+        Err(err) => return preupload_service_error_response(err),
     };
 
-    // Classify each file's upload mode
-    let file_responses: Vec<PreuploadFileResponse> = body
+    let file_responses: Vec<PreuploadFileResponse> = response
         .files
-        .iter()
-        .map(|f| PreuploadFileResponse {
-            path: f.path.clone(),
-            upload_mode: classify_upload_mode(f.size, config.storage.inline_threshold_bytes),
-            should_ignore: false,
+        .into_iter()
+        .map(|file| PreuploadFileResponse {
+            path: file.path,
+            upload_mode: upload_mode_to_api(file.upload_mode).to_string(),
+            should_ignore: file.should_ignore,
         })
         .collect();
 
@@ -287,44 +301,5 @@ mod tests {
         let body: PreuploadResponse = actix_test::read_body_json(resp).await;
         assert_eq!(body.files.len(), 1);
         assert_eq!(body.files[0].upload_mode, "lfs");
-    }
-
-    #[test]
-    fn test_classify_upload_mode() {
-        let inline_threshold = 1024 * 1024; // 1MB
-
-        // Regular: <= 1MB
-        assert_eq!(classify_upload_mode(0, inline_threshold), "regular");
-        assert_eq!(classify_upload_mode(1024, inline_threshold), "regular");
-        assert_eq!(
-            classify_upload_mode(1024 * 1024, inline_threshold),
-            "regular"
-        );
-
-        // LFS: > 1MB
-        assert_eq!(
-            classify_upload_mode(1024 * 1024 + 1, inline_threshold),
-            "lfs"
-        );
-        assert_eq!(
-            classify_upload_mode(5 * 1024 * 1024, inline_threshold),
-            "lfs"
-        );
-        assert_eq!(
-            classify_upload_mode(10 * 1024 * 1024, inline_threshold),
-            "lfs"
-        );
-        assert_eq!(
-            classify_upload_mode(10 * 1024 * 1024 + 1, inline_threshold),
-            "lfs"
-        );
-        assert_eq!(
-            classify_upload_mode(100 * 1024 * 1024, inline_threshold),
-            "lfs"
-        );
-        assert_eq!(
-            classify_upload_mode(1024 * 1024 * 1024, inline_threshold),
-            "lfs"
-        );
     }
 }
