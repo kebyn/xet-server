@@ -1,48 +1,14 @@
-use crate::metadata::{MetadataStore, Repo};
+use crate::metadata::Repo;
 
 /// 访问控制:私有 repo 仅 owner(namespace == username)可访问;公开 repo 任何人可访问。
 ///
 /// 集中此判定,避免每个 handler 各自实现导致遗漏(参见 C-AUTH 系列修复)。
 /// 调用方在返回 false 时应回 404(而非 403),以免泄露私有 repo 的存在性。
-pub fn can_access_repo(repo: &Repo, username: &str) -> bool {
-    !repo.private || repo.namespace == username
-}
+pub(crate) use crate::services::shared::can_access_repo;
 
 /// 写权限目前仅授予 repo owner。公开 repo 可读不代表可写。
 pub fn can_write_repo(repo: &Repo, username: &str) -> bool {
     repo.namespace == username
-}
-
-/// Resolve a revision name/branch to a commit ID
-/// Shared helper used by multiple API handlers (resolve, tree, preupload)
-pub async fn resolve_revision(
-    metadata: &dyn MetadataStore,
-    repo_id: i64,
-    revision: &str,
-) -> Result<String, String> {
-    // If revision looks like a commit hash (long hex string), use it directly
-    if revision.len() >= 8 && revision.chars().all(|c| c.is_ascii_hexdigit()) {
-        // Check if it's a known revision
-        if metadata.get_revision(repo_id, revision).await.is_ok() {
-            return Ok(revision.to_string());
-        }
-        // I14: Return error for unknown commit hashes instead of falling through
-        return Err(format!("Revision not found: {}", revision));
-    }
-
-    // I14: Only allow "main" as a branch name (no arbitrary branch resolution yet)
-    if revision == "main" {
-        let head = metadata.get_head(repo_id).await.ok().flatten();
-        match head {
-            Some(h) => Ok(h),
-            None => Err("No HEAD found for repo".to_string()),
-        }
-    } else {
-        Err(format!(
-            "Revision not found: {} (only 'main' branch or commit hashes are supported)",
-            revision
-        ))
-    }
 }
 
 #[cfg(test)]

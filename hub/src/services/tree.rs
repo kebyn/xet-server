@@ -1,6 +1,7 @@
 use std::{collections::HashSet, sync::Arc};
 
 use crate::metadata::{FileEntry, MetadataError, MetadataStore, Repo, RepoType};
+use crate::services::shared::{can_access_repo, resolve_revision_id};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TreeServiceError {
@@ -91,10 +92,6 @@ impl TreeService {
     }
 }
 
-fn can_access_repo(repo: &Repo, username: &str) -> bool {
-    !repo.private || repo.namespace == username
-}
-
 fn normalize_tree_path(path: &str) -> String {
     path.trim_matches('/').to_string()
 }
@@ -183,32 +180,6 @@ fn non_recursive_entries(entries: &[FileEntry], tree_path: &str) -> Vec<TreeList
     }
 
     tree_entries
-}
-
-async fn resolve_revision_id(
-    metadata: &dyn MetadataStore,
-    repo_id: i64,
-    revision: &str,
-) -> Result<String, String> {
-    if revision.len() >= 8 && revision.chars().all(|c| c.is_ascii_hexdigit()) {
-        if metadata.get_revision(repo_id, revision).await.is_ok() {
-            return Ok(revision.to_string());
-        }
-        return Err(format!("Revision not found: {}", revision));
-    }
-
-    if revision == "main" {
-        let head = metadata.get_head(repo_id).await.ok().flatten();
-        match head {
-            Some(head) => Ok(head),
-            None => Err("No HEAD found for repo".to_string()),
-        }
-    } else {
-        Err(format!(
-            "Revision not found: {} (only 'main' branch or commit hashes are supported)",
-            revision
-        ))
-    }
 }
 
 #[cfg(test)]
