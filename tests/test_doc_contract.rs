@@ -93,6 +93,26 @@ fn docs_state_hub_lfs_proxy_to_cas_token_contract() {
 }
 
 #[test]
+fn docs_limit_internal_tokens_to_internal_endpoints() {
+    let configuration = repo_file("docs/configuration.md");
+    assert!(
+        configuration.contains("Hub→CAS internal endpoints"),
+        "docs/configuration.md must scope HUB_INTERNAL_TOKEN_TTL_SECONDS to internal endpoints"
+    );
+    assert!(
+        configuration
+            .contains("不用于 CAS batch、public LFS object 或 inline resolve/commit 对象读写"),
+        "docs/configuration.md must state internal tokens are not used for public CAS object calls"
+    );
+
+    let architecture = repo_file("docs/architecture.md");
+    assert!(
+        architecture.contains("签发 CAS user token（xet_xxx）、LFS proxy token（proxy_xxx）和 internal service token（internal_xxx）"),
+        "docs/architecture.md must describe the layered token issuance model"
+    );
+}
+
+#[test]
 fn historical_internal_scope_plan_is_marked_superseded() {
     let cas_plan = repo_file("docs/superpowers/plans/2026-06-10-cas-modifications.md");
     assert!(
