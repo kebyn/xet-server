@@ -1,15 +1,6 @@
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use ed25519_dalek::{Signer, SigningKey};
-use serde::{Deserialize, Serialize};
+use ed25519_dalek::SigningKey;
 use std::time::{SystemTime, UNIX_EPOCH};
-
-/// JWT header for Xet tokens
-#[derive(Debug, Deserialize, Serialize)]
-struct JwtHeader {
-    alg: String,
-    typ: String,
-    kid: String,
-}
+use xet_auth_types::{TokenKind, sign_claims, verify_token};
 
 /// Claims for Xet access tokens.
 ///
@@ -99,30 +90,12 @@ impl XetSigner {
     /// Internal helper to sign claims and produce a token
     /// Returns (token, expiration_timestamp)
     /// I1 fix: Return Result to propagate serialization errors instead of panicking
-    fn sign_claims(&self, claims: XetClaims, prefix: &str) -> Result<(String, u64), String> {
+    fn sign_claims(&self, claims: XetClaims, kind: TokenKind) -> Result<(String, u64), String> {
         let exp = claims.exp;
 
-        let header = JwtHeader {
-            alg: "EdDSA".to_string(),
-            typ: "JWT".to_string(),
-            kid: self.kid.clone(),
-        };
-
-        // I1 fix: Use map_err instead of unwrap() to avoid panic on serialization failure
-        let header_b64 = URL_SAFE_NO_PAD.encode(
-            serde_json::to_vec(&header)
-                .map_err(|e| format!("Failed to serialize header: {}", e))?,
-        );
-        let claims_b64 = URL_SAFE_NO_PAD.encode(
-            serde_json::to_vec(&claims)
-                .map_err(|e| format!("Failed to serialize claims: {}", e))?,
-        );
-
-        let signing_input = format!("{}.{}", header_b64, claims_b64);
-        let signature = self.signing_key.sign(signing_input.as_bytes());
-        let sig_b64 = URL_SAFE_NO_PAD.encode(signature.to_bytes());
-
-        Ok((format!("{}{}.{}", prefix, signing_input, sig_b64), exp))
+        let token =
+            sign_claims(&claims, &self.signing_key, kind).map_err(|e| format!("{:?}", e))?;
+        Ok((token, exp))
     }
 
     /// Sign and create a Xet access token
@@ -160,7 +133,7 @@ impl XetSigner {
             operation: None,
         };
 
-        self.sign_claims(claims, "xet_")
+        self.sign_claims(claims, TokenKind::User)
     }
 
     /// Sign and create a short-lived proxy token for LFS operations
@@ -198,7 +171,7 @@ impl XetSigner {
             operation: Some(operation.to_string()),
         };
 
-        self.sign_claims(claims, "proxy_")
+        self.sign_claims(claims, TokenKind::Proxy)
     }
 
     #[cfg(test)]
@@ -231,7 +204,7 @@ impl XetSigner {
             operation: Some(operation.to_string()),
         };
 
-        self.sign_claims(claims, "proxy_")
+        self.sign_claims(claims, TokenKind::Proxy)
     }
 
     /// Sign and create an internal token for Hub-to-CAS communication
@@ -262,7 +235,7 @@ impl XetSigner {
         };
 
         // C2 fix: Use internal_ prefix to distinguish from user tokens
-        self.sign_claims(claims, "internal_")
+        self.sign_claims(claims, TokenKind::Internal)
     }
 
     /// Internal helper to verify a token's signature and decode its claims
@@ -273,81 +246,14 @@ impl XetSigner {
         expected_prefix: &str,
         expected_token_type: &str,
     ) -> Option<XetClaims> {
-        use ed25519_dalek::{Signature, Verifier};
-
-        // Check if it has the expected prefix
-        if !token.starts_with(expected_prefix) {
-            return None;
-        }
-
-        // Parse JWT
-        let token_body = token.strip_prefix(expected_prefix)?;
-
-        let parts: Vec<&str> = token_body.split('.').collect();
-        if parts.len() != 3 {
-            return None;
-        }
-
-        let header_json = match URL_SAFE_NO_PAD.decode(parts[0]) {
-            Ok(json) => json,
-            Err(_) => return None,
+        let expected_kind = match (expected_prefix, expected_token_type) {
+            ("xet_", "user") => TokenKind::User,
+            ("proxy_", "proxy") => TokenKind::Proxy,
+            ("internal_", "internal") => TokenKind::Internal,
+            _ => return None,
         };
-        let header: JwtHeader = serde_json::from_slice(&header_json).ok()?;
-        if header.kid != self.kid || header.alg != "EdDSA" {
-            return None;
-        }
-
-        // Verify signature using ed25519-dalek
-        let signing_input = format!("{}.{}", parts[0], parts[1]);
-        let signature_bytes = match URL_SAFE_NO_PAD.decode(parts[2]) {
-            Ok(bytes) => bytes,
-            Err(_) => return None,
-        };
-
-        let signature = match Signature::from_slice(&signature_bytes) {
-            Ok(sig) => sig,
-            Err(_) => return None,
-        };
-
-        // Get verifying key from signing key
         let verifying_key = self.signing_key.verifying_key();
-
-        // Verify signature
-        if verifying_key
-            .verify(signing_input.as_bytes(), &signature)
-            .is_err()
-        {
-            return None;
-        }
-
-        // Decode claims (signature is valid, so this should succeed)
-        let claims_json = match URL_SAFE_NO_PAD.decode(parts[1]) {
-            Ok(json) => json,
-            Err(_) => return None,
-        };
-
-        let claims: XetClaims = serde_json::from_slice(&claims_json).ok()?;
-
-        // I2 fix: Verify kid matches expected to prevent key confusion attacks
-        if claims.kid != self.kid {
-            return None;
-        }
-
-        if claims.token_type != expected_token_type {
-            return None;
-        }
-
-        // Check expiration
-        // M4 fix: If system clock is broken, reject all tokens (safe default)
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(u64::MAX); // Treats all tokens as expired when clock is broken
-        if claims.exp < now {
-            return None; // Token expired
-        }
-
-        Some(claims)
+        verify_token(token, &verifying_key, &self.kid, expected_kind).ok()
     }
 
     /// Verify a proxy token's signature and decode its claims
@@ -381,6 +287,8 @@ impl XetSigner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use ed25519_dalek::Signer;
     use ed25519_dalek::SigningKey;
     use rand::rngs::OsRng;
 
@@ -408,7 +316,25 @@ mod tests {
             operation: None,
         };
 
-        signer.sign_claims(claims, prefix).unwrap().0
+        sign_claims_with_prefix_for_test(&signer.signing_key, &claims, prefix)
+    }
+
+    fn sign_claims_with_prefix_for_test(
+        signing_key: &SigningKey,
+        claims: &XetClaims,
+        prefix: &str,
+    ) -> String {
+        let header = serde_json::json!({
+            "alg": "EdDSA",
+            "typ": "JWT",
+            "kid": claims.kid,
+        });
+        let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap());
+        let claims_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(claims).unwrap());
+        let signing_input = format!("{}.{}", header_b64, claims_b64);
+        let signature = signing_key.sign(signing_input.as_bytes());
+        let sig_b64 = URL_SAFE_NO_PAD.encode(signature.to_bytes());
+        format!("{}{}.{}", prefix, signing_input, sig_b64)
     }
 
     fn sign_token_with_header(

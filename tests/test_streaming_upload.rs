@@ -46,6 +46,7 @@ fn create_test_config_with_temp_dir(temp_dir: &str) -> TestContext {
             public_base_url: None,
             max_body_size_mb: 2048,
             rate_limit_rpm: 60,
+            index_rebuild_strict: false,
         },
         storage: xet_server::config::StorageConfig {
             backend: "local".to_string(),

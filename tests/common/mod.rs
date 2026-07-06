@@ -103,6 +103,7 @@ pub fn test_config_with_key(kp: &KeyPair) -> TestContext {
             public_base_url: None,
             max_body_size_mb: 2048,
             rate_limit_rpm: 60,
+            index_rebuild_strict: false,
         },
         storage: StorageConfig {
             backend: "local".to_string(),
@@ -154,6 +155,7 @@ pub fn test_config_with_new_key() -> TestContext {
             public_base_url: None,
             max_body_size_mb: 2048,
             rate_limit_rpm: 60,
+            index_rebuild_strict: false,
         },
         storage: StorageConfig {
             backend: "local".to_string(),
