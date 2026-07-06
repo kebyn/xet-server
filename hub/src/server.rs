@@ -97,7 +97,10 @@ pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
     );
 
     // Initialize CAS client
-    let cas_client = Arc::new(CasClient::new(&config.cas));
+    let cas_client = Arc::new(
+        CasClient::new(&config.cas)
+            .map_err(|e| std::io::Error::other(format!("Failed to create CAS client: {}", e)))?,
+    );
 
     // Optional: verify CAS connectivity at startup (async, non-blocking)
     // M5 fix: Add timeout to prevent health check from hanging indefinitely
@@ -176,7 +179,7 @@ pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
         .per_second(60) // 60-second refill window
         .burst_size(rpm) // configured requests per window
         .finish()
-        .expect("Failed to configure rate limiter");
+        .ok_or_else(|| std::io::Error::other("Failed to configure rate limiter"))?;
 
     tracing::info!(
         "Rate limiting: {} requests per 60-second window per IP for public endpoints \

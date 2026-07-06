@@ -51,22 +51,17 @@ impl ServerSettings {
 
     /// Validate the base URL configuration.
     /// Called once during config loading to fail fast on misconfiguration.
-    ///
-    /// # Panics
-    /// Panics if `public_base_url` is set and either:
-    /// - The URL is not syntactically valid (e.g. malformed scheme or path)
-    /// - The URL is missing a host component (e.g. `"http://"`)
-    pub fn validate_base_url(&self) {
+    pub fn validate_base_url(&self) -> Result<(), String> {
         if let Some(ref url) = self.public_base_url {
             let url = url.trim_end_matches('/');
             match url::Url::parse(url) {
                 Ok(parsed) => {
                     if parsed.host().is_none() {
-                        panic!(
+                        return Err(format!(
                             "public_base_url '{}' is missing a valid host. \
                             This will cause client connection failures.",
                             url
-                        );
+                        ));
                     }
                     if parsed.scheme() != "http" && parsed.scheme() != "https" {
                         tracing::warn!(
@@ -78,14 +73,15 @@ impl ServerSettings {
                     }
                 }
                 Err(e) => {
-                    panic!(
+                    return Err(format!(
                         "public_base_url '{}' is not a valid URL: {}. \
                         This will cause client connection failures.",
                         url, e
-                    );
+                    ));
                 }
             }
         }
+        Ok(())
     }
 
     /// Get the maximum request body size in bytes.
@@ -257,7 +253,7 @@ impl ServerConfig {
     /// I4 fix: Prevent zero values that would cause service unavailability.
     fn validate(&self) -> Result<(), String> {
         // I4 fix: Validate base URL once at config load time
-        self.server.validate_base_url();
+        self.server.validate_base_url()?;
 
         if self.server.rate_limit_rpm == 0 {
             return Err(
@@ -293,8 +289,8 @@ impl ServerConfig {
         Ok(())
     }
 
-    /// Load configuration from environment variables with defaults
-    pub fn from_env() -> Self {
+    /// Load configuration from environment variables with defaults.
+    pub fn try_from_env() -> Result<Self, String> {
         let host = std::env::var("XET_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
         let port = match std::env::var("XET_PORT") {
             Ok(val) => val.parse().unwrap_or_else(|_| {
@@ -419,11 +415,16 @@ impl ServerConfig {
                 max_conversion_size,
             },
         };
-        // M1 fix: Handle validation errors with clear error messages
-        if let Err(e) = config.validate() {
-            panic!("Configuration validation failed: {}", e);
-        }
-        config
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Load configuration from environment variables with defaults.
+    ///
+    /// Prefer [`ServerConfig::try_from_env`] in production entrypoints so startup
+    /// errors are returned instead of panicking.
+    pub fn from_env() -> Self {
+        Self::try_from_env().unwrap_or_else(|e| panic!("Configuration validation failed: {}", e))
     }
 }
 

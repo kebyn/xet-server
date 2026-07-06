@@ -2,6 +2,35 @@
 
 use xet_server::config::{AuthConfig, ServerConfig, StorageConfig};
 
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+struct ScopedEnv {
+    key: &'static str,
+    previous: Option<String>,
+}
+
+impl ScopedEnv {
+    fn set(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var(key).ok();
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self { key, previous }
+    }
+}
+
+impl Drop for ScopedEnv {
+    fn drop(&mut self) {
+        unsafe {
+            if let Some(value) = &self.previous {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+}
+
 #[test]
 fn test_config_default() {
     let config = ServerConfig::default();
@@ -56,6 +85,27 @@ fn test_config_rate_limit_default() {
         config.server.rate_limit_rpm, 60,
         "Default CAS rate limit should be 60 RPM"
     );
+}
+
+#[test]
+fn test_try_from_env_rejects_invalid_public_base_url_without_panic() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let _url = ScopedEnv::set("XET_PUBLIC_BASE_URL", "http://");
+
+    let err = ServerConfig::try_from_env().expect_err("invalid base URL should be rejected");
+
+    assert!(err.contains("public_base_url"));
+    assert!(err.contains("valid URL") || err.contains("valid host"));
+}
+
+#[test]
+fn test_try_from_env_rejects_zero_rate_limit_without_panic() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let _rate_limit = ScopedEnv::set("XET_RATE_LIMIT_RPM", "0");
+
+    let err = ServerConfig::try_from_env().expect_err("zero rate limit should be rejected");
+
+    assert!(err.contains("XET_RATE_LIMIT_RPM must be > 0"));
 }
 
 #[test]

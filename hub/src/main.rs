@@ -17,7 +17,7 @@ async fn main() -> std::io::Result<()> {
 
     // S2 FIX: Use from_file_or_env() to support TOML configuration files.
     // Previously only from_env() was called, making TOML config support dead code.
-    let config = HubConfig::from_file_or_env();
+    let config = HubConfig::try_from_file_or_env().map_err(std::io::Error::other)?;
     start_server(config).await
 }
 

@@ -9,7 +9,7 @@ async fn main() -> std::io::Result<()> {
     tracing_subscriber::fmt::init();
 
     // Load configuration
-    let config = ServerConfig::from_env();
+    let config = ServerConfig::try_from_env().map_err(std::io::Error::other)?;
 
     // Start server
     start_server(config).await

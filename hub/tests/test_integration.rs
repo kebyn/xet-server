@@ -35,7 +35,8 @@ async fn setup_test_env() -> TestEnv {
         Arc::new(SqliteMetadataStore::in_memory().await.unwrap());
 
     // Create CAS client
-    let cas_client: Arc<dyn CasClientTrait> = Arc::new(CasClient::new(&CasSettings::default()));
+    let cas_client: Arc<dyn CasClientTrait> =
+        Arc::new(CasClient::new(&CasSettings::default()).expect("CAS client should be created"));
 
     // Create test config
     let config = HubConfig {

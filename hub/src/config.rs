@@ -213,10 +213,24 @@ impl HubConfig {
         Ok(())
     }
 
+    fn validate_url_with_host(name: &str, url: &str) -> Result<(), String> {
+        let parsed = url::Url::parse(url)
+            .map_err(|e| format!("{} '{}' is not a valid URL: {}", name, url, e))?;
+        if parsed.host().is_none() {
+            return Err(format!("{} '{}' is missing a valid host", name, url));
+        }
+        Ok(())
+    }
+
+    fn validate_url(name: &str, url: &str) -> Result<(), String> {
+        url::Url::parse(url)
+            .map(|_| ())
+            .map_err(|e| format!("{} '{}' is not a valid URL: {}", name, url, e))
+    }
+
     /// Load configuration from environment variables.
-    /// Note: Does NOT call validate() - caller (from_file_or_env) is responsible for validation.
-    pub fn from_env() -> Self {
-        HubConfig {
+    pub fn try_from_env() -> Result<Self, String> {
+        let config = HubConfig {
             server: ServerSettings {
                 host: env::var("HUB_HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
                 port: env::var("HUB_PORT")
@@ -256,18 +270,10 @@ impl HubConfig {
             },
             cas: CasSettings {
                 base_url: {
-                    // I14 fix: Validate CAS_BASE_URL format at config load time
                     let url = env::var("CAS_BASE_URL")
                         .unwrap_or_else(|_| "http://localhost:8081".to_string());
-                    if url::Url::parse(&url).is_err() {
-                        tracing::warn!(
-                            "CAS_BASE_URL '{}' is not a valid URL, using default http://localhost:8081",
-                            url
-                        );
-                        "http://localhost:8081".to_string()
-                    } else {
-                        url
-                    }
+                    Self::validate_url("CAS_BASE_URL", &url)?;
+                    url
                 },
                 internal_timeout_seconds: env::var("HUB_CAS_TIMEOUT_SECS")
                     .ok()
@@ -294,7 +300,21 @@ impl HubConfig {
                     .and_then(|t| t.parse().ok())
                     .unwrap_or(512 * 1024 * 1024),
             },
+        };
+
+        if let Some(ref url) = config.server.public_base_url {
+            Self::validate_url_with_host("HUB_PUBLIC_BASE_URL", url)?;
         }
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Load configuration from environment variables.
+    ///
+    /// Prefer [`HubConfig::try_from_env`] in production entrypoints so startup
+    /// errors are returned instead of panicking.
+    pub fn from_env() -> Self {
+        Self::try_from_env().unwrap_or_else(|e| panic!("Configuration validation failed: {}", e))
     }
 
     /// M3: Load configuration from a TOML file
@@ -304,33 +324,28 @@ impl HubConfig {
         let config: Self = toml::from_str(&content)
             .map_err(|e| format!("Failed to parse config file {}: {}", path, e))?;
 
-        // M1 fix: Validate URL at load time (same validation as from_file_or_env)
         if let Some(ref url) = config.server.public_base_url {
-            let parsed = url::Url::parse(url)
-                .map_err(|e| format!("public_base_url '{}' is not a valid URL: {}", url, e))?;
-            if parsed.host().is_none() {
-                return Err(format!("public_base_url '{}' is missing a valid host", url));
-            }
+            Self::validate_url_with_host("public_base_url", url)?;
         }
 
         Ok(config)
     }
 
     /// M3: Load configuration from file (if path provided) with environment variable overrides.
-    /// Priority: environment variables > file > defaults
-    pub fn from_file_or_env() -> Self {
+    /// Priority: environment variables > file > defaults.
+    pub fn try_from_file_or_env() -> Result<Self, String> {
         // Start with file-based config if HUB_CONFIG_FILE is set
         let mut config = match env::var("HUB_CONFIG_FILE") {
             Ok(path) => match Self::from_file(&path) {
                 Ok(cfg) => cfg,
                 Err(e) => {
-                    panic!(
+                    return Err(format!(
                         "HUB_CONFIG_FILE '{}' is set but config could not be loaded: {}",
                         path, e
-                    );
+                    ));
                 }
             },
-            Err(_) => Self::from_env(),
+            Err(_) => Self::try_from_env()?,
         };
 
         // Override with environment variables (env takes precedence)
@@ -341,19 +356,7 @@ impl HubConfig {
             config.server.port = port;
         }
         if let Ok(url) = env::var("HUB_PUBLIC_BASE_URL") {
-            // M-3: Validate URL format when set via environment variable
-            // I2: Panic on invalid URL to fail fast at startup
-            // M1 FIX: Parse URL only once using match instead of parsing twice
-            let parsed = match url::Url::parse(&url) {
-                Ok(p) => p,
-                Err(e) => {
-                    panic!("HUB_PUBLIC_BASE_URL '{}' is not a valid URL: {}", url, e);
-                }
-            };
-            // Validate host is present
-            if parsed.host().is_none() {
-                panic!("HUB_PUBLIC_BASE_URL '{}' is missing a valid host", url);
-            }
+            Self::validate_url_with_host("HUB_PUBLIC_BASE_URL", &url)?;
             config.server.public_base_url = Some(url);
         }
         if let Some(rpm) = env::var("HUB_RATE_LIMIT_RPM")
@@ -396,9 +399,7 @@ impl HubConfig {
             config.metadata.db_pool_size = size;
         }
         if let Ok(url) = env::var("CAS_BASE_URL") {
-            if url::Url::parse(&url).is_err() {
-                panic!("CAS_BASE_URL '{}' is not a valid URL", url);
-            }
+            Self::validate_url("CAS_BASE_URL", &url)?;
             config.cas.base_url = url;
         }
         if let Some(timeout) = env::var("HUB_CAS_TIMEOUT_SECS")
@@ -435,12 +436,19 @@ impl HubConfig {
             config.storage.max_upload_size = size;
         }
 
-        // M1 fix: Handle validation errors with clear error messages
-        if let Err(e) = config.validate() {
-            panic!("Configuration validation failed: {}", e);
-        }
+        config.validate()?;
         // M5 fix: Cache computed base URL to avoid repeated allocation
         config.server.cache_base_url();
-        config
+        Ok(config)
+    }
+
+    /// M3: Load configuration from file (if path provided) with environment variable overrides.
+    /// Priority: environment variables > file > defaults.
+    ///
+    /// Prefer [`HubConfig::try_from_file_or_env`] in production entrypoints so startup
+    /// errors are returned instead of panicking.
+    pub fn from_file_or_env() -> Self {
+        Self::try_from_file_or_env()
+            .unwrap_or_else(|e| panic!("Configuration validation failed: {}", e))
     }
 }
