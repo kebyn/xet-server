@@ -1,6 +1,7 @@
 pub mod api;
 pub mod auth;
 pub mod cas_client;
+mod commit;
 pub mod config;
 pub mod error;
 pub mod metadata;

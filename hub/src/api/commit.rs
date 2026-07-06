@@ -1,22 +1,20 @@
 use crate::auth::extract::{AuthUser, AuthWrite};
 use crate::auth::xet_signer::XetSigner;
 use crate::cas_client::CasClientTrait;
-use crate::metadata::{FileEntry, MetadataStore, RepoType, Revision};
+#[cfg(test)]
+use crate::commit::content::decode_base64_content;
+#[cfg(test)]
+use crate::commit::id::generate_commit_id;
+#[cfg(test)]
+use crate::commit::types::MAX_INLINE_SIZE;
+#[cfg(test)]
+use crate::commit::validation::validate_file_path;
+#[cfg(test)]
+use crate::metadata::Revision;
+use crate::metadata::{MetadataStore, RepoType};
+use crate::services::commit::{CommitRequest, CommitService, CommitServiceError};
 use actix_web::{HttpResponse, web};
-use sha2::{Digest, Sha256};
-
-mod content;
-mod id;
-mod types;
-mod validation;
-
-use content::decode_base64_content;
-use id::{generate_commit_id, now_timestamp};
-use types::{
-    CommitHeader, CommitOperation, CommitResponse, DeletedEntryOperation, FileOperation,
-    LfsFileOperation, MAX_INLINE_SIZE,
-};
-use validation::validate_file_path;
+use std::sync::Arc;
 
 /// Internal helper for commit handling
 ///
@@ -31,377 +29,92 @@ async fn handle_commit(
     path: web::Path<(String, String, String)>,
     body: String,
     repo_type: RepoType,
-    metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
-    cas_client: web::Data<std::sync::Arc<dyn CasClientTrait>>,
-    signer: web::Data<std::sync::Arc<XetSigner>>,
+    metadata: web::Data<Arc<dyn MetadataStore>>,
+    cas_client: web::Data<Arc<dyn CasClientTrait>>,
+    signer: web::Data<Arc<XetSigner>>,
 ) -> HttpResponse {
-    // Check body size limit (20MB) to prevent memory exhaustion
-    const MAX_COMMIT_BODY_SIZE: usize = 20 * 1024 * 1024;
-    if body.len() > MAX_COMMIT_BODY_SIZE {
-        return HttpResponse::PayloadTooLarge().json(serde_json::json!({
-            "error": format!("Commit body too large ({} bytes), max allowed: {} bytes", body.len(), MAX_COMMIT_BODY_SIZE),
-            "error_type": "PayloadTooLarge"
-        }));
-    }
-
     let (namespace, repo_name, revision) = path.into_inner();
+    let service = CommitService::new(
+        metadata.get_ref().clone(),
+        cas_client.get_ref().clone(),
+        signer.get_ref().clone(),
+    );
 
-    // C4 fix: Verify the authenticated user has write access to the target namespace.
-    // Users can write to their own namespace. Organization/team namespace support
-    // can be added via metadata.is_namespace_member() when multi-user collaboration is needed.
-    if namespace != auth.info.username {
-        let has_access = metadata
-            .is_namespace_member(&auth.info.username, &namespace)
-            .await
-            .unwrap_or(false);
-        if !has_access {
-            return HttpResponse::Forbidden().json(serde_json::json!({
-                "error": format!("User '{}' cannot commit to namespace '{}'", auth.info.username, namespace),
-                "error_type": "ForbiddenError"
-            }));
-        }
-    }
-
-    // I6 fix: Limit number of operations per commit to prevent resource exhaustion
-    const MAX_COMMIT_OPERATIONS: usize = 10_000;
-    let operation_count = body.lines().filter(|l| !l.trim().is_empty()).count();
-    if operation_count > MAX_COMMIT_OPERATIONS {
-        return HttpResponse::BadRequest().json(serde_json::json!({
-            "error": format!("Too many operations in commit ({}, max {})", operation_count, MAX_COMMIT_OPERATIONS),
-            "error_type": "ValidationError"
-        }));
-    }
-
-    // Get the repo
-    let repo = match metadata.get_repo(&namespace, &repo_name, repo_type).await {
-        Ok(r) => r,
-        Err(e) => {
-            return match e {
-                crate::metadata::MetadataError::RepoNotFound(_) => {
-                    HttpResponse::NotFound().json(serde_json::json!({
-                        "error": e.to_string(),
-                        "error_type": "NotFoundError"
-                    }))
-                }
-                _ => HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": e.to_string(),
-                    "error_type": "InternalError"
-                })),
-            };
-        }
-    };
-
-    // Parse NDJSON body line by line
-    let mut header: Option<CommitHeader> = None;
-    let mut files: Vec<FileOperation> = Vec::new();
-    let mut lfs_files: Vec<LfsFileOperation> = Vec::new();
-    let mut deleted_entries: Vec<DeletedEntryOperation> = Vec::new();
-
-    for line in body.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let op: CommitOperation = match serde_json::from_str(line) {
-            Ok(o) => o,
-            Err(e) => {
-                return HttpResponse::BadRequest().json(serde_json::json!({
-                    "error": format!("Invalid NDJSON line: {}", e),
-                    "error_type": "ValidationError"
-                }));
-            }
-        };
-        match op {
-            CommitOperation::Header(h) => header = Some(h),
-            CommitOperation::File(f) => files.push(f),
-            CommitOperation::LfsFile(lf) => lfs_files.push(lf),
-            CommitOperation::DeletedEntry(d) => deleted_entries.push(d),
-        }
-    }
-
-    let header = match header {
-        Some(h) => h,
-        None => {
-            return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": "Missing header in commit",
-                "error_type": "ValidationError"
-            }));
-        }
-    };
-
-    // Two-phase HEAD check (I3): this pre-check provides early rejection with specific
-    // error messages before doing expensive CAS uploads. The authoritative check
-    // happens inside commit_atomic() under BEGIN IMMEDIATE lock for correctness.
-    // Both are necessary: this one for UX (better error messages), the atomic one
-    // for race-safety (prevents conflicts from concurrent commits).
-    // Get current HEAD for OCC check
-    let current_head = metadata.get_head(repo.id).await.ok().flatten();
-    let parent_revision = header.parent_revision.clone();
-
-    // Validate parent revision matches current HEAD (pre-check for better error messages)
-    match (&parent_revision, &current_head) {
-        (Some(parent), Some(head)) => {
-            if parent != head {
-                return HttpResponse::Conflict().json(serde_json::json!({
-                    "error": "Parent revision does not match current HEAD",
-                    "error_type": "ConflictError",
-                    "currentHead": head,
-                    "note": "This is a pre-check for early error detection. The authoritative check happens atomically during commit."
-                }));
-            }
-        }
-        (Some(_parent), None) => {
-            // Parent specified but no current HEAD - this is an error for non-empty repos
-            return HttpResponse::Conflict().json(serde_json::json!({
-                "error": "Parent revision specified but repository has no HEAD",
-                "error_type": "ConflictError",
-                "currentHead": null,
-                "note": "This is a pre-check. The authoritative check happens atomically during commit."
-            }));
-        }
-        (None, Some(head)) => {
-            // I9: No parent specified but repo has HEAD - this is a conflict
-            // Must explicitly specify the parent when repo already has commits
-            return HttpResponse::Conflict().json(serde_json::json!({
-                "error": format!("No parent specified but repository already has HEAD: {}", head),
-                "error_type": "ConflictError",
-                "currentHead": head,
-                "note": "This is a pre-check. The authoritative check happens atomically during commit."
-            }));
-        }
-        (None, None) => {
-            // No parent, no HEAD - first commit
-        }
-    }
-
-    // Generate internal token for CAS /internal/* state checks.
-    let (internal_token, _) = match signer.sign_internal() {
-        Ok(result) => result,
-        Err(e) => {
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Failed to sign internal token: {}", e),
-                "error_type": "InternalError"
-            }));
-        }
-    };
-
-    // Generate new commit ID
-    let timestamp = now_timestamp();
-    let commit_id =
-        generate_commit_id(repo.id, current_head.as_deref(), &header.summary, timestamp);
-
-    let cas_write_token = if files.is_empty() {
-        String::new()
-    } else {
-        match signer.sign(
-            &auth.info.username,
-            "write",
-            &format!("{}/{}", namespace, repo_name),
-            &repo_type.to_string(),
-            &revision,
-        ) {
-            Ok((token, _)) => token,
-            Err(e) => {
-                return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": format!("Failed to sign CAS write token: {}", e),
-                    "error_type": "InternalError"
-                }));
-            }
-        }
-    };
-
-    // Build file entries
-    let mut file_entries: Vec<FileEntry> = Vec::new();
-
-    // Process inline files - decode, check size, compute SHA256, and store in CAS
-    for file_op in files {
-        // I1 fix: Validate file path before processing
-        if let Err(msg) = validate_file_path(&file_op.path) {
-            return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": format!("Invalid file path: {}", msg),
-                "error_type": "ValidationError"
-            }));
-        }
-
-        let decoded_content = match decode_base64_content(&file_op.content) {
-            Ok(c) => c,
-            Err(e) => {
-                return HttpResponse::BadRequest().json(serde_json::json!({
-                    "error": e,
-                    "error_type": "ValidationError"
-                }));
-            }
-        };
-
-        // Check size limit (I4)
-        if decoded_content.len() > MAX_INLINE_SIZE {
-            return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": format!("Inline file too large: {} bytes (max {})", decoded_content.len(), MAX_INLINE_SIZE),
-                "error_type": "ValidationError"
-            }));
-        }
-
-        // Compute SHA256 oid
-        let oid = hex::encode(Sha256::digest(&decoded_content));
-        let size = decoded_content.len() as u64;
-
-        // Store inline file content in CAS (C1)
-        if let Err(e) = cas_client
-            .proxy_lfs_upload(&oid, bytes::Bytes::from(decoded_content), &cas_write_token)
-            .await
-        {
-            tracing::error!(
-                "Failed to store inline file in CAS: status={}, error={}",
-                e.status,
-                e.message
-            );
-            let status_code = actix_web::http::StatusCode::from_u16(e.status)
-                .unwrap_or(actix_web::http::StatusCode::BAD_GATEWAY);
-            return HttpResponse::build(status_code).json(serde_json::json!({
-                "error": format!("Failed to store inline file in CAS: {}", e.message),
-                "error_type": "CasError"
-            }));
-        }
-
-        file_entries.push(FileEntry {
-            path: file_op.path,
-            repo_id: repo.id,
-            commit_id: commit_id.clone(),
-            size,
-            cas_hash: oid.clone(),
-            is_lfs: false,
-        });
-    }
-
-    // Process LFS files - verify they exist in CAS (C2)
-    for lfs_op in lfs_files {
-        // I1 fix: Validate file path before processing
-        if let Err(msg) = validate_file_path(&lfs_op.path) {
-            return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": format!("Invalid file path: {}", msg),
-                "error_type": "ValidationError"
-            }));
-        }
-
-        // Validate OID format before CAS verification (defense-in-depth)
-        if lfs_op.oid.len() != 64 || !lfs_op.oid.chars().all(|c| c.is_ascii_hexdigit()) {
-            return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": format!("Invalid LFS OID format for {}: expected 64-character hex string", lfs_op.path),
-                "error_type": "ValidationError"
-            }));
-        }
-
-        // Verify LFS file exists in CAS before accepting
-        match cas_client.head_blob(&lfs_op.oid, &internal_token).await {
-            Ok(_) => { /* blob exists, proceed */ }
-            Err(crate::error::HubError::NotFound(_)) => {
-                return HttpResponse::UnprocessableEntity().json(serde_json::json!({
-                    "error": format!("LFS file not found in CAS: {}", lfs_op.oid),
-                    "error_type": "UnprocessableEntity"
-                }));
-            }
-            Err(e) => {
-                return HttpResponse::BadGateway().json(serde_json::json!({
-                    "error": format!("CAS verification failed: {}", e),
-                    "error_type": "CasError"
-                }));
-            }
-        }
-
-        file_entries.push(FileEntry {
-            path: lfs_op.path,
-            repo_id: repo.id,
-            commit_id: commit_id.clone(),
-            size: lfs_op.size,
-            cas_hash: lfs_op.oid,
-            is_lfs: true,
-        });
-    }
-
-    // Copy parent's file tree (if parent exists) and apply changes
-    let parent_entries: Vec<FileEntry> = if let Some(parent_commit) = &current_head {
-        metadata
-            .get_file_tree(repo.id, parent_commit)
-            .await
-            .ok()
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-
-    // Start from parent's tree, apply additions/deletions
-    let mut final_entries: std::collections::HashMap<String, FileEntry> =
-        std::collections::HashMap::new();
-    for entry in parent_entries {
-        final_entries.insert(entry.path.clone(), entry);
-    }
-
-    // Apply deletions
-    for deleted in deleted_entries {
-        // I1 fix: Validate deleted entry paths too
-        if let Err(msg) = validate_file_path(&deleted.path) {
-            return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": format!("Invalid deleted entry path: {}", msg),
-                "error_type": "ValidationError"
-            }));
-        }
-        final_entries.remove(&deleted.path);
-    }
-
-    // Apply additions/updates (copy entries but update commit_id)
-    for entry in file_entries {
-        final_entries.insert(
-            entry.path.clone(),
-            FileEntry {
-                path: entry.path,
-                repo_id: repo.id,
-                commit_id: commit_id.clone(),
-                size: entry.size,
-                cas_hash: entry.cas_hash,
-                is_lfs: entry.is_lfs,
-            },
-        );
-    }
-
-    // Convert to vector for storage
-    let final_entries_vec: Vec<FileEntry> = final_entries.values().cloned().collect();
-
-    // Create revision
-    let revision = Revision {
-        commit_id: commit_id.clone(),
-        repo_id: repo.id,
-        parent: current_head.clone(),
-        message: header.summary.clone(),
-        author: auth.info.username.clone(),
-        created_at: timestamp,
-    };
-
-    // Atomically commit: check OCC + add revision + add file entries + set HEAD (C3)
-    match metadata
-        .commit_atomic(&revision, &final_entries_vec, parent_revision.as_deref())
+    match service
+        .commit(CommitRequest {
+            username: &auth.info.username,
+            namespace: &namespace,
+            repo_name: &repo_name,
+            revision: &revision,
+            repo_type,
+            body: &body,
+        })
         .await
     {
-        Ok(_) => {}
-        Err(crate::metadata::MetadataError::Conflict(actual_head)) => {
-            return HttpResponse::Conflict().json(serde_json::json!({
-                "error": "Parent revision does not match current HEAD",
-                "error_type": "ConflictError",
-                "currentHead": actual_head
-            }));
+        Ok(response) => HttpResponse::Ok().json(response),
+        Err(err) => commit_error_response(err),
+    }
+}
+
+fn error_json(error: String, error_type: &str) -> serde_json::Value {
+    serde_json::json!({
+        "error": error,
+        "error_type": error_type
+    })
+}
+
+fn commit_error_response(err: CommitServiceError) -> HttpResponse {
+    match err {
+        CommitServiceError::PayloadTooLarge { actual, max } => HttpResponse::PayloadTooLarge()
+            .json(error_json(
+                format!(
+                    "Commit body too large ({} bytes), max allowed: {} bytes",
+                    actual, max
+                ),
+                "PayloadTooLarge",
+            )),
+        CommitServiceError::Validation(message) => {
+            HttpResponse::BadRequest().json(error_json(message, "ValidationError"))
         }
-        Err(e) => {
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("{}", e),
-                "error_type": "InternalError"
-            }));
+        CommitServiceError::Forbidden(message) => {
+            HttpResponse::Forbidden().json(error_json(message, "ForbiddenError"))
+        }
+        CommitServiceError::NotFound(message) => {
+            HttpResponse::NotFound().json(error_json(message, "NotFoundError"))
+        }
+        CommitServiceError::Conflict {
+            message,
+            current_head,
+            note,
+        } => {
+            let mut body = serde_json::json!({
+                "error": message,
+                "error_type": "ConflictError",
+                "currentHead": current_head
+            });
+            if let Some(note) = note {
+                body["note"] = serde_json::json!(note);
+            }
+            HttpResponse::Conflict().json(body)
+        }
+        CommitServiceError::UnprocessableEntity(message) => {
+            HttpResponse::UnprocessableEntity().json(error_json(message, "UnprocessableEntity"))
+        }
+        CommitServiceError::CasUpload { status, message } => {
+            let status_code = actix_web::http::StatusCode::from_u16(status)
+                .unwrap_or(actix_web::http::StatusCode::BAD_GATEWAY);
+            HttpResponse::build(status_code).json(error_json(
+                format!("Failed to store inline file in CAS: {}", message),
+                "CasError",
+            ))
+        }
+        CommitServiceError::BadGateway(message) => {
+            HttpResponse::BadGateway().json(error_json(message, "CasError"))
+        }
+        CommitServiceError::Internal(message) => {
+            HttpResponse::InternalServerError().json(error_json(message, "InternalError"))
         }
     }
-
-    HttpResponse::Ok().json(CommitResponse {
-        commit_oid: commit_id.clone(),
-        commit_url: format!("/{}/{}/commit/{}", namespace, repo_name, commit_id),
-        pr_url: None,
-        pr_num: None,
-    })
 }
 
 // Model commit handler
