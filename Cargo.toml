@@ -44,6 +44,7 @@ tempfile = "3.10"
 crc32fast = "1.3"
 
 [dev-dependencies]
+hub-api = { path = "hub" }
 rand = "0.8"
 criterion = "0.5"
 tempfile = "3.10"

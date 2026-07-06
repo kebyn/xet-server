@@ -3,10 +3,9 @@
 //! Uses EdDSA signing for xet tokens with the format:
 //! `xet_{base64url(header).base64url(payload).base64url(signature)}`
 
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use serde::{Deserialize, Serialize};
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use std::time::{SystemTime, UNIX_EPOCH};
+use xet_auth_types::{TokenKind, TokenWireError, sign_claims, verify_token_any_kind};
 
 /// Error types for authentication operations
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,14 +35,6 @@ impl std::fmt::Display for AuthError {
 }
 
 impl std::error::Error for AuthError {}
-
-/// JWT header for xet tokens
-#[derive(Debug, Serialize, Deserialize)]
-struct JwtHeader {
-    alg: String,
-    typ: String,
-    kid: String,
-}
 
 /// Claims embedded in a xet JWT token.
 ///
@@ -108,48 +99,21 @@ impl KeyPair {
     }
 }
 
-fn sign_claims_with_prefix(
-    claims: &XetClaims,
-    signing_key: &SigningKey,
-    prefix: &str,
-) -> Result<String, AuthError> {
-    if prefix.is_empty() {
-        return Err(AuthError::InvalidToken);
+fn map_token_wire_error(err: TokenWireError) -> AuthError {
+    match err {
+        TokenWireError::InvalidToken => AuthError::InvalidToken,
+        TokenWireError::Expired => AuthError::Expired,
+        TokenWireError::InvalidSignature => AuthError::InvalidSignature,
+        TokenWireError::UnknownKid => AuthError::UnknownKid,
     }
-
-    let header = JwtHeader {
-        alg: "EdDSA".to_string(),
-        typ: "JWT".to_string(),
-        kid: claims.kid.clone(),
-    };
-
-    let header_json = serde_json::to_string(&header).map_err(|_| AuthError::InvalidToken)?;
-    let payload_json = serde_json::to_string(claims).map_err(|_| AuthError::InvalidToken)?;
-
-    let header_b64 = URL_SAFE_NO_PAD.encode(header_json.as_bytes());
-    let payload_b64 = URL_SAFE_NO_PAD.encode(payload_json.as_bytes());
-
-    let message = format!("{}.{}", header_b64, payload_b64);
-    let signature = signing_key.sign(message.as_bytes());
-    let sig_b64 = URL_SAFE_NO_PAD.encode(signature.to_bytes());
-
-    Ok(format!(
-        "{}{}.{}.{}",
-        prefix, header_b64, payload_b64, sig_b64
-    ))
 }
 
-fn sign_claims_for_type(
+fn sign_claims_for_kind(
     claims: &XetClaims,
     keypair: &KeyPair,
-    expected_token_type: &str,
-    prefix: &str,
+    kind: TokenKind,
 ) -> Result<String, AuthError> {
-    if claims.token_type != expected_token_type {
-        return Err(AuthError::InvalidToken);
-    }
-
-    sign_claims_with_prefix(claims, &keypair.signing_key, prefix)
+    sign_claims(claims, &keypair.signing_key, kind).map_err(map_token_wire_error)
 }
 
 /// Sign user claims with the key pair to create a xet token
@@ -159,7 +123,7 @@ fn sign_claims_for_type(
 /// This signer is intentionally limited to user tokens. Internal and proxy
 /// tokens have distinct prefixes and must not be emitted through this API.
 pub fn sign_xet_token(claims: &XetClaims, keypair: &KeyPair) -> Result<String, AuthError> {
-    sign_claims_for_type(claims, keypair, "user", "xet_")
+    sign_claims_for_kind(claims, keypair, TokenKind::User)
 }
 
 /// Sign internal service claims with the key pair to create an internal token.
@@ -167,14 +131,14 @@ pub fn sign_xet_token(claims: &XetClaims, keypair: &KeyPair) -> Result<String, A
 /// The token format is:
 /// `internal_{base64url(header).base64url(payload).base64url(signature)}`.
 pub fn sign_internal_token(claims: &XetClaims, keypair: &KeyPair) -> Result<String, AuthError> {
-    sign_claims_for_type(claims, keypair, "internal", "internal_")
+    sign_claims_for_kind(claims, keypair, TokenKind::Internal)
 }
 
 /// Sign proxy claims with the key pair to create a proxy token.
 ///
 /// The token format is: `proxy_{base64url(header).base64url(payload).base64url(signature)}`.
 pub fn sign_proxy_claims_token(claims: &XetClaims, keypair: &KeyPair) -> Result<String, AuthError> {
-    sign_claims_for_type(claims, keypair, "proxy", "proxy_")
+    sign_claims_for_kind(claims, keypair, TokenKind::Proxy)
 }
 
 /// Verify a xet token with a specific public key and expected kid
@@ -190,102 +154,9 @@ pub fn verify_xet_token(
     public_key: &VerifyingKey,
     expected_kid: &str,
 ) -> Result<XetClaims, AuthError> {
-    let (token_body, expected_token_type) = if let Some(body) = token.strip_prefix("xet_") {
-        (body, "user")
-    } else if let Some(body) = token.strip_prefix("internal_") {
-        (body, "internal")
-    } else if let Some(body) = token.strip_prefix("proxy_") {
-        (body, "proxy")
-    } else {
-        return Err(AuthError::InvalidToken);
-    };
-
-    // Split into three parts
-    let parts: Vec<&str> = token_body.split('.').collect();
-    if parts.len() != 3 {
-        return Err(AuthError::InvalidToken);
-    }
-
-    let header_b64 = parts[0];
-    let payload_b64 = parts[1];
-    let sig_b64 = parts[2];
-
-    // Decode header
-    let header_bytes = URL_SAFE_NO_PAD
-        .decode(header_b64)
-        .map_err(|_| AuthError::InvalidToken)?;
-    let header: JwtHeader =
-        serde_json::from_slice(&header_bytes).map_err(|_| AuthError::InvalidToken)?;
-
-    // Verify kid matches expected
-    if header.kid != expected_kid {
-        return Err(AuthError::UnknownKid);
-    }
-
-    // Verify algorithm is EdDSA
-    if header.alg != "EdDSA" {
-        return Err(AuthError::InvalidToken);
-    }
-
-    // Decode signature
-    let sig_bytes = URL_SAFE_NO_PAD
-        .decode(sig_b64)
-        .map_err(|_| AuthError::InvalidToken)?;
-    let signature = Signature::from_slice(&sig_bytes).map_err(|_| AuthError::InvalidSignature)?;
-
-    // Verify signature over "{header_b64}.{payload_b64}"
-    let message = format!("{}.{}", header_b64, payload_b64);
-    public_key
-        .verify(message.as_bytes(), &signature)
-        .map_err(|_| AuthError::InvalidSignature)?;
-
-    // Decode payload
-    let payload_bytes = URL_SAFE_NO_PAD
-        .decode(payload_b64)
-        .map_err(|_| AuthError::InvalidToken)?;
-    let claims: XetClaims =
-        serde_json::from_slice(&payload_bytes).map_err(|_| AuthError::InvalidToken)?;
-
-    if claims.kid != expected_kid {
-        return Err(AuthError::UnknownKid);
-    }
-
-    if claims.token_type != expected_token_type {
-        return Err(AuthError::InvalidToken);
-    }
-
-    // Check expiration
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| AuthError::InvalidToken)?
-        .as_secs();
-    if claims.exp < now {
-        return Err(AuthError::Expired);
-    }
-
-    // I9 fix: Validate iat (issued-at) to limit max token lifetime.
-    // If a signing key leaks, tokens with exp set far in the future are
-    // still bounded by this max-age check.
-    const MAX_TOKEN_LIFETIME_SECS: u64 = 7 * 24 * 3600; // 7 days
-    if claims.iat > now {
-        return Err(AuthError::InvalidToken); // iat in the future
-    }
-    if now - claims.iat > MAX_TOKEN_LIFETIME_SECS {
-        return Err(AuthError::Expired); // token too old regardless of exp
-    }
-
-    // C2 fix (security): Enforce that proxy tokens can only have lfs-* scopes
-    if claims.token_type == "proxy" {
-        let valid_proxy_scope = claims
-            .scope
-            .split_whitespace()
-            .all(|s| s.starts_with("lfs-"));
-        if !valid_proxy_scope {
-            return Err(AuthError::InvalidToken);
-        }
-    }
-
-    Ok(claims)
+    verify_token_any_kind(token, public_key, expected_kid)
+        .map(|(_, claims)| claims)
+        .map_err(map_token_wire_error)
 }
 
 /// Check whether user claims have a regular public endpoint scope.
@@ -452,7 +323,7 @@ impl AuthVerifier {
         };
 
         Some(SignedProxyToken {
-            token: sign_claims_with_prefix(&claims, signing_key, "proxy_").ok()?,
+            token: sign_claims(&claims, signing_key, TokenKind::Proxy).ok()?,
             exp,
             expires_in: PROXY_TOKEN_TTL_SECONDS,
         })
@@ -502,6 +373,8 @@ pub fn extract_token_from_request(req: &actix_web::HttpRequest) -> Option<String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use ed25519_dalek::Signer;
 
     fn now_secs_for_test() -> u64 {
         SystemTime::now()
@@ -516,11 +389,11 @@ mod tests {
         kid: &str,
         prefix: &str,
     ) -> String {
-        let header = JwtHeader {
-            alg: "EdDSA".to_string(),
-            typ: "JWT".to_string(),
-            kid: kid.to_string(),
-        };
+        let header = serde_json::json!({
+            "alg": "EdDSA",
+            "typ": "JWT",
+            "kid": kid,
+        });
         let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap());
         let payload_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
         let message = format!("{}.{}", header_b64, payload_b64);
