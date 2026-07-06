@@ -74,11 +74,19 @@ pub async fn validate_shard_for_index(
         let temp_guard = TempPathGuard::new(temp_path);
 
         storage
-            .download_to_path(&xorb_key, temp_guard.path())
+            .download_to_path(
+                &xorb_key,
+                temp_guard.try_path().map_err(|e| {
+                    format!("Failed to resolve xorb temp path {}: {}", xorb_hash_hex, e)
+                })?,
+            )
             .await
             .map_err(|e| format!("Failed to download xorb {}: {}", xorb_hash_hex, e))?;
 
-        let xorb_info = verify_xorb_from_file_with_info(temp_guard.path())
+        let xorb_info =
+            verify_xorb_from_file_with_info(temp_guard.try_path().map_err(|e| {
+                format!("Failed to resolve xorb temp path {}: {}", xorb_hash_hex, e)
+            })?)
             .map_err(|e| format!("Failed to verify xorb {}: {}", xorb_hash_hex, e))?;
 
         if xorb_info.xorb_hash != xorb_hash {
@@ -201,14 +209,15 @@ pub async fn validate_shard_for_index(
                 ));
             }
 
-            let mut xorb_file = tokio::fs::File::open(validated_xorb.temp_guard.path())
-                .await
-                .map_err(|e| {
-                    format!(
-                        "Failed to open temp xorb {} for validation: {}",
-                        xorb_hash_hex, e
-                    )
-                })?;
+            let xorb_path = validated_xorb.temp_guard.try_path().map_err(|e| {
+                format!("Failed to resolve xorb temp path {}: {}", xorb_hash_hex, e)
+            })?;
+            let mut xorb_file = tokio::fs::File::open(xorb_path).await.map_err(|e| {
+                format!(
+                    "Failed to open temp xorb {} for validation: {}",
+                    xorb_hash_hex, e
+                )
+            })?;
 
             let raw_chunk = extract_chunk_verified_from_file(
                 &mut xorb_file,

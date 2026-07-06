@@ -20,6 +20,7 @@ pub fn max_compressed_len_for_chunk(
     }
 }
 
+#[derive(Debug)]
 pub struct TempPathGuard {
     path: Option<std::path::PathBuf>,
 }
@@ -29,8 +30,16 @@ impl TempPathGuard {
         Self { path: Some(path) }
     }
 
+    pub fn try_path(&self) -> std::result::Result<&std::path::Path, String> {
+        self.path
+            .as_deref()
+            .ok_or_else(|| "temp path already cleaned".to_string())
+    }
+
     pub fn path(&self) -> &std::path::Path {
-        self.path.as_deref().expect("temp path already cleaned")
+        self.path
+            .as_deref()
+            .unwrap_or_else(|| std::path::Path::new(""))
     }
 
     pub async fn cleanup(mut self) {
@@ -144,4 +153,21 @@ pub async fn extract_chunk_verified_from_file(
     )
     .map_err(|e| format!("Failed to decompress chunk: {}", e))?;
     Ok(bytes::Bytes::from(decompressed))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_temp_path_guard_try_path_reports_cleaned_guard() {
+        let mut guard = TempPathGuard::new(std::path::PathBuf::from("xorb.tmp"));
+        guard.path = None;
+
+        let err = guard
+            .try_path()
+            .expect_err("cleaned guard should return an error");
+
+        assert!(err.contains("cleaned"));
+    }
 }
