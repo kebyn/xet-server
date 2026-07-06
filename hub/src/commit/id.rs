@@ -2,7 +2,7 @@ use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Get current Unix timestamp.
-pub(super) fn now_timestamp() -> i64 {
+pub(crate) fn now_timestamp() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -10,7 +10,7 @@ pub(super) fn now_timestamp() -> i64 {
 }
 
 /// Generate a commit ID from repo_id, parent, message, timestamp, and UUID nonce.
-pub(super) fn generate_commit_id(
+pub(crate) fn generate_commit_id(
     repo_id: i64,
     parent: Option<&str>,
     message: &str,

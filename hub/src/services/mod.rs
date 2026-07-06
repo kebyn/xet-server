@@ -1,3 +1,4 @@
+pub(crate) mod commit;
 pub(crate) mod preupload;
 pub(crate) mod repo;
 pub(crate) mod resolve;
