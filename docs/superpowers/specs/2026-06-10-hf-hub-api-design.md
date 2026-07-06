@@ -4,6 +4,8 @@
 **Status:** ✅ Completed  
 **Implemented:** 2026-06-12  
 
+> **Current-state auth note:** This historical spec predates the current token boundary. CAS public object APIs are content-capability/scope based, not repository-scoped; `repo_id` claims are Hub signing context and do not enforce repository-scoped CAS object isolation. Hub uses short-lived `xet_xxx` user tokens for CAS public batch/commit-inline/resolve-inline calls, forwards validated `proxy_xxx` tokens for LFS object proxy calls, and reserves `internal_xxx` for `/internal/*` service endpoints.
+
 ## 1. Overview
 
 This spec defines the design for implementing a HuggingFace Hub REST API compatibility layer for the existing xet-server, enabling private deployment of a HuggingFace Hub-compatible service.
@@ -30,7 +32,7 @@ This spec defines the design for implementing a HuggingFace Hub REST API compati
 | Compatibility scope | High (models/datasets/spaces, no PR/discussion) | Covers primary use cases |
 | Storage model | Git-like content-addressable | True HF Hub semantic compatibility |
 | File storage integration | Reuse xet native protocol (CDC, BLAKE3, xorb, shard) | Leverage existing dedup infrastructure |
-| Authentication | Two-layer (Hub token -> xet CAS token) with Ed25519 asymmetric keys | Full HF Hub client compatibility |
+| Authentication | Layered tokens (`hf_xxx`, `xet_xxx`, `proxy_xxx`, `internal_xxx`) with Ed25519 asymmetric keys for CAS tokens | Full HF Hub client compatibility while keeping internal service authorization distinct from public object access |
 | Deployment | Dual process (Hub API + CAS as separate services) | Independent scaling |
 | Trust mechanism | Asymmetric keys (Hub signs, CAS verifies) | Hub private key never exposed to CAS |
 | Repository creation | Explicit creation with minimal metadata | Clean API, no ambiguity |
@@ -197,8 +199,10 @@ CAS receives request:
      - POST /xorb/* -> requires "write" scope
      - POST /shard -> requires "write" scope
      - /internal/* -> requires "internal" scope
-  7. Repo consistency check (for non-internal tokens):
-     - Requested resource must belong to token's repo_id
+  7. Current implementation note:
+     - CAS public object authorization is content-capability/scope based.
+     - `repo_id`, `repo_type`, and `revision` identify Hub signing context; they do not enforce repository-scoped CAS object isolation.
+     - `internal` is reserved for `/internal/*` service endpoints and does not supersede `read` or `write`.
 ```
 
 ### 3.5 Token Storage (Hub)
@@ -646,9 +650,11 @@ For the `hf upload/download` workflow, no Git server is needed (the commit API h
 
 ### 7.5 git lfs pull (after conversion)
 
-1. `POST /objects/batch` (download) -> Hub queries file_tree and file_states
-2. Returns download URLs
-3. `GET /lfs/objects/{oid}` -> Hub proxies to CAS
+> Current implementation note: Hub LFS batch does not query `file_tree` for per-repo OID ownership. It authorizes the user operation by Hub token scope, signs `proxy_xxx` tokens bound to OID and operation, and the object byte path remains content-hash capability based. Repo-gated tree/resolve APIs protect private OID disclosure.
+
+1. `POST /objects/batch` (download) -> Hub validates the caller's Hub token scope and forwards to CAS with a short-lived `xet_xxx` user token
+2. Hub rewrites CAS action URLs to Hub URLs and returns OID/operation-bound `proxy_xxx` download tokens
+3. `GET /lfs/objects/{oid}` -> Hub validates the `proxy_xxx` token and forwards the same token to CAS
 4. CAS: state = XET_ONLY -> reads shard, streams reconstruction from xorbs
 5. Returns assembled raw bytes
 

@@ -282,7 +282,7 @@ export XET_UPLOAD_TEMP_DIR=/fast-ssd/xet-uploads  # 可选，默认为 {XET_LOCA
 
 **Ed25519 JWT**：
 - 使用 EdDSA 签名的 JWT 令牌
-- 两层认证：Hub tokens (hf_xxx) + CAS tokens (xet_xxx)
+- 分层认证：Hub tokens (`hf_xxx`) + CAS user tokens (`xet_xxx`) + LFS proxy tokens (`proxy_xxx`) + internal service tokens (`internal_xxx`)
 - 支持密钥轮换（kid）
 
 **令牌类型**：
@@ -292,15 +292,20 @@ export XET_UPLOAD_TEMP_DIR=/fast-ssd/xet-uploads  # 可选，默认为 {XET_LOCA
    - 用于用户身份认证
    - 管理仓库、提交文件
 
-2. **CAS Tokens** (`xet_xxx`)：
+2. **CAS user tokens** (`xet_xxx`)：
    - 短期有效（默认 1 小时，由 `HUB_TOKEN_TTL_SECONDS` 配置）
    - 携带签发时的 Hub 上下文（`repo_id` / `repo_type` / `revision`）
    - 由 Hub 签发，CAS 验证
 
-3. **Proxy Tokens** (特殊 CAS token)：
+3. **LFS proxy tokens** (`proxy_xxx`)：
    - 超短期（5 分钟）
    - 绑定到特定 LFS 对象和操作
    - 用于 LFS 代理
+
+4. **Internal service tokens** (`internal_xxx`)：
+   - 用于 Hub → CAS 内部端点
+   - 要求 `sub=hub-service`、`scope=internal`、`token_type=internal`
+   - 不包含 `read` 或 `write`
 
 **认证配置**：
 
@@ -606,12 +611,13 @@ export CAS_TRUSTED_KIDS=hub-key-1,backup-key-1            # 受信任的密钥 I
 │                  │
 │ • 查询文件位置   │
 │ • 代理到 CAS     │
+│ • xet read 直读小文件 │
 └────┬─────────────┘
      │
      │ 4. CAS Server 返回文件数据
      │    • 如果是 Xet 格式：重构文件
      │    • 如果是 LFS 格式：直接返回
-     │    • 如果是 inline：从元数据返回
+     │    • 如果是 inline：从 CAS 原始对象返回
      ▼
 ┌──────────┐
 │ HF CLI   │
@@ -789,16 +795,25 @@ LFS 对象是原始文件的直接存储，使用 SHA-256 哈希标识。
 - 非对称密钥：Hub 持有私钥，CAS 持有公钥
 - 防篡改：签名验证确保令牌未被修改
 
-**两层认证**：
+**分层认证**：
 1. **Hub 层**：用户令牌 (hf_xxx)
    - 长期有效
    - 用于身份认证
    - 管理仓库和文件
 
-2. **CAS 层**：CAS 令牌 (xet_xxx)
+2. **CAS user 层**：CAS user 令牌 (xet_xxx)
    - 短期有效（默认 1 小时，由 `HUB_TOKEN_TTL_SECONDS` 配置）
    - 携带签发时的 Hub 上下文（`repo_id` / `repo_type` / `revision`）
    - 由 Hub 签发，CAS 验证
+
+3. **LFS proxy 层**：代理令牌 (`proxy_xxx`)
+   - 超短期有效（默认 5 分钟）
+   - 绑定特定 OID 和 upload/download 操作
+   - 用于 Hub/CAS LFS 对象 action
+
+4. **Internal service 层**：内部服务令牌 (`internal_xxx`)
+   - 仅用于 Hub → CAS 内部端点
+   - 不自动包含 `read` 或 `write`
 
 ### 2. 授权
 
@@ -814,6 +829,15 @@ LFS 对象是原始文件的直接存储，使用 SHA-256 哈希标识。
 - 每个 API 端点检查所需作用域
 - `internal` 不自动包含 `read` 或 `write`；公共端点需要 `token_type=user` 的普通 scope，内部端点需要完整 internal token 形状
 - `repo_id`、`repo_type` 和 `revision` claims 仅标识 Hub 签发上下文；CAS 内容授权按 scope 和内容能力执行，不强制 repository-scoped CAS object isolation。
+
+### Authorization Boundaries
+
+当前系统有四条不同的授权边界：
+
+- **Hub repo authorization**：Hub 的 repo、tree、resolve、commit、token exchange API 按仓库 owner/private 状态授权。私有仓库的 `cas_hash`/OID 只应通过这些 repo-gated API 暴露给有权限的用户。
+- **CAS content-capability authorization**：CAS 公共对象 API 只校验 token 类型和 scope，不校验 `repo_id`、`repo_type`、`revision` 是否与对象归属匹配。持有有效 CAS token 和内容 hash 的客户端具备对应内容能力。
+- **Hub LFS proxy boundary**：Hub 的 LFS batch 和 `/lfs/objects/{oid}` 代理使用短期 `proxy_xxx` token 绑定 OID 与 operation，但不校验 OID 是否属于 URL 中的 repo。带 repo 的 Git LFS 路由和裸 `/objects/batch` 路由共享同一能力模型。
+- **Internal service authorization**：Hub → CAS 内部调用使用 `internal_xxx` token，并要求 `sub=hub-service`、`scope=internal`、`token_type=internal`。该 token 只用于 `/internal/*` 和 `/metrics` 等内部端点。
 
 ### 3. 数据安全
 

@@ -19,8 +19,8 @@ Xet Server 是一个高性能的 **内容寻址存储（Content-Addressable Stor
 
 ### 安全特性
 - **Ed25519 认证** - 基于 Ed25519 的 JWT 非对称密钥签名
-- **两层认证** - Hub tokens (`hf_xxx`) + CAS tokens (`xet_xxx`)
-- **作用域控制** - read、write、internal 三种权限级别
+- **分层认证** - Hub tokens (`hf_xxx`) + CAS user tokens (`xet_xxx`) + LFS proxy tokens (`proxy_xxx`) + internal service tokens (`internal_xxx`)
+- **作用域控制** - `read`、`write`、`internal`、`lfs-upload`、`lfs-download`；`internal` 仅用于 Hub -> CAS 内部端点，不包含 `read`/`write`
 - **密钥轮换** - 支持 key ID (`kid`) 的多密钥管理
 
 ## 🏗️ 架构概览
@@ -246,6 +246,8 @@ hf download my-org/my-repo model.bin --local-dir ./downloaded
 | `/health` | GET | 健康检查 |
 | `/metrics` | GET | Prometheus 指标 |
 
+CAS 对象访问是 content-capability based：持有有效 CAS token 的客户端按 token scope 访问内容能力，不强制 repository-scoped object isolation。LFS batch action 优先返回短期 `proxy_xxx` token；如果未配置 `CAS_PRIVATE_KEY_PATH`，会兼容回退为调用者的 `xet_xxx` token，生产环境应避免此模式。
+
 详细文档：[CAS API Reference](docs/api/cas-api.md)
 
 ### Hub API (端口 8080)
@@ -317,8 +319,10 @@ hf download my-org/my-repo model.bin --local-dir ./downloaded
 |--------|------|--------|
 | `CAS_PUBLIC_KEY_PATH` | Ed25519 公钥路径 | `/etc/xet/public-key.pem` |
 | `CAS_TRUSTED_KIDS` | 受信任的密钥 ID 列表 | `hub-key-1` |
-| `CAS_PRIVATE_KEY_PATH` | Ed25519 私钥路径（生成 proxy token） | 空（可选，生产环境建议配置） |
+| `CAS_PRIVATE_KEY_PATH` | Ed25519 私钥路径（生成 LFS proxy token） | 空（兼容模式；生产环境应配置） |
 | `CAS_SIGNING_KID` | Proxy token 签名使用的 Key ID | 空（默认用 `CAS_TRUSTED_KIDS` 第一个） |
+
+`CAS_PRIVATE_KEY_PATH` 未配置时，CAS Batch API 会把调用者的 `xet_xxx` token 放入 LFS action header，而不是签发短期、单 OID、单 operation 的 `proxy_xxx` token。这会扩大 action token 泄露后的影响范围；生产环境应配置该私钥。
 
 ### Hub API 环境变量
 

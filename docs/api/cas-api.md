@@ -4,7 +4,7 @@ CAS (Content Addressable Storage) Server 是 Xet Server 的核心存储引擎，
 
 **端口**：8081（默认）  
 **协议**：HTTP/REST  
-**认证**：Ed25519 JWT (xet_xxx tokens)
+**认证**：Ed25519 JWT (`xet_xxx` user tokens, `proxy_xxx` LFS action tokens, `internal_xxx` service tokens)
 
 ## 端点概览
 
@@ -12,8 +12,8 @@ CAS (Content Addressable Storage) Server 是 Xet Server 的核心存储引擎，
 |------|------|------|------|
 | `/v1/xorbs/{prefix}/{hash}` | POST/PUT | 上传 Xorb 对象 | 需要 write |
 | `/v1/xorbs/{prefix}/{hash}/download` | GET | 下载 Xorb 对象 | 需要 read |
-| `/lfs/objects/{oid}` | PUT | 上传 LFS 对象 | 需要 write |
-| `/lfs/objects/{oid}` | GET | 下载 LFS 对象 | 需要 read |
+| `/lfs/objects/{oid}` | PUT | 上传 LFS 对象 | 需要 `write` user token 或绑定该 OID 的 `lfs-upload` proxy token |
+| `/lfs/objects/{oid}` | GET | 下载 LFS 对象 | 需要 `read` user token 或绑定该 OID 的 `lfs-download` proxy token |
 | `/v1/shards` | POST | 上传 Shard 元数据 | 需要 write |
 | `/v1/reconstructions/{file_id}` | GET | 获取文件重构信息 (V1) | 需要 read |
 | `/v2/reconstructions/{file_id}` | GET | 获取文件重构信息 (V2) | 需要 read |
@@ -378,7 +378,7 @@ Content-Type: application/vnd.git-lfs+json
         "upload": {
           "href": "http://localhost:8081/lfs/objects/abc123...",
           "header": {
-            "Authorization": "Bearer xet_xxx"
+            "Authorization": "Bearer proxy_xxx"
           }
         }
       }
@@ -391,7 +391,7 @@ Content-Type: application/vnd.git-lfs+json
         "download": {
           "href": "http://localhost:8081/lfs/objects/def456...",
           "header": {
-            "Authorization": "Bearer xet_xxx"
+            "Authorization": "Bearer proxy_xxx"
           }
         }
       }
@@ -403,6 +403,10 @@ Content-Type: application/vnd.git-lfs+json
 **操作类型**：
 - `upload`: 上传对象
 - `download`: 下载对象
+
+**Action token**：
+- 配置 `CAS_PRIVATE_KEY_PATH` 时，Batch API 为每个 action 签发短期 `proxy_xxx` token，绑定具体 `oid`、`operation` 和 `lfs-upload`/`lfs-download` scope。
+- 未配置 `CAS_PRIVATE_KEY_PATH` 时，Batch API 会兼容回退为调用者的 `xet_xxx` token。该 token 权限和 TTL 通常大于单个 action，生产环境应配置 `CAS_PRIVATE_KEY_PATH` 以降低泄露后的影响范围。
 
 **示例**：
 ```bash
@@ -430,7 +434,7 @@ curl -X POST "http://localhost:8081/objects/batch" \
 
 **请求头**：
 ```
-Authorization: Bearer xet_xxx (需要 internal token (sub=hub-service, scope=internal, token_type=internal))
+Authorization: Bearer internal_xxx (sub=hub-service, scope=internal, token_type=internal)
 ```
 
 **响应**：
@@ -481,7 +485,7 @@ Authorization: Bearer xet_xxx (需要 internal token (sub=hub-service, scope=int
 
 **请求头**：
 ```
-Authorization: Bearer xet_xxx (需要 internal token (sub=hub-service, scope=internal, token_type=internal))
+Authorization: Bearer internal_xxx (sub=hub-service, scope=internal, token_type=internal)
 ```
 
 **响应**：

@@ -4,6 +4,8 @@
 **Date:** 2026-06-10  
 **Implemented:** 2026-06-12  
 
+> **Superseded auth note:** This historical plan predates the current token boundary. Any examples where `internal` scope supersedes `read`/`write`, or where internal endpoints call `check_scope(..., "internal")`, are superseded. Current code requires `internal_xxx` tokens with `sub=hub-service`, `scope=internal`, and `token_type=internal`, and internal authorization must go through `AuthNeed::Internal` / `is_internal_token`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Modify the existing xet-server (CAS) to support Ed25519 token authentication, storage state tracking, internal endpoints for the Hub API, and state-aware LFS download with reconstruction.

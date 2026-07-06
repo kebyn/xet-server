@@ -65,6 +65,8 @@ Hub API 提供 HuggingFace Hub 兼容的 REST API，支持使用 `hf` CLI 工具
 | `/objects/batch` | POST | LFS 批量操作代理 |
 | `/lfs/objects/{oid}` | GET/PUT | LFS 对象下载/上传代理 |
 
+LFS 对象代理当前采用 content-hash capability 模型：`/objects/batch` 只按 Hub token 的 `read`/`write` scope 授权，并为请求体中的 OID 签发短期 `proxy_xxx` action token；`/lfs/objects/{oid}` 只校验该 proxy token 是否绑定同一个 OID 和 operation，不校验 OID 是否属于 URL 中的 repo。Repo 私有性由 tree/resolve/repo metadata API 保护，这些 API 会在返回 OID 前做 repo 权限校验。
+
 ---
 
 ## 用户认证 API
@@ -370,6 +372,7 @@ Content-Type: application/x-ndjson
    - `path`: 文件路径（必需）
    - `content`: Base64 编码的文件内容（必需）
    - 可以带 `base64:` 前缀，也可以不带
+   - Hub 会使用短期 `xet_xxx` user token（`write` scope）将内容写入 CAS `/lfs/objects/{oid}`，然后把 OID 记录到元数据
 
 3. **LfsFile**（LFS 文件，已上传到 CAS）：
    ```json
@@ -526,6 +529,8 @@ Authorization: Bearer hf_xxx
 - `200 OK`: 返回文件内容
 - `302 Found`: 重定向到 CDN（大文件）
 - `404 Not Found`: 文件不存在
+
+小文件直读 CAS 时，Hub 使用短期 `xet_xxx` user token（`read` scope）调用 CAS `/lfs/objects/{oid}`。大文件或 LFS action URL 使用 `proxy_xxx` token 绑定 OID 和 download/upload operation。
 
 **HEAD 响应**：
 - `200 OK`: 返回文件元信息的响应头（不返回 body）
@@ -724,6 +729,8 @@ curl -X POST "http://localhost:8080/api/models/my-org/my-model/preupload/main" \
 
 LFS 代理 API 将 Git LFS 请求代理到 CAS Server。支持标准 LFS 端点和 Git-style LFS 端点。
 
+**授权边界**：LFS 对象字节路径是 content-hash capability。Hub 会校验用户是否具备执行 batch operation 所需的 Hub scope，并签发绑定 OID 和 operation 的 `proxy_xxx` token；对象上传/下载阶段只验证该 proxy token，不校验 OID 是否属于 URL 中的 repo。私有 repo 的 OID 由 tree、resolve 和 repo metadata API 保护。
+
 ### 标准 LFS 端点
 
 **端点**：
@@ -803,9 +810,9 @@ Content-Type: application/vnd.git-lfs+json
       "authenticated": true,
       "actions": {
         "upload": {
-          "href": "http://localhost:8081/lfs/objects/abc123...",
+          "href": "http://localhost:8080/lfs/objects/abc123...",
           "header": {
-            "Authorization": "Bearer xet_xxx"
+            "Authorization": "Bearer proxy_xxx"
           },
           "expires_in": 300
         }
@@ -817,24 +824,24 @@ Content-Type: application/vnd.git-lfs+json
 
 **工作原理**：
 1. Hub 验证用户令牌 (hf_xxx)
-2. Hub 签发短期 CAS 令牌 (xet_xxx)
-3. Hub 返回带有 CAS 令牌的 action URLs
-4. 客户端直接使用 CAS 令牌访问 CAS Server
+2. Hub 使用短期 `xet_xxx` user token 调用 CAS batch API（`download` 使用 `read` scope，`upload` 使用 `write` scope）
+3. Hub 将 CAS action URL 改写为 Hub URL，并替换为短期 `proxy_xxx` action token
+4. 客户端使用 `proxy_xxx` token 访问 Hub 的 `/lfs/objects/{oid}`，Hub 验证后将同一个 `proxy_xxx` token 转发给 CAS
 
 ### LFS 对象下载/上传
 
 **端点**：`GET/PUT /lfs/objects/{oid}`
 
-Hub 代理 LFS 对象请求到 CAS Server。
+Hub 代理 LFS 对象请求到 CAS Server。该端点接受 batch/resolve 返回的 `proxy_xxx` token，可以放在 `Authorization` header 或 `?token=proxy_xxx` 查询参数中。
 
 **请求头**：
 ```
-Authorization: Bearer hf_xxx
+Authorization: Bearer proxy_xxx
 ```
 
 **响应**：
 - `200 OK`: 返回对象数据
-- `302 Found`: 重定向到 CAS Server
+- `401 Unauthorized`: proxy token 缺失、过期或 OID/operation 不匹配
 
 ---
 
@@ -967,7 +974,8 @@ hf repo info my-org/my-model
 <!-- 内部 API (Internal API) 章节已移除。
      GET /internal/referenced-hashes 端点已废弃并删除（增量 GC v2 使用 S3 sidecar 文件
      追踪引用，不再依赖 Hub）。Hub 的 internal token 签名/验证机制仍保留，
-     用于 CAS↔Hub 代理认证（resolve、commit、lfs_proxy 等端点）。 -->
+     用于 Hub→CAS 的 /internal/* 服务端点；resolve、commit、lfs_proxy 等公共对象路径
+     使用 xet_xxx user token 或 proxy_xxx token。 -->
 
 ## 系统 API
 
