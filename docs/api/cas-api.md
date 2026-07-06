@@ -22,7 +22,8 @@ CAS (Content Addressable Storage) Server 是 Xet Server 的核心存储引擎，
 | `/lfs/objects/batch` | POST | Git LFS 批量 API (别名) | 需要 read/write |
 | `/internal/state/{oid}` | GET | 查询 blob 状态 | 需要 internal |
 | `/internal/blob/{oid}` | HEAD | 检查 blob 存在 | 需要 internal |
-| `/health` | GET | 健康检查 | 无需认证 |
+| `/health` | GET | 存活检查 | 无需认证 |
+| `/ready` | GET | 就绪检查（storage + MetadataIndex） | 无需认证 |
 | `/metrics` | GET | Prometheus 指标 | 需要 internal |
 
 ---
@@ -516,6 +517,29 @@ curl -I "http://localhost:8081/internal/state/abc123..." \
 **示例**：
 ```bash
 curl "http://localhost:8081/health"
+```
+
+### 就绪检查
+
+**端点**：`GET /ready`
+
+**响应示例**：
+```json
+{
+  "status": "ready",
+  "checks": {
+    "storage": "ok",
+    "index": "ok"
+  },
+  "index_shard_count": 42
+}
+```
+
+`/ready` 用于 readiness probe。它会检查存储后端可访问，并确认启动时的 `MetadataIndex` 重建已完成。索引仍在重建或重建失败时返回 `503`，响应中的 `status` 为 `not_ready`。
+
+**示例**：
+```bash
+curl "http://localhost:8081/ready"
 ```
 
 ### Prometheus 指标

@@ -9,7 +9,7 @@ Xet Server 由两个独立的服务组成，每个服务都有自己的配置：
 - **CAS Server** (`xet-server`): 核心存储引擎
 - **Hub API** (`hub-api`): HuggingFace 兼容 API 层
 
-所有配置通过**环境变量**进行管理。
+所有配置通过**环境变量**进行管理。显式设置的数值或布尔环境变量必须能被正确解析；如果设置了非法值，服务会在启动时返回配置错误并退出，不会静默回退到默认值。未设置环境变量时才使用默认值。
 
 ---
 
@@ -26,11 +26,13 @@ CAS Server 是 Xet Server 的核心存储引擎，负责内容寻址存储、文
 | `XET_PUBLIC_BASE_URL` | 公共访问 URL | `http://{host}:{port}` | 否* |
 | `XET_MAX_BODY_SIZE_MB` | 流式上传的最大文件大小（MB） | `2048` | 否 |
 | `XET_RATE_LIMIT_RPM` | 公共端点速率限制（令牌桶算法，60秒窗口，突发容忍） | `60` | 否 |
+| `XET_INDEX_REBUILD_STRICT` | 启动时 MetadataIndex 重建失败是否直接退出 | `false` | 否 |
 
 **注意**：
 - CAS Server 默认端口为 `8081`，以避免与 Hub API 默认端口 `8080` 冲突
 - `XET_PUBLIC_BASE_URL` 在服务器位于反向代理、负载均衡器或 NAT 后时**必须设置**
 - `XET_MAX_BODY_SIZE_MB` 控制流式上传的最大文件大小。非上传路由（JSON 请求等）的 HTTP body 限制为 10MB（硬编码）
+- `XET_INDEX_REBUILD_STRICT=false` 时，CAS 可在索引重建失败后继续启动，但 `/ready` 会返回 `503`，避免流量进入未就绪实例；设置为 `true` 时重建失败会让进程启动失败
 
 **示例**：
 ```bash
@@ -43,6 +45,7 @@ export XET_HOST=0.0.0.0
 export XET_PORT=8081
 export XET_PUBLIC_BASE_URL=https://cas.example.com
 export XET_MAX_BODY_SIZE_MB=4096
+export XET_INDEX_REBUILD_STRICT=true
 ```
 
 ### 存储设置
@@ -301,7 +304,7 @@ upload_temp_dir = "/fast-ssd/hub-uploads"
 max_upload_size = 536870912
 ```
 
-**优先级**：环境变量 > 配置文件 > 默认值
+**优先级**：环境变量 > 配置文件 > 默认值。对数值型环境变量（如 `HUB_PORT`、`HUB_DB_POOL_SIZE`、`HUB_CAS_TIMEOUT_SECS`）和布尔型环境变量（如 `XET_INDEX_REBUILD_STRICT`），只要显式设置了非法值，启动就会失败；不会使用配置文件或默认值掩盖错误。
 
 ---
 
@@ -684,12 +687,20 @@ curl http://localhost:8081/metrics \
 ### 健康检查
 
 ```bash
-# CAS Server 健康检查
+# CAS Server 存活检查：进程和 HTTP server 可响应
 curl http://localhost:8081/health
 
-# Hub API 健康检查
+# CAS Server 就绪检查：存储 backend 可访问，MetadataIndex 已完成重建
+curl http://localhost:8081/ready
+
+# Hub API 存活检查
 curl http://localhost:8080/health
+
+# Hub API 就绪检查：SQLite 可查询，CAS /ready 可用
+curl http://localhost:8080/ready
 ```
+
+`/health` 是 liveness probe，只表示进程仍可响应 HTTP 请求；`/ready` 是 readiness probe。CAS `/ready` 会检查存储后端和索引状态，响应体包含 `checks.storage`、`checks.index`，索引就绪时还包含 `index_shard_count`。Hub `/ready` 会检查 SQLite 和 CAS `/ready`，响应体包含 `checks.database`、`checks.cas`。任一检查失败时 `/ready` 返回 `503`。
 
 ---
 
