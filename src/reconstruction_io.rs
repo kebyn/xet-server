@@ -118,11 +118,12 @@ async fn reconstruct_single_file_ref_to_temp(
         canonical_file_id,
         uuid::Uuid::new_v4()
     )));
-    let mut output = tokio::fs::File::create(output_guard.path())
-        .await
-        .map_err(|e| {
-            ReconstructionError::TempIo(format!("failed to create reconstruction temp file: {}", e))
-        })?;
+    let output_path = output_guard.try_path().map_err(|e| {
+        ReconstructionError::TempIo(format!("failed to resolve reconstruction temp file: {}", e))
+    })?;
+    let mut output = tokio::fs::File::create(output_path).await.map_err(|e| {
+        ReconstructionError::TempIo(format!("failed to create reconstruction temp file: {}", e))
+    })?;
 
     let mut sha = Sha256::new();
     let mut whole_blake3 = StreamingHasher::new();
@@ -145,14 +146,30 @@ async fn reconstruct_single_file_ref_to_temp(
                 uuid::Uuid::new_v4()
             )));
             storage
-                .download_to_path(&key, guard.path())
+                .download_to_path(
+                    &key,
+                    guard.try_path().map_err(|e| {
+                        ReconstructionError::TempIo(format!(
+                            "failed to resolve xorb temp file {}: {}",
+                            planned.xorb_hash.to_hex(),
+                            e
+                        ))
+                    })?,
+                )
                 .await
                 .map_err(|e| map_storage_error(&key, e))?;
             entry.insert(guard);
         }
 
-        let guard = xorb_cache.get(&planned.xorb_hash).unwrap();
-        let mut xorb_file = tokio::fs::File::open(guard.path()).await.map_err(|e| {
+        let guard = cached_xorb_guard(&xorb_cache, &planned.xorb_hash)?;
+        let xorb_path = guard.try_path().map_err(|e| {
+            ReconstructionError::TempIo(format!(
+                "failed to resolve xorb {} temp file: {}",
+                planned.xorb_hash.to_hex(),
+                e
+            ))
+        })?;
+        let mut xorb_file = tokio::fs::File::open(xorb_path).await.map_err(|e| {
             ReconstructionError::TempIo(format!(
                 "failed to open xorb {}: {}",
                 planned.xorb_hash.to_hex(),
@@ -221,6 +238,18 @@ async fn fetch_shard(
     })
 }
 
+fn cached_xorb_guard<'a>(
+    xorb_cache: &'a HashMap<MerkleHash, TempPathGuard>,
+    xorb_hash: &MerkleHash,
+) -> Result<&'a TempPathGuard, ReconstructionError> {
+    xorb_cache.get(xorb_hash).ok_or_else(|| {
+        ReconstructionError::Integrity(format!(
+            "xorb {} was not present in reconstruction cache",
+            xorb_hash.to_hex()
+        ))
+    })
+}
+
 fn map_storage_error(key: &str, error: StorageError) -> ReconstructionError {
     match error {
         StorageError::NotFound(_) => ReconstructionError::Stale(format!("missing {}", key)),
@@ -241,6 +270,7 @@ mod tests {
     use crate::storage::local::LocalStorage;
     use crate::types::MerkleHash;
     use sha2::{Digest, Sha256};
+    use std::collections::HashMap;
     use tempfile::tempdir;
 
     fn build_single_file_shard(raw: &[u8], scheme: CompressionScheme) -> (Vec<u8>, MerkleHash) {
@@ -449,5 +479,16 @@ mod tests {
 
         let bytes = tokio::fs::read(result.path()).await.unwrap();
         assert_eq!(bytes, raw);
+    }
+
+    #[test]
+    fn test_cached_xorb_guard_reports_missing_cache_entry() {
+        let cache = HashMap::new();
+        let missing_hash = MerkleHash::from([42u8; 32]);
+
+        let err = cached_xorb_guard(&cache, &missing_hash).expect_err("missing xorb should fail");
+
+        assert!(matches!(err, ReconstructionError::Integrity(_)));
+        assert!(err.to_string().contains(&missing_hash.to_hex()));
     }
 }
