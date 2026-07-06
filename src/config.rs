@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::str::FromStr;
 
 /// Server configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -248,6 +249,19 @@ impl Default for ServerConfig {
 }
 
 impl ServerConfig {
+    fn parse_env<T>(key: &str, default: T) -> Result<T, String>
+    where
+        T: FromStr,
+        T::Err: std::fmt::Display,
+    {
+        match std::env::var(key) {
+            Ok(value) => value
+                .parse()
+                .map_err(|e| format!("{key} '{value}' is not a valid value: {e}")),
+            Err(_) => Ok(default),
+        }
+    }
+
     /// Validate configuration parameters.
     /// M1 fix: Returns Result instead of panicking for better error handling.
     /// I4 fix: Prevent zero values that would cause service unavailability.
@@ -292,37 +306,10 @@ impl ServerConfig {
     /// Load configuration from environment variables with defaults.
     pub fn try_from_env() -> Result<Self, String> {
         let host = std::env::var("XET_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
-        let port = match std::env::var("XET_PORT") {
-            Ok(val) => val.parse().unwrap_or_else(|_| {
-                tracing::warn!(
-                    "XET_PORT '{}' is not a valid port number, using default 8081",
-                    val
-                );
-                8081
-            }),
-            Err(_) => 8081, // Changed from 8080 to avoid conflict with Hub API
-        };
+        let port = Self::parse_env("XET_PORT", 8081)?;
         let public_base_url = std::env::var("XET_PUBLIC_BASE_URL").ok();
-        let max_body_size_mb = match std::env::var("XET_MAX_BODY_SIZE_MB") {
-            Ok(val) => val.parse().unwrap_or_else(|_| {
-                tracing::warn!(
-                    "XET_MAX_BODY_SIZE_MB '{}' is not a valid number, using default 2048",
-                    val
-                );
-                2048
-            }),
-            Err(_) => 2048,
-        };
-        let rate_limit_rpm = match std::env::var("XET_RATE_LIMIT_RPM") {
-            Ok(val) => val.parse().unwrap_or_else(|_| {
-                tracing::warn!(
-                    "XET_RATE_LIMIT_RPM '{}' is not a valid number, using default 60",
-                    val
-                );
-                60
-            }),
-            Err(_) => 60,
-        };
+        let max_body_size_mb = Self::parse_env("XET_MAX_BODY_SIZE_MB", 2048)?;
+        let rate_limit_rpm = Self::parse_env("XET_RATE_LIMIT_RPM", 60)?;
 
         let backend = std::env::var("XET_STORAGE_BACKEND").unwrap_or_else(|_| "local".to_string());
         let s3_bucket = std::env::var("XET_S3_BUCKET").ok();
@@ -362,26 +349,8 @@ impl ServerConfig {
             .ok()
             .map(|v| v.to_lowercase() != "false" && v != "0")
             .unwrap_or(true);
-        let min_conversion_size = match std::env::var("XET_MIN_CONVERSION_SIZE") {
-            Ok(val) => val.parse().unwrap_or_else(|_| {
-                tracing::warn!(
-                    "XET_MIN_CONVERSION_SIZE '{}' is not a valid number, using default 65536",
-                    val
-                );
-                65536
-            }),
-            Err(_) => 65536,
-        };
-        let max_conversion_size = match std::env::var("XET_MAX_CONVERSION_SIZE") {
-            Ok(val) => val.parse().unwrap_or_else(|_| {
-                tracing::warn!(
-                    "XET_MAX_CONVERSION_SIZE '{}' is not a valid number, using default 512MB",
-                    val
-                );
-                512 * 1024 * 1024
-            }),
-            Err(_) => 512 * 1024 * 1024, // 512MB — match Hub max_upload_size
-        };
+        let min_conversion_size = Self::parse_env("XET_MIN_CONVERSION_SIZE", 65536)?;
+        let max_conversion_size = Self::parse_env("XET_MAX_CONVERSION_SIZE", 512 * 1024 * 1024)?;
 
         let config = Self {
             server: ServerSettings {
