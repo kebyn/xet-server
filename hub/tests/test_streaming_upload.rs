@@ -274,12 +274,7 @@ async fn start_mock_cas(response_status: u16, response_body: Option<String>) -> 
 
 /// Test end-to-end: streaming upload succeeds when mock CAS returns 200.
 /// Verifies the full pipeline: Hub receives stream → forwards to CAS → CAS returns 200.
-///
-/// NOTE: This test is currently disabled due to reqwest compatibility issues with
-/// actix-web's test runtime. The functionality works in production but the test
-/// environment has async runtime conflicts. Should be re-enabled in integration tests.
 #[actix_web::test]
-#[ignore]
 async fn test_streaming_lfs_upload_success_via_mock_cas() {
     let cas_url = start_mock_cas(200, None).await;
 
@@ -396,11 +391,7 @@ async fn test_streaming_lfs_upload_hash_mismatch_returns_400() {
 }
 
 /// Test that CAS 413 (oversized) is relayed as 413 to the client.
-///
-/// NOTE: This test is currently disabled due to reqwest compatibility issues with
-/// actix-web's test runtime. Should be re-enabled in integration tests.
 #[actix_web::test]
-#[ignore]
 async fn test_streaming_lfs_upload_oversized_returns_413() {
     let cas_url = start_mock_cas(413, Some("Upload exceeds maximum size".to_string())).await;
 
