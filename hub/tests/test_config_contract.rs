@@ -76,3 +76,36 @@ fn test_try_from_file_or_env_rejects_zero_rate_limit_without_panic() {
 
     assert!(err.contains("HUB_RATE_LIMIT_RPM must be > 0"));
 }
+
+#[test]
+fn test_try_from_file_or_env_rejects_invalid_numeric_values_without_fallback() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let _config_file = ScopedEnv::remove("HUB_CONFIG_FILE");
+    let _public_base_url = ScopedEnv::remove("HUB_PUBLIC_BASE_URL");
+    let _cas_base_url = ScopedEnv::remove("CAS_BASE_URL");
+
+    for (key, value) in [
+        ("HUB_PORT", "not-a-port"),
+        ("HUB_RATE_LIMIT_RPM", "fast"),
+        ("HUB_DB_POOL_SIZE", "many"),
+        ("HUB_TOKEN_TTL_SECONDS", "soon"),
+        ("HUB_PROXY_TOKEN_TTL_SECONDS", "brief"),
+        ("HUB_INTERNAL_TOKEN_TTL_SECONDS", "long"),
+        ("HUB_CAS_TIMEOUT_SECS", "slow"),
+        ("HUB_MAX_DOWNLOAD_SIZE", "large"),
+        ("HUB_CAS_HEALTH_CHECK_TIMEOUT_SECS", "later"),
+        ("HUB_INLINE_THRESHOLD", "tiny"),
+        ("HUB_MAX_UPLOAD_SIZE", "huge"),
+    ] {
+        let scoped = ScopedEnv::set(key, value);
+        let err = match HubConfig::try_from_file_or_env() {
+            Ok(_) => panic!("{key}={value} should be rejected"),
+            Err(err) => err,
+        };
+        assert!(
+            err.contains(key) && err.contains("valid"),
+            "unexpected error for {key}: {err}"
+        );
+        drop(scoped);
+    }
+}

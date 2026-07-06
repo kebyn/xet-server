@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::env;
+use std::str::FromStr;
 
 /// Server configuration settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -164,6 +165,33 @@ pub struct HubConfig {
 }
 
 impl HubConfig {
+    fn parse_env<T>(key: &str, default: T) -> Result<T, String>
+    where
+        T: FromStr,
+        T::Err: std::fmt::Display,
+    {
+        match env::var(key) {
+            Ok(value) => value
+                .parse()
+                .map_err(|e| format!("{key} '{value}' is not a valid value: {e}")),
+            Err(_) => Ok(default),
+        }
+    }
+
+    fn parse_optional_env<T>(key: &str) -> Result<Option<T>, String>
+    where
+        T: FromStr,
+        T::Err: std::fmt::Display,
+    {
+        match env::var(key) {
+            Ok(value) => value
+                .parse()
+                .map(Some)
+                .map_err(|e| format!("{key} '{value}' is not a valid value: {e}")),
+            Err(_) => Ok(None),
+        }
+    }
+
     /// Validate configuration parameters.
     /// Validate configuration parameters.
     /// M1 fix: Returns Result instead of panicking for better error handling.
@@ -233,40 +261,25 @@ impl HubConfig {
         let config = HubConfig {
             server: ServerSettings {
                 host: env::var("HUB_HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
-                port: env::var("HUB_PORT")
-                    .ok()
-                    .and_then(|p| p.parse().ok())
-                    .unwrap_or(8080),
+                port: Self::parse_env("HUB_PORT", 8080)?,
                 public_base_url: env::var("HUB_PUBLIC_BASE_URL").ok(),
-                rate_limit_rpm: env::var("HUB_RATE_LIMIT_RPM")
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(120),
+                rate_limit_rpm: Self::parse_env("HUB_RATE_LIMIT_RPM", 120)?,
                 cached_base_url: None,
             },
             auth: AuthSettings {
                 private_key_path: env::var("HUB_PRIVATE_KEY_PATH")
                     .unwrap_or_else(|_| "private_key.pem".to_string()),
                 kid: env::var("HUB_KID").unwrap_or_else(|_| "hub-key-1".to_string()),
-                token_ttl_seconds: env::var("HUB_TOKEN_TTL_SECONDS")
-                    .ok()
-                    .and_then(|t| t.parse().ok())
-                    .unwrap_or(3600),
-                proxy_token_ttl_seconds: env::var("HUB_PROXY_TOKEN_TTL_SECONDS")
-                    .ok()
-                    .and_then(|t| t.parse().ok())
-                    .unwrap_or(300),
-                internal_token_ttl_seconds: env::var("HUB_INTERNAL_TOKEN_TTL_SECONDS")
-                    .ok()
-                    .and_then(|t| t.parse().ok())
-                    .unwrap_or(86400),
+                token_ttl_seconds: Self::parse_env("HUB_TOKEN_TTL_SECONDS", 3600)?,
+                proxy_token_ttl_seconds: Self::parse_env("HUB_PROXY_TOKEN_TTL_SECONDS", 300)?,
+                internal_token_ttl_seconds: Self::parse_env(
+                    "HUB_INTERNAL_TOKEN_TTL_SECONDS",
+                    86400,
+                )?,
             },
             metadata: MetadataSettings {
                 sqlite_path: env::var("HUB_SQLITE_PATH").unwrap_or_else(|_| "hub.db".to_string()),
-                db_pool_size: env::var("HUB_DB_POOL_SIZE")
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(5),
+                db_pool_size: Self::parse_env("HUB_DB_POOL_SIZE", 5)?,
             },
             cas: CasSettings {
                 base_url: {
@@ -275,30 +288,18 @@ impl HubConfig {
                     Self::validate_url("CAS_BASE_URL", &url)?;
                     url
                 },
-                internal_timeout_seconds: env::var("HUB_CAS_TIMEOUT_SECS")
-                    .ok()
-                    .and_then(|t| t.parse().ok())
-                    .unwrap_or(30),
-                max_download_size: env::var("HUB_MAX_DOWNLOAD_SIZE")
-                    .ok()
-                    .and_then(|t| t.parse().ok())
-                    .unwrap_or(512 * 1024 * 1024),
-                health_check_timeout_seconds: env::var("HUB_CAS_HEALTH_CHECK_TIMEOUT_SECS")
-                    .ok()
-                    .and_then(|t| t.parse().ok())
-                    .unwrap_or(10),
+                internal_timeout_seconds: Self::parse_env("HUB_CAS_TIMEOUT_SECS", 30)?,
+                max_download_size: Self::parse_env("HUB_MAX_DOWNLOAD_SIZE", 512 * 1024 * 1024)?,
+                health_check_timeout_seconds: Self::parse_env(
+                    "HUB_CAS_HEALTH_CHECK_TIMEOUT_SECS",
+                    10,
+                )?,
             },
             storage: StorageSettings {
-                inline_threshold_bytes: env::var("HUB_INLINE_THRESHOLD")
-                    .ok()
-                    .and_then(|t| t.parse().ok())
-                    .unwrap_or(1024 * 1024),
+                inline_threshold_bytes: Self::parse_env("HUB_INLINE_THRESHOLD", 1024 * 1024)?,
                 upload_temp_dir: env::var("HUB_UPLOAD_TEMP_DIR")
                     .unwrap_or_else(|_| "./data/hub-uploads".to_string()), // I1 fix: Use app-specific dir instead of /tmp
-                max_upload_size: env::var("HUB_MAX_UPLOAD_SIZE")
-                    .ok()
-                    .and_then(|t| t.parse().ok())
-                    .unwrap_or(512 * 1024 * 1024),
+                max_upload_size: Self::parse_env("HUB_MAX_UPLOAD_SIZE", 512 * 1024 * 1024)?,
             },
         };
 
@@ -352,17 +353,14 @@ impl HubConfig {
         if let Ok(host) = env::var("HUB_HOST") {
             config.server.host = host;
         }
-        if let Some(port) = env::var("HUB_PORT").ok().and_then(|p| p.parse().ok()) {
+        if let Some(port) = Self::parse_optional_env("HUB_PORT")? {
             config.server.port = port;
         }
         if let Ok(url) = env::var("HUB_PUBLIC_BASE_URL") {
             Self::validate_url_with_host("HUB_PUBLIC_BASE_URL", &url)?;
             config.server.public_base_url = Some(url);
         }
-        if let Some(rpm) = env::var("HUB_RATE_LIMIT_RPM")
-            .ok()
-            .and_then(|v| v.parse().ok())
-        {
+        if let Some(rpm) = Self::parse_optional_env("HUB_RATE_LIMIT_RPM")? {
             config.server.rate_limit_rpm = rpm;
         }
         if let Ok(path) = env::var("HUB_PRIVATE_KEY_PATH") {
@@ -371,68 +369,41 @@ impl HubConfig {
         if let Ok(kid) = env::var("HUB_KID") {
             config.auth.kid = kid;
         }
-        if let Some(ttl) = env::var("HUB_TOKEN_TTL_SECONDS")
-            .ok()
-            .and_then(|t| t.parse().ok())
-        {
+        if let Some(ttl) = Self::parse_optional_env("HUB_TOKEN_TTL_SECONDS")? {
             config.auth.token_ttl_seconds = ttl;
         }
-        if let Some(ttl) = env::var("HUB_PROXY_TOKEN_TTL_SECONDS")
-            .ok()
-            .and_then(|t| t.parse().ok())
-        {
+        if let Some(ttl) = Self::parse_optional_env("HUB_PROXY_TOKEN_TTL_SECONDS")? {
             config.auth.proxy_token_ttl_seconds = ttl;
         }
-        if let Some(ttl) = env::var("HUB_INTERNAL_TOKEN_TTL_SECONDS")
-            .ok()
-            .and_then(|t| t.parse().ok())
-        {
+        if let Some(ttl) = Self::parse_optional_env("HUB_INTERNAL_TOKEN_TTL_SECONDS")? {
             config.auth.internal_token_ttl_seconds = ttl;
         }
         if let Ok(path) = env::var("HUB_SQLITE_PATH") {
             config.metadata.sqlite_path = path;
         }
-        if let Some(size) = env::var("HUB_DB_POOL_SIZE")
-            .ok()
-            .and_then(|v| v.parse().ok())
-        {
+        if let Some(size) = Self::parse_optional_env("HUB_DB_POOL_SIZE")? {
             config.metadata.db_pool_size = size;
         }
         if let Ok(url) = env::var("CAS_BASE_URL") {
             Self::validate_url("CAS_BASE_URL", &url)?;
             config.cas.base_url = url;
         }
-        if let Some(timeout) = env::var("HUB_CAS_TIMEOUT_SECS")
-            .ok()
-            .and_then(|t| t.parse().ok())
-        {
+        if let Some(timeout) = Self::parse_optional_env("HUB_CAS_TIMEOUT_SECS")? {
             config.cas.internal_timeout_seconds = timeout;
         }
-        if let Some(size) = env::var("HUB_MAX_DOWNLOAD_SIZE")
-            .ok()
-            .and_then(|t| t.parse().ok())
-        {
+        if let Some(size) = Self::parse_optional_env("HUB_MAX_DOWNLOAD_SIZE")? {
             config.cas.max_download_size = size;
         }
-        if let Some(timeout) = env::var("HUB_CAS_HEALTH_CHECK_TIMEOUT_SECS")
-            .ok()
-            .and_then(|t| t.parse().ok())
-        {
+        if let Some(timeout) = Self::parse_optional_env("HUB_CAS_HEALTH_CHECK_TIMEOUT_SECS")? {
             config.cas.health_check_timeout_seconds = timeout;
         }
-        if let Some(threshold) = env::var("HUB_INLINE_THRESHOLD")
-            .ok()
-            .and_then(|t| t.parse().ok())
-        {
+        if let Some(threshold) = Self::parse_optional_env("HUB_INLINE_THRESHOLD")? {
             config.storage.inline_threshold_bytes = threshold;
         }
         if let Ok(dir) = env::var("HUB_UPLOAD_TEMP_DIR") {
             config.storage.upload_temp_dir = dir;
         }
-        if let Some(size) = env::var("HUB_MAX_UPLOAD_SIZE")
-            .ok()
-            .and_then(|t| t.parse().ok())
-        {
+        if let Some(size) = Self::parse_optional_env("HUB_MAX_UPLOAD_SIZE")? {
             config.storage.max_upload_size = size;
         }
 

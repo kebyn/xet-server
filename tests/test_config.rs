@@ -17,6 +17,14 @@ impl ScopedEnv {
         }
         Self { key, previous }
     }
+
+    fn remove(key: &'static str) -> Self {
+        let previous = std::env::var(key).ok();
+        unsafe {
+            std::env::remove_var(key);
+        }
+        Self { key, previous }
+    }
 }
 
 impl Drop for ScopedEnv {
@@ -106,6 +114,31 @@ fn test_try_from_env_rejects_zero_rate_limit_without_panic() {
     let err = ServerConfig::try_from_env().expect_err("zero rate limit should be rejected");
 
     assert!(err.contains("XET_RATE_LIMIT_RPM must be > 0"));
+}
+
+#[test]
+fn test_try_from_env_rejects_invalid_numeric_values_without_fallback() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let _public_base_url = ScopedEnv::remove("XET_PUBLIC_BASE_URL");
+
+    for (key, value) in [
+        ("XET_PORT", "not-a-port"),
+        ("XET_MAX_BODY_SIZE_MB", "huge"),
+        ("XET_RATE_LIMIT_RPM", "fast"),
+        ("XET_MIN_CONVERSION_SIZE", "small"),
+        ("XET_MAX_CONVERSION_SIZE", "large"),
+    ] {
+        let scoped = ScopedEnv::set(key, value);
+        let err = match ServerConfig::try_from_env() {
+            Ok(_) => panic!("{key}={value} should be rejected"),
+            Err(err) => err,
+        };
+        assert!(
+            err.contains(key) && err.contains("valid"),
+            "unexpected error for {key}: {err}"
+        );
+        drop(scoped);
+    }
 }
 
 #[test]
