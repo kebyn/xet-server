@@ -1,10 +1,13 @@
-use super::shared::{can_access_repo, can_write_repo};
 use crate::auth::extract::{AuthRead, AuthUser, AuthWrite};
 use crate::auth::token_store::TokenInfo;
 use crate::auth::xet_signer::XetSigner;
 use crate::metadata::{MetadataStore, RepoType};
+use crate::services::token_exchange::{
+    ExchangeScope, TokenExchangeRequest, TokenExchangeService, TokenExchangeServiceError,
+};
 use actix_web::{HttpResponse, web};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// Token exchange response
 #[derive(Debug, Serialize, Deserialize)]
@@ -15,89 +18,62 @@ pub struct TokenExchangeResponse {
     pub cas_url: String,
 }
 
-/// Internal helper to handle token exchange
-#[allow(clippy::too_many_arguments)]
+fn token_exchange_service(
+    metadata: &web::Data<Arc<dyn MetadataStore>>,
+    xet_signer: &web::Data<Arc<XetSigner>>,
+) -> TokenExchangeService {
+    TokenExchangeService::new(metadata.get_ref().clone(), xet_signer.get_ref().clone())
+}
+
+fn error_json(error: String, error_type: &str) -> serde_json::Value {
+    serde_json::json!({
+        "error": error,
+        "error_type": error_type
+    })
+}
+
+fn token_exchange_error_response(err: TokenExchangeServiceError) -> HttpResponse {
+    match err {
+        TokenExchangeServiceError::NotFound(msg) => {
+            HttpResponse::NotFound().json(error_json(msg, "NotFoundError"))
+        }
+        TokenExchangeServiceError::Internal(msg) => {
+            HttpResponse::InternalServerError().json(error_json(msg, "InternalError"))
+        }
+    }
+}
+
 async fn do_exchange(
     info: &TokenInfo,
-    path_namespace: &str,
-    path_repo: &str,
-    path_revision: &str,
-    required_scope: &str,
+    path: (String, String, String),
+    required_scope: ExchangeScope,
     repo_type: RepoType,
-    xet_signer: &std::sync::Arc<XetSigner>,
-    metadata: &std::sync::Arc<dyn MetadataStore>,
-    cas_url: &str,
+    xet_signer: web::Data<Arc<XetSigner>>,
+    metadata: web::Data<Arc<dyn MetadataStore>>,
+    config: web::Data<crate::config::HubConfig>,
 ) -> HttpResponse {
-    // Check repo exists
-    let repo = match metadata
-        .get_repo(path_namespace, path_repo, repo_type)
+    let (namespace, repo, revision) = path;
+    let service = token_exchange_service(&metadata, &xet_signer);
+    let result = match service
+        .exchange(TokenExchangeRequest {
+            user_id: &info.user_id,
+            username: &info.username,
+            namespace: &namespace,
+            repo_name: &repo,
+            revision: &revision,
+            required_scope,
+            repo_type,
+        })
         .await
     {
-        Ok(r) => r,
-        Err(e) => {
-            return match e {
-                crate::metadata::MetadataError::RepoNotFound(_) => {
-                    HttpResponse::NotFound().json(serde_json::json!({
-                        "error": e.to_string(),
-                        "error_type": "NotFoundError"
-                    }))
-                }
-                _ => HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": e.to_string(),
-                    "error_type": "InternalError"
-                })),
-            };
-        }
-    };
-
-    // C-AUTH-2: 读权限允许公开 repo,写权限仅允许 repo owner。404 不泄露存在性。
-    let allowed = if required_scope == "write" {
-        can_write_repo(&repo, &info.username)
-    } else {
-        can_access_repo(&repo, &info.username)
-    };
-
-    if !allowed {
-        return HttpResponse::NotFound().json(serde_json::json!({
-            "error": "Repository not found",
-            "error_type": "NotFoundError"
-        }));
-    }
-
-    // Determine revision
-    let revision = if path_revision == "main" || path_revision.is_empty() {
-        match metadata.get_head(repo.id).await {
-            Ok(Some(h)) => h,
-            Ok(None) => "main".to_string(),
-            Err(_) => "main".to_string(),
-        }
-    } else {
-        path_revision.to_string()
-    };
-
-    // I2: Sign the xet token with the requested scope, not the user's full scope
-    // This prevents a read token from getting write permissions via exchange
-    let repo_id = format!("{}/{}", path_namespace, path_repo);
-    let (xet_token, exp) = match xet_signer.sign(
-        &info.user_id,
-        required_scope, // Use requested scope, not info.scope
-        &repo_id,
-        &repo_type.to_string(),
-        &revision,
-    ) {
         Ok(result) => result,
-        Err(e) => {
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Failed to sign token: {}", e),
-                "error_type": "InternalError"
-            }));
-        }
+        Err(err) => return token_exchange_error_response(err),
     };
 
     HttpResponse::Ok().json(TokenExchangeResponse {
-        access_token: xet_token,
-        exp,
-        cas_url: cas_url.to_string(),
+        access_token: result.access_token,
+        exp: result.exp,
+        cas_url: config.cas.base_url.clone(),
     })
 }
 
@@ -109,17 +85,14 @@ pub async fn exchange_model_read(
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
     config: web::Data<crate::config::HubConfig>,
 ) -> HttpResponse {
-    let (namespace, repo, revision) = path.into_inner();
     do_exchange(
         &auth.info,
-        &namespace,
-        &repo,
-        &revision,
-        "read",
+        path.into_inner(),
+        ExchangeScope::Read,
         RepoType::Model,
-        &xet_signer,
-        &metadata,
-        &config.cas.base_url,
+        xet_signer,
+        metadata,
+        config,
     )
     .await
 }
@@ -131,17 +104,14 @@ pub async fn exchange_model_write(
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
     config: web::Data<crate::config::HubConfig>,
 ) -> HttpResponse {
-    let (namespace, repo, revision) = path.into_inner();
     do_exchange(
         &auth.info,
-        &namespace,
-        &repo,
-        &revision,
-        "write",
+        path.into_inner(),
+        ExchangeScope::Write,
         RepoType::Model,
-        &xet_signer,
-        &metadata,
-        &config.cas.base_url,
+        xet_signer,
+        metadata,
+        config,
     )
     .await
 }
@@ -154,17 +124,14 @@ pub async fn exchange_dataset_read(
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
     config: web::Data<crate::config::HubConfig>,
 ) -> HttpResponse {
-    let (namespace, repo, revision) = path.into_inner();
     do_exchange(
         &auth.info,
-        &namespace,
-        &repo,
-        &revision,
-        "read",
+        path.into_inner(),
+        ExchangeScope::Read,
         RepoType::Dataset,
-        &xet_signer,
-        &metadata,
-        &config.cas.base_url,
+        xet_signer,
+        metadata,
+        config,
     )
     .await
 }
@@ -176,17 +143,14 @@ pub async fn exchange_dataset_write(
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
     config: web::Data<crate::config::HubConfig>,
 ) -> HttpResponse {
-    let (namespace, repo, revision) = path.into_inner();
     do_exchange(
         &auth.info,
-        &namespace,
-        &repo,
-        &revision,
-        "write",
+        path.into_inner(),
+        ExchangeScope::Write,
         RepoType::Dataset,
-        &xet_signer,
-        &metadata,
-        &config.cas.base_url,
+        xet_signer,
+        metadata,
+        config,
     )
     .await
 }
@@ -199,17 +163,14 @@ pub async fn exchange_space_read(
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
     config: web::Data<crate::config::HubConfig>,
 ) -> HttpResponse {
-    let (namespace, repo, revision) = path.into_inner();
     do_exchange(
         &auth.info,
-        &namespace,
-        &repo,
-        &revision,
-        "read",
+        path.into_inner(),
+        ExchangeScope::Read,
         RepoType::Space,
-        &xet_signer,
-        &metadata,
-        &config.cas.base_url,
+        xet_signer,
+        metadata,
+        config,
     )
     .await
 }
@@ -221,17 +182,14 @@ pub async fn exchange_space_write(
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
     config: web::Data<crate::config::HubConfig>,
 ) -> HttpResponse {
-    let (namespace, repo, revision) = path.into_inner();
     do_exchange(
         &auth.info,
-        &namespace,
-        &repo,
-        &revision,
-        "write",
+        path.into_inner(),
+        ExchangeScope::Write,
         RepoType::Space,
-        &xet_signer,
-        &metadata,
-        &config.cas.base_url,
+        xet_signer,
+        metadata,
+        config,
     )
     .await
 }
