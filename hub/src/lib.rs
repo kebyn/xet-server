@@ -6,3 +6,4 @@ pub mod error;
 pub mod metadata;
 pub mod migrations;
 pub mod server;
+mod sqlite_pool;
