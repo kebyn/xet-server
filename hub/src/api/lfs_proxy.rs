@@ -1,18 +1,18 @@
-use crate::auth::extract::scope_allows;
 use crate::auth::token_store::TokenStore;
 use crate::auth::xet_signer::XetSigner;
 use crate::cas_client::CasClient;
 use crate::config::HubConfig;
+use crate::lfs_proxy::oid::validate_oid;
+use crate::services::lfs_batch::{
+    LfsBatchCasClient, LfsBatchRequest, LfsBatchService, LfsBatchServiceError,
+};
 use actix_web::{HttpRequest, HttpResponse, web};
 use futures_util::{StreamExt, TryStreamExt};
+use std::sync::Arc;
 
-mod batch;
-mod oid;
 mod streaming;
 mod tokens;
 
-use batch::{MAX_BATCH_SIZE, rewrite_batch_urls};
-use oid::validate_oid;
 use streaming::MaxBytesStream;
 use tokens::{extract_proxy_token, extract_token, validate_proxy_token};
 
@@ -74,9 +74,9 @@ use tokens::{extract_proxy_token, extract_token, validate_proxy_token};
 pub async fn lfs_batch(
     req: HttpRequest,
     body: web::Json<serde_json::Value>,
-    token_store: web::Data<std::sync::Arc<TokenStore>>,
-    xet_signer: web::Data<std::sync::Arc<XetSigner>>,
-    cas_client: web::Data<std::sync::Arc<CasClient>>,
+    token_store: web::Data<Arc<TokenStore>>,
+    xet_signer: web::Data<Arc<XetSigner>>,
+    cas_client: web::Data<Arc<CasClient>>,
     config: web::Data<HubConfig>,
 ) -> HttpResponse {
     // Extract and validate Bearer token
@@ -89,99 +89,54 @@ pub async fn lfs_batch(
             }));
         }
     };
-
-    let token_info = match token_store.validate_token(&token).await {
-        Ok(Some(info)) => info,
-        Ok(None) => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Invalid token",
-                "error_type": "AuthenticationError"
-            }));
-        }
-        Err(e) => {
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("{}", e),
-                "error_type": "InternalError"
-            }));
-        }
-    };
-
-    // I3 fix: Validate token scope based on operation type
-    // LFS batch operation requires appropriate scope (upload -> write, download -> read)
-    let operation = body
-        .get("operation")
-        .and_then(|o| o.as_str())
-        .unwrap_or("download"); // Default to download if not specified
-    let required_scope = match operation {
-        "upload" => "write",
-        "download" => "read",
-        _ => {
-            return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": format!("Invalid operation: {}", operation),
-                "error_type": "ValidationError"
-            }));
-        }
-    };
-
-    // C5 fix: Check scope using exact match or split-based matching instead of contains()
-    // "write" implies "read" — a user with write access can always download
-    if !scope_allows(&token_info.scope, required_scope) {
-        return HttpResponse::Forbidden().json(serde_json::json!({
-            "error": format!("Token scope '{}' insufficient for {} operation (requires '{}')",
-                token_info.scope, operation, required_scope),
-            "error_type": "AuthorizationError"
-        }));
-    }
-
-    // Validate batch size before forwarding to CAS (defense-in-depth)
-    let object_count = body
-        .get("objects")
-        .and_then(|o| o.as_array())
-        .map(|a| a.len())
-        .unwrap_or(0);
-    if object_count > MAX_BATCH_SIZE {
-        return HttpResponse::BadRequest().json(serde_json::json!({
-            "error": format!("Too many objects: {} exceeds limit of {}", object_count, MAX_BATCH_SIZE),
-            "error_type": "ValidationError"
-        }));
-    }
-    // Log batch size for monitoring (I2: helps operators track memory usage patterns)
-    tracing::debug!(
-        object_count,
-        user = %token_info.username,
-        "Processing LFS batch request"
+    let body = body.into_inner();
+    let cas_batch_client: Arc<dyn LfsBatchCasClient> = cas_client.get_ref().clone();
+    let service = LfsBatchService::new(
+        token_store.get_ref().clone(),
+        xet_signer.get_ref().clone(),
+        cas_batch_client,
     );
 
-    // CAS /objects/batch is a public LFS endpoint, not an /internal/* endpoint.
-    // Forward with a short-lived user token matching the operation scope so CAS
-    // can apply the same read/write guard as direct clients.
-    let (cas_batch_token, _) =
-        match xet_signer.sign(&token_info.username, required_scope, "", "", "") {
-            Ok(result) => result,
-            Err(e) => {
-                return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": format!("Failed to sign CAS batch token: {}", e),
-                    "error_type": "InternalError"
-                }));
-            }
-        };
+    let hub_base_url = config.server.base_url();
+    match service
+        .batch(LfsBatchRequest {
+            user_token: &token,
+            body: &body,
+            hub_base_url: &hub_base_url,
+        })
+        .await
+    {
+        Ok(response) => HttpResponse::Ok().json(response),
+        Err(err) => lfs_batch_error_response(err),
+    }
+}
 
-    // Forward to CAS
-    let mut response = match cas_client.proxy_batch(&body, &cas_batch_token).await {
-        Ok(r) => r,
-        Err(e) => {
-            return HttpResponse::BadGateway().json(serde_json::json!({
-                "error": e.to_string(),
-                "error_type": "BadGateway"
-            }));
+fn error_json(error: String, error_type: &str) -> serde_json::Value {
+    serde_json::json!({
+        "error": error,
+        "error_type": error_type
+    })
+}
+
+fn lfs_batch_error_response(err: LfsBatchServiceError) -> HttpResponse {
+    match err {
+        LfsBatchServiceError::InvalidToken => HttpResponse::Unauthorized().json(error_json(
+            "Invalid token".to_string(),
+            "AuthenticationError",
+        )),
+        LfsBatchServiceError::Validation(message) => {
+            HttpResponse::BadRequest().json(error_json(message, "ValidationError"))
         }
-    };
-
-    // Rewrite URLs and auth headers with short-lived proxy tokens
-    let hub_base = config.server.base_url();
-    rewrite_batch_urls(&mut response, &hub_base, &xet_signer, &token_info.username);
-
-    HttpResponse::Ok().json(response)
+        LfsBatchServiceError::Authorization(message) => {
+            HttpResponse::Forbidden().json(error_json(message, "AuthorizationError"))
+        }
+        LfsBatchServiceError::BadGateway(message) => {
+            HttpResponse::BadGateway().json(error_json(message, "BadGateway"))
+        }
+        LfsBatchServiceError::Internal(message) => {
+            HttpResponse::InternalServerError().json(error_json(message, "InternalError"))
+        }
+    }
 }
 
 /// Handle LFS object upload
@@ -468,8 +423,8 @@ pub async fn lfs_download(
 
 #[cfg(test)]
 mod tests {
-    use super::batch::rewrite_action_url;
     use super::*;
+    use crate::lfs_proxy::batch::{rewrite_action_url, rewrite_batch_urls};
 
     #[test]
     fn test_rewrite_action_url_drops_on_parse_failure() {

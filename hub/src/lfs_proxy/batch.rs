@@ -1,13 +1,13 @@
-use super::oid::validate_oid;
 use crate::auth::xet_signer::XetSigner;
+use crate::lfs_proxy::oid::validate_oid;
 
 /// Maximum number of objects allowed in a single batch request.
 /// Mirrors CAS-side limit for defense-in-depth.
-pub(super) const MAX_BATCH_SIZE: usize = 1000;
+pub(crate) const MAX_BATCH_SIZE: usize = 1000;
 
 /// Rewrite URLs in batch response from CAS URLs to Hub URLs,
 /// and replace internal CAS auth tokens with short-lived proxy tokens.
-pub(super) fn rewrite_batch_urls(
+pub(crate) fn rewrite_batch_urls(
     response: &mut serde_json::Value,
     hub_base: &str,
     signer: &XetSigner,
@@ -81,7 +81,7 @@ pub(super) fn rewrite_batch_urls(
 /// Rewrite a single action's URL and auth header with proxy token.
 /// Returns false when href cannot be parsed, so callers can drop the action
 /// instead of leaking an internal CAS URL.
-pub(super) fn rewrite_action_url(
+pub(crate) fn rewrite_action_url(
     action: &mut serde_json::Value,
     hub_url: &url::Url,
     proxy_token: &str,

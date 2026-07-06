@@ -4,6 +4,7 @@ pub mod cas_client;
 mod commit;
 pub mod config;
 pub mod error;
+mod lfs_proxy;
 pub mod metadata;
 pub mod migrations;
 pub mod server;
