@@ -187,14 +187,14 @@ export HUB_PUBLIC_BASE_URL=https://hub.example.com
 | `HUB_KID` | 密钥标识符 | `hub-key-1` | 否 |
 | `HUB_TOKEN_TTL_SECONDS` | CAS 令牌有效期（秒），用于签发 xet_xxx JWT | `3600` | 否 |
 | `HUB_PROXY_TOKEN_TTL_SECONDS` | LFS Proxy Token 有效期（秒） | `300` (5 分钟) | 否 |
-| `HUB_INTERNAL_TOKEN_TTL_SECONDS` | Hub→CAS 内部令牌有效期（秒），用于服务间通信 | `86400` (24 小时) | 否 |
+| `HUB_INTERNAL_TOKEN_TTL_SECONDS` | Hub→CAS internal endpoints 内部令牌有效期（秒），用于 `/internal/*`、GC 和内部指标类调用 | `86400` (24 小时) | 否 |
 
 **说明**：
 - `HUB_PRIVATE_KEY_PATH` 指向 Hub 的私钥文件（PEM 格式）
 - `HUB_KID` 用于标识签名密钥，支持密钥轮换
 - `HUB_TOKEN_TTL_SECONDS` 控制 CAS 令牌（xet_xxx）的有效期（默认 3600 秒 = 1 小时）
 - Proxy 令牌（proxy_xxx）默认 5 分钟，可通过 `HUB_PROXY_TOKEN_TTL_SECONDS` 配置
-- **`HUB_INTERNAL_TOKEN_TTL_SECONDS`**：内部令牌（internal_xxx）用于 Hub→CAS 通信。默认 24 小时。设置小于 3600 秒会触发警告
+- **`HUB_INTERNAL_TOKEN_TTL_SECONDS`**：内部令牌（internal_xxx）只用于 Hub→CAS internal endpoints，例如 `/internal/*`、GC 状态检查和内部指标类调用；不用于 CAS batch、public LFS object 或 inline resolve/commit 对象读写。默认 24 小时。设置小于 3600 秒会触发警告
 
 ### 安全设置
 
