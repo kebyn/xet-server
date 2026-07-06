@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::metadata::{MetadataError, MetadataStore, Repo, RepoType, Revision};
+use crate::services::shared::can_access_repo;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RepoServiceError {
@@ -220,10 +221,6 @@ fn parse_unified_repo_type(repo_type: Option<&str>) -> RepoType {
         Some("space") => RepoType::Space,
         _ => RepoType::Model,
     }
-}
-
-fn can_access_repo(repo: &Repo, username: &str) -> bool {
-    !repo.private || repo.namespace == username
 }
 
 #[cfg(test)]

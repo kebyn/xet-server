@@ -29,3 +29,34 @@ pub(crate) async fn resolve_revision_id(
         ))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metadata::RepoType;
+
+    fn repo(namespace: &str, private: bool) -> Repo {
+        Repo {
+            id: 1,
+            name: "repo".to_string(),
+            namespace: namespace.to_string(),
+            repo_type: RepoType::Model,
+            sha: None,
+            private,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn public_repo_can_be_read_by_any_user() {
+        assert!(can_access_repo(&repo("owner", false), "owner"));
+        assert!(can_access_repo(&repo("owner", false), "reader"));
+    }
+
+    #[test]
+    fn private_repo_can_only_be_read_by_owner() {
+        assert!(can_access_repo(&repo("owner", true), "owner"));
+        assert!(!can_access_repo(&repo("owner", true), "reader"));
+    }
+}
