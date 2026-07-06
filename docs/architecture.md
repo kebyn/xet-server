@@ -882,9 +882,9 @@ LFS 对象是原始文件的直接存储，使用 SHA-256 哈希标识。
 ### 1. 水平扩展
 
 **Hub API**：
-- 有状态设计（元数据存储在 SQLite）
-- 可以通过共享 SQLite 数据库或使用分布式数据库运行多个实例
-- 使用负载均衡器分发请求（需要会话粘性或共享数据库）
+- 有状态设计（元数据存储在 SQLite，启动时由内置 migration runner 初始化或校验 schema）
+- 当前只实现 SQLite backend；多实例 Hub 是受限部署模式，要求共享同一个 SQLite 文件、相同 `HUB_TOKEN_HASH_SALT` 和相同 Hub signing key，并受 SQLite 单写者限制
+- 负载均衡可以分发无状态 HTTP 请求，但不能绕过 SQLite 写入串行化；生产多写场景需要先引入明确的分布式数据库 backend（当前未实现）
 
 **CAS Server**：
 - 存储后端可共享（S3）
