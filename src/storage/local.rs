@@ -87,6 +87,34 @@ impl LocalStorage {
 
 #[async_trait]
 impl StorageBackend for LocalStorage {
+    async fn health_check(&self) -> StorageResult<()> {
+        match fs::metadata(&self.base_path).await {
+            Ok(meta) if meta.is_dir() => Ok(()),
+            Ok(_) => Err(StorageError::Internal(format!(
+                "Local storage path is not a directory: {}",
+                self.base_path.display()
+            ))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let parent = self.base_path.parent().unwrap_or_else(|| Path::new("."));
+                match fs::metadata(parent).await {
+                    Ok(meta) if meta.is_dir() => Ok(()),
+                    Ok(_) => Err(StorageError::Internal(format!(
+                        "Local storage parent is not a directory: {}",
+                        parent.display()
+                    ))),
+                    Err(e) => Err(StorageError::Internal(format!(
+                        "Local storage path is not accessible: {}",
+                        e
+                    ))),
+                }
+            }
+            Err(e) => Err(StorageError::Internal(format!(
+                "Local storage path is not accessible: {}",
+                e
+            ))),
+        }
+    }
+
     async fn put(&self, key: &str, data: Bytes) -> StorageResult<()> {
         // 原子写:先写入临时文件,再 rename 到最终路径,避免崩溃时留下截断文件。
         let path = self.object_path(key)?;

@@ -6,7 +6,7 @@ use xet_server::api::auth::{AuthVerifier, KeyPair};
 use xet_server::api::xorb::upload_xorb;
 use xet_server::config::{AuthConfig, ServerConfig};
 use xet_server::metrics::GLOBAL_METRICS;
-use xet_server::server::{health_check, metrics_endpoint};
+use xet_server::server::{ReadinessState, health_check, metrics_endpoint, readiness_check};
 use xet_server::storage::local::LocalStorage;
 
 // Use serial test execution to avoid flaky tests with shared global state
@@ -162,4 +162,56 @@ async fn test_health_check() {
 
     let body: serde_json::Value = test::read_body_json(resp).await;
     assert_eq!(body["status"], "ok");
+}
+
+#[actix_web::test]
+async fn test_readiness_check_ready_when_storage_and_index_ready() {
+    let dir = tempdir().unwrap();
+    let storage: Box<dyn xet_server::storage::StorageBackend> =
+        Box::new(LocalStorage::new(dir.path().to_str().unwrap()).unwrap());
+    let readiness = ReadinessState::new();
+    readiness.set_index_ready(0);
+
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(storage))
+            .app_data(web::Data::new(readiness))
+            .route("/ready", web::get().to(readiness_check)),
+    )
+    .await;
+
+    let req = test::TestRequest::get().uri("/ready").to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["status"], "ready");
+    assert_eq!(body["checks"]["storage"], "ok");
+    assert_eq!(body["checks"]["index"], "ok");
+}
+
+#[actix_web::test]
+async fn test_readiness_check_unavailable_when_index_failed() {
+    let dir = tempdir().unwrap();
+    let storage: Box<dyn xet_server::storage::StorageBackend> =
+        Box::new(LocalStorage::new(dir.path().to_str().unwrap()).unwrap());
+    let readiness = ReadinessState::new();
+    readiness.set_index_failed("boom");
+
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(storage))
+            .app_data(web::Data::new(readiness))
+            .route("/ready", web::get().to(readiness_check)),
+    )
+    .await;
+
+    let req = test::TestRequest::get().uri("/ready").to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 503);
+
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["status"], "not_ready");
+    assert_eq!(body["checks"]["storage"], "ok");
+    assert_eq!(body["checks"]["index"], "failed");
 }

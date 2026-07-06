@@ -352,6 +352,16 @@ impl CasClient {
             Err(e) => Err(HubError::CasError(format!("Health check failed: {}", e))),
         }
     }
+
+    /// Check CAS readiness endpoint.
+    pub async fn readiness_check(&self) -> Result<bool, HubError> {
+        let url = format!("{}/ready", self.base_url);
+        match self.client.get(&url).send().await {
+            Ok(resp) if resp.status().is_success() => Ok(true),
+            Ok(_) => Ok(false),
+            Err(e) => Err(HubError::CasError(format!("Readiness check failed: {}", e))),
+        }
+    }
 }
 
 #[cfg(test)]
