@@ -32,6 +32,10 @@ pub struct ServerSettings {
     /// Configure via `XET_RATE_LIMIT_RPM` environment variable.
     /// Default: 60 RPM.
     pub rate_limit_rpm: u32,
+    /// Fail startup when the initial shard index rebuild fails.
+    /// Configure via `XET_INDEX_REBUILD_STRICT`.
+    /// Defaults to false for compatibility; production should set true.
+    pub index_rebuild_strict: bool,
 }
 
 impl ServerSettings {
@@ -224,6 +228,7 @@ impl Default for ServerConfig {
                 public_base_url: None,
                 max_body_size_mb: 2048,
                 rate_limit_rpm: 60,
+                index_rebuild_strict: false,
             },
             storage: StorageConfig {
                 backend: "local".to_string(),
@@ -258,6 +263,19 @@ impl ServerConfig {
             Ok(value) => value
                 .parse()
                 .map_err(|e| format!("{key} '{value}' is not a valid value: {e}")),
+            Err(_) => Ok(default),
+        }
+    }
+
+    fn parse_bool_env(key: &str, default: bool) -> Result<bool, String> {
+        match std::env::var(key) {
+            Ok(value) => match value.to_ascii_lowercase().as_str() {
+                "true" | "1" => Ok(true),
+                "false" | "0" => Ok(false),
+                _ => Err(format!(
+                    "{key} '{value}' is not a valid boolean value; expected true/false or 1/0"
+                )),
+            },
             Err(_) => Ok(default),
         }
     }
@@ -310,6 +328,7 @@ impl ServerConfig {
         let public_base_url = std::env::var("XET_PUBLIC_BASE_URL").ok();
         let max_body_size_mb = Self::parse_env("XET_MAX_BODY_SIZE_MB", 2048)?;
         let rate_limit_rpm = Self::parse_env("XET_RATE_LIMIT_RPM", 60)?;
+        let index_rebuild_strict = Self::parse_bool_env("XET_INDEX_REBUILD_STRICT", false)?;
 
         let backend = std::env::var("XET_STORAGE_BACKEND").unwrap_or_else(|_| "local".to_string());
         let s3_bucket = std::env::var("XET_S3_BUCKET").ok();
@@ -359,6 +378,7 @@ impl ServerConfig {
                 public_base_url,
                 max_body_size_mb,
                 rate_limit_rpm,
+                index_rebuild_strict,
             },
             storage: StorageConfig {
                 backend,

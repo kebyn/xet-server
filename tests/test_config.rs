@@ -93,6 +93,10 @@ fn test_config_rate_limit_default() {
         config.server.rate_limit_rpm, 60,
         "Default CAS rate limit should be 60 RPM"
     );
+    assert!(
+        !config.server.index_rebuild_strict,
+        "CAS index rebuild strict mode should default to false for compatibility"
+    );
 }
 
 #[test]
@@ -139,6 +143,19 @@ fn test_try_from_env_rejects_invalid_numeric_values_without_fallback() {
         );
         drop(scoped);
     }
+}
+
+#[test]
+fn test_try_from_env_rejects_invalid_index_rebuild_strict_bool() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let _public_base_url = ScopedEnv::remove("XET_PUBLIC_BASE_URL");
+    let _strict = ScopedEnv::set("XET_INDEX_REBUILD_STRICT", "maybe");
+
+    let err = ServerConfig::try_from_env()
+        .expect_err("invalid XET_INDEX_REBUILD_STRICT should be rejected");
+
+    assert!(err.contains("XET_INDEX_REBUILD_STRICT"));
+    assert!(err.contains("valid boolean"));
 }
 
 #[test]

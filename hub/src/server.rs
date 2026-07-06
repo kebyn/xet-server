@@ -38,6 +38,7 @@ pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
         .map_err(|e| std::io::Error::other(format!("Failed to connect to database: {}", e)))?;
 
     let shared_pool_for_shutdown = shared_pool.clone();
+    let shared_pool_for_ready = shared_pool.clone();
 
     tracing::info!(
         "Using shared SQLite connection pool ({} connections) for TokenStore + MetadataStore",
@@ -201,6 +202,7 @@ pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
             .app_data(web::Data::new(metadata.clone()))
             .app_data(web::Data::new(signer.clone()))
             .app_data(web::Data::new(cas_client.clone()))
+            .app_data(web::Data::new(shared_pool_for_ready.clone()))
             // =============================================================
             // Non-rate-limited endpoints (registered at App level, before scope)
             // =============================================================
@@ -210,6 +212,7 @@ pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
                 web::get()
                     .to(|| async { HttpResponse::Ok().json(serde_json::json!({"status": "ok"})) }),
             )
+            .route("/ready", web::get().to(readiness_check))
             // =============================================================
             // Public API routes - rate limited via Governor middleware
             // =============================================================
@@ -463,4 +466,140 @@ pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
     tracing::info!("Database connection pool closed");
 
     Ok(())
+}
+
+pub async fn readiness_check(
+    pool: web::Data<sqlx::sqlite::SqlitePool>,
+    cas_client: web::Data<Arc<CasClient>>,
+) -> HttpResponse {
+    let database_ok = match sqlx::query("SELECT 1").execute(pool.get_ref()).await {
+        Ok(_) => true,
+        Err(e) => {
+            tracing::warn!("Hub database readiness check failed: {}", e);
+            false
+        }
+    };
+
+    let cas_ok = match cas_client.readiness_check().await {
+        Ok(ok) => ok,
+        Err(e) => {
+            tracing::warn!("Hub CAS readiness check failed: {}", e);
+            false
+        }
+    };
+
+    let ready = database_ok && cas_ok;
+    let body = serde_json::json!({
+        "status": if ready { "ready" } else { "not_ready" },
+        "checks": {
+            "database": if database_ok { "ok" } else { "failed" },
+            "cas": if cas_ok { "ok" } else { "failed" },
+        }
+    });
+
+    if ready {
+        HttpResponse::Ok().json(body)
+    } else {
+        HttpResponse::ServiceUnavailable().json(body)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use actix_web::{App, HttpResponse, HttpServer, test, web};
+    use sqlx::sqlite::SqlitePoolOptions;
+    use std::net::TcpListener;
+
+    async fn start_mock_cas_ready(status: actix_web::http::StatusCode) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = HttpServer::new(move || {
+            App::new().route(
+                "/ready",
+                web::get().to(move || async move {
+                    HttpResponse::build(status)
+                        .json(serde_json::json!({"status": if status.is_success() { "ready" } else { "not_ready" }}))
+                }),
+            )
+        })
+        .listen(listener)
+        .unwrap()
+        .run();
+        tokio::spawn(server);
+        format!("http://{}", addr)
+    }
+
+    #[actix_web::test]
+    async fn readiness_check_returns_ready_when_database_and_cas_are_ready() {
+        let cas_base_url = start_mock_cas_ready(actix_web::http::StatusCode::OK).await;
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let cas = Arc::new(
+            CasClient::new(&crate::config::CasSettings {
+                base_url: cas_base_url,
+                internal_timeout_seconds: 5,
+                max_download_size: 1024,
+                health_check_timeout_seconds: 5,
+            })
+            .unwrap(),
+        );
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(pool))
+                .app_data(web::Data::new(cas))
+                .route("/ready", web::get().to(readiness_check)),
+        )
+        .await;
+
+        let resp =
+            test::call_service(&app, test::TestRequest::get().uri("/ready").to_request()).await;
+        assert_eq!(resp.status(), 200);
+
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["status"], "ready");
+        assert_eq!(body["checks"]["database"], "ok");
+        assert_eq!(body["checks"]["cas"], "ok");
+    }
+
+    #[actix_web::test]
+    async fn readiness_check_returns_unavailable_when_cas_is_not_ready() {
+        let cas_base_url =
+            start_mock_cas_ready(actix_web::http::StatusCode::SERVICE_UNAVAILABLE).await;
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let cas = Arc::new(
+            CasClient::new(&crate::config::CasSettings {
+                base_url: cas_base_url,
+                internal_timeout_seconds: 5,
+                max_download_size: 1024,
+                health_check_timeout_seconds: 5,
+            })
+            .unwrap(),
+        );
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(pool))
+                .app_data(web::Data::new(cas))
+                .route("/ready", web::get().to(readiness_check)),
+        )
+        .await;
+
+        let resp =
+            test::call_service(&app, test::TestRequest::get().uri("/ready").to_request()).await;
+        assert_eq!(resp.status(), 503);
+
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["status"], "not_ready");
+        assert_eq!(body["checks"]["database"], "ok");
+        assert_eq!(body["checks"]["cas"], "failed");
+    }
 }

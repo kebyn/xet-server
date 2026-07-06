@@ -6,6 +6,7 @@ use actix_web::{
     middleware::{Logger, from_fn},
     web,
 };
+use parking_lot::RwLock;
 use std::sync::Arc;
 
 use crate::api::auth::AuthVerifier;
@@ -14,6 +15,56 @@ use crate::config::ServerConfig;
 use crate::conversion::ConvertingOids;
 use crate::middleware::metrics_middleware;
 use crate::storage::{StorageBackend, create_storage};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IndexReadiness {
+    Rebuilding,
+    Ready { shard_count: usize },
+    Failed { message: String },
+}
+
+impl IndexReadiness {
+    fn check_label(&self) -> &'static str {
+        match self {
+            Self::Rebuilding => "rebuilding",
+            Self::Ready { .. } => "ok",
+            Self::Failed { .. } => "failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ReadinessState {
+    index: Arc<RwLock<IndexReadiness>>,
+}
+
+impl ReadinessState {
+    pub fn new() -> Self {
+        Self {
+            index: Arc::new(RwLock::new(IndexReadiness::Rebuilding)),
+        }
+    }
+
+    pub fn set_index_ready(&self, shard_count: usize) {
+        *self.index.write() = IndexReadiness::Ready { shard_count };
+    }
+
+    pub fn set_index_failed(&self, message: impl Into<String>) {
+        *self.index.write() = IndexReadiness::Failed {
+            message: message.into(),
+        };
+    }
+
+    pub fn index_state(&self) -> IndexReadiness {
+        self.index.read().clone()
+    }
+}
+
+impl Default for ReadinessState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
     // Load auth keys once at startup (avoid per-request file I/O)
@@ -45,6 +96,7 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
         })?);
 
     let index = Arc::new(crate::index::MetadataIndex::new());
+    let readiness = ReadinessState::new();
 
     // Rebuild MetadataIndex from stored shards (stateless server)
     // I1 fix: Pass Arc clone for parallel shard fetching
@@ -53,8 +105,20 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
         .rebuild_from_storage(storage.clone(), rebuild_temp_dir)
         .await
     {
-        Ok(count) => tracing::info!("Rebuilt metadata index: {} shards loaded", count),
-        Err(e) => tracing::warn!("Failed to rebuild index: {}", e),
+        Ok(count) => {
+            readiness.set_index_ready(count);
+            tracing::info!("Rebuilt metadata index: {} shards loaded", count);
+        }
+        Err(e) => {
+            readiness.set_index_failed(e.clone());
+            if config.server.index_rebuild_strict {
+                return Err(std::io::Error::other(format!(
+                    "Failed to rebuild index and XET_INDEX_REBUILD_STRICT=true: {}",
+                    e
+                )));
+            }
+            tracing::warn!("Failed to rebuild index: {}", e);
+        }
     }
 
     // Concurrent conversion tracker (in-memory, resets on restart)
@@ -144,6 +208,7 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
             .app_data(web::Data::new(converting.clone()))
             .app_data(web::Data::new(config.clone()))
             .app_data(web::Data::new(config.conversion.clone()))
+            .app_data(web::Data::new(readiness.clone()))
             // =============================================================
             // Internal endpoints (Hub-to-CAS communication) - NO rate limiting
             // These are registered at App level, BEFORE the public scope,
@@ -159,6 +224,7 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
             )
             // Health and metrics endpoints - no rate limiting
             .route("/health", web::get().to(health_check))
+            .route("/ready", web::get().to(readiness_check))
             .route("/metrics", web::get().to(metrics_endpoint))
             // =============================================================
             // Public API routes - rate limited via Governor middleware.
@@ -222,6 +288,40 @@ pub async fn health_check() -> HttpResponse {
     HttpResponse::Ok().json(serde_json::json!({
         "status": "ok"
     }))
+}
+
+pub async fn readiness_check(
+    storage: web::Data<Box<dyn StorageBackend>>,
+    readiness: web::Data<ReadinessState>,
+) -> HttpResponse {
+    let storage_status = match storage.health_check().await {
+        Ok(()) => "ok",
+        Err(e) => {
+            tracing::warn!("Storage readiness check failed: {}", e);
+            "failed"
+        }
+    };
+    let index_state = readiness.index_state();
+    let index_status = index_state.check_label();
+    let ready = storage_status == "ok" && matches!(index_state, IndexReadiness::Ready { .. });
+
+    let mut body = serde_json::json!({
+        "status": if ready { "ready" } else { "not_ready" },
+        "checks": {
+            "storage": storage_status,
+            "index": index_status,
+        }
+    });
+
+    if let IndexReadiness::Ready { shard_count } = index_state {
+        body["index_shard_count"] = serde_json::json!(shard_count);
+    }
+
+    if ready {
+        HttpResponse::Ok().json(body)
+    } else {
+        HttpResponse::ServiceUnavailable().json(body)
+    }
 }
 
 /// Prometheus metrics endpoint

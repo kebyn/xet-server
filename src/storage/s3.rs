@@ -402,6 +402,16 @@ impl Drop for S3Storage {
 
 #[async_trait]
 impl StorageBackend for S3Storage {
+    async fn health_check(&self) -> StorageResult<()> {
+        self.client
+            .head_bucket()
+            .bucket(&self.bucket)
+            .send()
+            .await
+            .map_err(|e| StorageError::Internal(format!("S3 head_bucket failed: {}", e)))?;
+        Ok(())
+    }
+
     async fn put(&self, key: &str, data: Bytes) -> StorageResult<()> {
         self.client
             .put_object()

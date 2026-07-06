@@ -24,6 +24,12 @@ pub type StorageResult<T> = Result<T, StorageError>;
 
 #[async_trait]
 pub trait StorageBackend: Send + Sync {
+    /// Check whether the storage backend is reachable enough for the server to
+    /// accept traffic. Implementations should keep this lightweight.
+    async fn health_check(&self) -> StorageResult<()> {
+        Ok(())
+    }
+
     /// Store an object
     async fn put(&self, key: &str, data: Bytes) -> StorageResult<()>;
 
