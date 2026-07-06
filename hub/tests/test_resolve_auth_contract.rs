@@ -126,10 +126,13 @@ async fn resolve_inline_fetch_uses_xet_user_token_for_cas_download() {
         .await
         .unwrap();
 
-    let cas_client = Arc::new(CasClient::new(&CasSettings {
-        base_url: cas_url,
-        ..CasSettings::default()
-    }));
+    let cas_client = Arc::new(
+        CasClient::new(&CasSettings {
+            base_url: cas_url,
+            ..CasSettings::default()
+        })
+        .expect("CAS client should be created"),
+    );
 
     let app = test::init_service(
         App::new()

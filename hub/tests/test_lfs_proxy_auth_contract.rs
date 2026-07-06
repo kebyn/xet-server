@@ -163,10 +163,13 @@ async fn lfs_batch_forwards_xet_user_token_to_cas_batch() {
         .create_token("testuser", "read-token", "read")
         .await
         .unwrap();
-    let cas_client = Arc::new(CasClient::new(&CasSettings {
-        base_url: cas_url,
-        ..CasSettings::default()
-    }));
+    let cas_client = Arc::new(
+        CasClient::new(&CasSettings {
+            base_url: cas_url,
+            ..CasSettings::default()
+        })
+        .expect("CAS client should be created"),
+    );
 
     let app = test::init_service(
         App::new()
@@ -221,10 +224,13 @@ async fn lfs_download_forwards_client_proxy_token_to_cas_object_endpoint() {
     let cas_url =
         start_download_cas_requiring_proxy_token(signer.clone(), oid.clone(), content.clone())
             .await;
-    let cas_client = Arc::new(CasClient::new(&CasSettings {
-        base_url: cas_url,
-        ..CasSettings::default()
-    }));
+    let cas_client = Arc::new(
+        CasClient::new(&CasSettings {
+            base_url: cas_url,
+            ..CasSettings::default()
+        })
+        .expect("CAS client should be created"),
+    );
     let (proxy_token, _) = signer
         .sign_proxy("testuser", &oid, "download", "", "")
         .unwrap();

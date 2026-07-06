@@ -18,7 +18,9 @@ use crate::storage::{StorageBackend, create_storage};
 pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
     // Load auth keys once at startup (avoid per-request file I/O)
     let auth_verifier =
-        Arc::new(AuthVerifier::from_config(&config.auth).expect("Failed to load auth public key"));
+        Arc::new(AuthVerifier::from_config(&config.auth).map_err(|e| {
+            std::io::Error::other(format!("Failed to load auth public key: {}", e))
+        })?);
 
     // Check public key file permissions for security
     if let Some(warning) = crate::config::check_public_key_permissions(&config.auth.public_key_path)
@@ -37,11 +39,10 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
         }
     }
 
-    let storage: Arc<Box<dyn StorageBackend>> = Arc::new(
-        create_storage(&config.storage)
-            .await
-            .expect("Failed to create storage backend"),
-    );
+    let storage: Arc<Box<dyn StorageBackend>> =
+        Arc::new(create_storage(&config.storage).await.map_err(|e| {
+            std::io::Error::other(format!("Failed to create storage backend: {}", e))
+        })?);
 
     let index = Arc::new(crate::index::MetadataIndex::new());
 
@@ -115,7 +116,7 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
         .per_second(60) // 60-second refill window
         .burst_size(rpm) // rpm requests per window
         .finish()
-        .expect("Failed to configure rate limiter");
+        .ok_or_else(|| std::io::Error::other("Failed to configure rate limiter"))?;
 
     tracing::info!(
         "Rate limiting: {} requests per 60-second window per IP for public endpoints \

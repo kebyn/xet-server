@@ -124,20 +124,20 @@ impl CasClientTrait for CasClient {
 
 impl CasClient {
     /// Create a new CAS client from settings
-    pub fn new(settings: &CasSettings) -> Self {
+    pub fn new(settings: &CasSettings) -> Result<Self, HubError> {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(settings.internal_timeout_seconds))
             .pool_max_idle_per_host(10)
             .pool_idle_timeout(Duration::from_secs(90))
             .tcp_keepalive(Duration::from_secs(60))
             .build()
-            .expect("Failed to build reqwest client");
+            .map_err(|e| HubError::Internal(format!("Failed to build CAS HTTP client: {}", e)))?;
 
-        Self {
+        Ok(Self {
             base_url: settings.base_url.trim_end_matches('/').to_string(),
             max_download_size: settings.max_download_size,
             client,
-        }
+        })
     }
 
     /// Get full blob state via internal API
@@ -367,7 +367,7 @@ mod tests {
             max_download_size: 512 * 1024 * 1024,
             health_check_timeout_seconds: 10,
         };
-        let client = CasClient::new(&settings);
+        let client = CasClient::new(&settings).expect("CAS client should be created");
         assert_eq!(client.base_url, "http://localhost:3000");
     }
 
@@ -379,7 +379,7 @@ mod tests {
             max_download_size: 512 * 1024 * 1024,
             health_check_timeout_seconds: 10,
         };
-        let client = CasClient::new(&settings);
+        let client = CasClient::new(&settings).expect("CAS client should be created");
         assert_eq!(client.base_url, "http://localhost:3000");
     }
 }

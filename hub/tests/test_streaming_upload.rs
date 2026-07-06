@@ -17,7 +17,8 @@ fn setup_lfs_test_env() -> (Arc<XetSigner>, Arc<CasClient>, HubConfig) {
     let mut csprng = OsRng;
     let signing_key = SigningKey::generate(&mut csprng);
     let xet_signer = Arc::new(XetSigner::new(signing_key, "test-key", 3600, 300));
-    let cas_client = Arc::new(CasClient::new(&CasSettings::default()));
+    let cas_client =
+        Arc::new(CasClient::new(&CasSettings::default()).expect("CAS client should be created"));
     let config = HubConfig::default();
     (xet_signer, cas_client, config)
 }
@@ -285,12 +286,15 @@ async fn test_streaming_lfs_upload_success_via_mock_cas() {
     let mut csprng = OsRng;
     let signing_key = SigningKey::generate(&mut csprng);
     let xet_signer = Arc::new(XetSigner::new(signing_key, "test-key", 3600, 300));
-    let cas_client = Arc::new(CasClient::new(&CasSettings {
-        base_url: cas_url,
-        internal_timeout_seconds: 30,
-        max_download_size: 512 * 1024 * 1024,
-        health_check_timeout_seconds: 10,
-    }));
+    let cas_client = Arc::new(
+        CasClient::new(&CasSettings {
+            base_url: cas_url,
+            internal_timeout_seconds: 30,
+            max_download_size: 512 * 1024 * 1024,
+            health_check_timeout_seconds: 10,
+        })
+        .expect("CAS client should be created"),
+    );
     let config = HubConfig::default();
 
     // Send a 1MB payload through streaming
@@ -340,12 +344,15 @@ async fn test_streaming_lfs_upload_hash_mismatch_returns_400() {
     let mut csprng = OsRng;
     let signing_key = SigningKey::generate(&mut csprng);
     let xet_signer = Arc::new(XetSigner::new(signing_key, "test-key", 3600, 300));
-    let cas_client = Arc::new(CasClient::new(&CasSettings {
-        base_url: cas_url,
-        internal_timeout_seconds: 30,
-        max_download_size: 512 * 1024 * 1024,
-        health_check_timeout_seconds: 10,
-    }));
+    let cas_client = Arc::new(
+        CasClient::new(&CasSettings {
+            base_url: cas_url,
+            internal_timeout_seconds: 30,
+            max_download_size: 512 * 1024 * 1024,
+            health_check_timeout_seconds: 10,
+        })
+        .expect("CAS client should be created"),
+    );
     let config = HubConfig::default();
 
     let oid = "a".repeat(64);
@@ -400,12 +407,15 @@ async fn test_streaming_lfs_upload_oversized_returns_413() {
     let mut csprng = OsRng;
     let signing_key = SigningKey::generate(&mut csprng);
     let xet_signer = Arc::new(XetSigner::new(signing_key, "test-key", 3600, 300));
-    let cas_client = Arc::new(CasClient::new(&CasSettings {
-        base_url: cas_url,
-        internal_timeout_seconds: 30,
-        max_download_size: 512 * 1024 * 1024,
-        health_check_timeout_seconds: 10,
-    }));
+    let cas_client = Arc::new(
+        CasClient::new(&CasSettings {
+            base_url: cas_url,
+            internal_timeout_seconds: 30,
+            max_download_size: 512 * 1024 * 1024,
+            health_check_timeout_seconds: 10,
+        })
+        .expect("CAS client should be created"),
+    );
     let config = HubConfig::default();
 
     let content = vec![0u8; 100];
