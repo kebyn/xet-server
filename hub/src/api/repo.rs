@@ -1,9 +1,10 @@
-use super::shared::can_access_repo;
 use crate::auth::extract::{AuthRead, AuthUser, AuthWrite};
 use crate::metadata::{MetadataStore, Repo, RepoType};
+use crate::services::repo::{RepoService, RepoServiceError, RepoServiceResult};
 use actix_web::{HttpResponse, web};
 use chrono::DateTime;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// Request body for creating a repo
 #[derive(Debug, Deserialize, Serialize)]
@@ -11,41 +12,6 @@ pub struct CreateRepoRequest {
     pub name: String,
     #[serde(default)]
     pub private: bool,
-}
-
-// I5 fix: Validate repository name to prevent injection, path traversal, and abuse
-fn validate_repo_name(name: &str) -> Result<(), String> {
-    if name.is_empty() {
-        return Err("Repository name cannot be empty".to_string());
-    }
-    if name.len() > 96 {
-        return Err(format!(
-            "Repository name too long ({} chars, max 96)",
-            name.len()
-        ));
-    }
-    if !name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
-    {
-        return Err(format!(
-            "Repository name '{}' contains invalid characters. Only alphanumeric, '.', '_', '-' are allowed",
-            name
-        ));
-    }
-    if name.starts_with('.') || name.starts_with('-') {
-        return Err(format!(
-            "Repository name '{}' cannot start with '.' or '-'",
-            name
-        ));
-    }
-    if name.ends_with('.') {
-        return Err(format!("Repository name '{}' cannot end with '.'", name));
-    }
-    if name.contains("..") {
-        return Err(format!("Repository name '{}' cannot contain '..'", name));
-    }
-    Ok(())
 }
 
 /// Convert Repo to HF-compatible JSON response
@@ -78,6 +44,40 @@ fn chrono_datetime(timestamp: i64) -> String {
     }
 }
 
+fn repo_service(metadata: &web::Data<Arc<dyn MetadataStore>>) -> RepoService {
+    RepoService::new(metadata.get_ref().clone())
+}
+
+fn error_json(error: String, error_type: &str) -> serde_json::Value {
+    serde_json::json!({
+        "error": error,
+        "error_type": error_type
+    })
+}
+
+fn repo_service_error_response(err: RepoServiceError, not_found_type: &str) -> HttpResponse {
+    match err {
+        RepoServiceError::Validation(msg) => {
+            HttpResponse::BadRequest().json(error_json(msg, "ValidationError"))
+        }
+        RepoServiceError::NotFound(msg) => {
+            HttpResponse::NotFound().json(error_json(msg, not_found_type))
+        }
+        RepoServiceError::Conflict(msg) => {
+            HttpResponse::Conflict().json(error_json(msg, "ConflictError"))
+        }
+        RepoServiceError::Forbidden(msg) => {
+            HttpResponse::Forbidden().json(error_json(msg, "AuthorizationError"))
+        }
+        RepoServiceError::RevisionNotFound(msg) => {
+            HttpResponse::NotFound().json(error_json(msg, "RevisionNotFoundError"))
+        }
+        RepoServiceError::Internal(msg) => {
+            HttpResponse::InternalServerError().json(error_json(msg, "InternalError"))
+        }
+    }
+}
+
 /// Internal helper to create a repo
 async fn create_repo(
     auth: AuthUser<AuthWrite>,
@@ -85,38 +85,13 @@ async fn create_repo(
     repo_type: RepoType,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
-    // Namespace is derived from the user's username
-    let namespace = auth.info.username.clone();
-    let name = body.name.clone();
-    let private = body.private;
-
-    // I5 fix: Validate repo name
-    if let Err(msg) = validate_repo_name(&name) {
-        return HttpResponse::BadRequest().json(serde_json::json!({
-            "error": msg,
-            "error_type": "ValidationError"
-        }));
-    }
-
-    // Create the repo
-    let repo = match metadata
-        .create_repo(&namespace, &name, repo_type, private)
+    let service = repo_service(&metadata);
+    let repo = match service
+        .create_typed_repo(&auth.info.username, &body.name, repo_type, body.private)
         .await
     {
-        Ok(r) => r,
-        Err(e) => {
-            return match e {
-                crate::metadata::MetadataError::RepoAlreadyExists(_) => HttpResponse::Conflict()
-                    .json(serde_json::json!({
-                        "error": e.to_string(),
-                        "error_type": "ConflictError"
-                    })),
-                _ => HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": e.to_string(),
-                    "error_type": "InternalError"
-                })),
-            };
-        }
+        Ok(repo) => repo,
+        Err(err) => return repo_service_error_response(err, "NotFoundError"),
     };
 
     HttpResponse::Ok().json(repo_to_json(&repo))
@@ -140,60 +115,19 @@ pub async fn create_repo_unified(
     body: web::Json<CreateRepoUnifiedRequest>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
-    let namespace = body
-        .organization
-        .clone()
-        .unwrap_or_else(|| auth.info.username.clone());
-
-    // Security: Only allow creating repos in own namespace (no org membership yet)
-    if namespace != auth.info.username {
-        return HttpResponse::Forbidden().json(serde_json::json!({
-            "error": format!("Cannot create repo in namespace '{}': not a member", namespace),
-            "error_type": "AuthorizationError"
-        }));
-    }
-
-    let name = body.name.clone();
-    let private = body.private;
-
-    // I5 fix: Validate repo name
-    if let Err(msg) = validate_repo_name(&name) {
-        return HttpResponse::BadRequest().json(serde_json::json!({
-            "error": msg,
-            "error_type": "ValidationError"
-        }));
-    }
-
-    let repo_type = match body.repo_type.as_deref() {
-        Some("dataset") => RepoType::Dataset,
-        Some("space") => RepoType::Space,
-        _ => RepoType::Model,
-    };
-
-    // If repo already exists, return success (hf upload expects idempotent creation)
-    let repo = match metadata
-        .create_repo(&namespace, &name, repo_type, private)
+    let service = repo_service(&metadata);
+    let repo = match service
+        .create_unified_repo(
+            &auth.info.username,
+            body.organization.as_deref(),
+            &body.name,
+            body.repo_type.as_deref(),
+            body.private,
+        )
         .await
     {
-        Ok(r) => r,
-        Err(crate::metadata::MetadataError::RepoAlreadyExists(_)) => {
-            // Return existing repo info
-            match metadata.get_repo(&namespace, &name, repo_type).await {
-                Ok(r) => r,
-                Err(_) => {
-                    return HttpResponse::Conflict().json(serde_json::json!({
-                        "error": "Repo already exists",
-                        "error_type": "ConflictError"
-                    }));
-                }
-            }
-        }
-        Err(e) => {
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": e.to_string(),
-                "error_type": "InternalError"
-            }));
-        }
+        Ok(repo) => repo,
+        Err(err) => return repo_service_error_response(err, "NotFoundError"),
     };
 
     HttpResponse::Ok().json(repo_to_json(&repo))
@@ -207,33 +141,14 @@ async fn get_repo_info(
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
     let (namespace, repo_name) = path.into_inner();
-
-    // Get the repo
-    let repo = match metadata.get_repo(&namespace, &repo_name, repo_type).await {
-        Ok(r) => r,
-        Err(e) => {
-            return match e {
-                crate::metadata::MetadataError::RepoNotFound(_) => {
-                    HttpResponse::NotFound().json(serde_json::json!({
-                        "error": e.to_string(),
-                        "error_type": "NotFoundError"
-                    }))
-                }
-                _ => HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": e.to_string(),
-                    "error_type": "InternalError"
-                })),
-            };
-        }
+    let service = repo_service(&metadata);
+    let repo = match service
+        .get_repo(&auth.info.username, &namespace, &repo_name, repo_type)
+        .await
+    {
+        Ok(repo) => repo,
+        Err(err) => return repo_service_error_response(err, "NotFoundError"),
     };
-
-    // C-AUTH: 私有 repo 仅 owner 可读元数据。404 不泄露存在性。
-    if !can_access_repo(&repo, &auth.info.username) {
-        return HttpResponse::NotFound().json(serde_json::json!({
-            "error": "Repository not found",
-            "error_type": "NotFoundError"
-        }));
-    }
 
     HttpResponse::Ok().json(repo_to_json(&repo))
 }
@@ -246,43 +161,15 @@ async fn delete_repo_info(
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
     let (namespace, repo_name) = path.into_inner();
-
-    // Verify the repo exists and user owns it (namespace matches username)
-    let repo = match metadata.get_repo(&namespace, &repo_name, repo_type).await {
-        Ok(r) => r,
-        Err(e) => {
-            return match e {
-                crate::metadata::MetadataError::RepoNotFound(_) => {
-                    HttpResponse::NotFound().json(serde_json::json!({
-                        "error": e.to_string(),
-                        "error_type": "NotFoundError"
-                    }))
-                }
-                _ => HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": e.to_string(),
-                    "error_type": "InternalError"
-                })),
-            };
-        }
-    };
-
-    // Check ownership: namespace should match username
-    if repo.namespace != auth.info.username {
-        return HttpResponse::Forbidden().json(serde_json::json!({
-            "error": "You do not have permission to delete this repository",
-            "error_type": "AuthorizationError"
-        }));
-    }
-
-    // Delete the repo
-    match metadata.delete_repo(repo.id).await {
+    let service = repo_service(&metadata);
+    match service
+        .delete_repo(&auth.info.username, &namespace, &repo_name, repo_type)
+        .await
+    {
         Ok(_) => HttpResponse::Ok().json(serde_json::json!({
             "message": "Repository deleted successfully"
         })),
-        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
-            "error": e.to_string(),
-            "error_type": "InternalError"
-        })),
+        Err(err) => repo_service_error_response(err, "NotFoundError"),
     }
 }
 
@@ -394,67 +281,50 @@ async fn get_revision_handler(
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
     let (namespace, repo_name, revision) = path.into_inner();
-
-    // Check repo exists
-    let repo = match metadata.get_repo(&namespace, &repo_name, repo_type).await {
-        Ok(r) => r,
-        Err(_) => {
-            return HttpResponse::NotFound().json(serde_json::json!({
-                "error": "Repository not found",
-                "error_type": "RepositoryNotFoundError"
-            }));
+    let service = repo_service(&metadata);
+    match service
+        .get_revision(
+            &auth.info.username,
+            &namespace,
+            &repo_name,
+            &revision,
+            repo_type,
+        )
+        .await
+    {
+        Ok(RepoServiceResult::Revision { repo, revision }) => {
+            HttpResponse::Ok().json(serde_json::json!({
+                "id": format!("{}/{}", repo.namespace, repo.name),
+                "sha": revision.commit_id,
+                "title": revision.message,
+                "author": revision.author,
+                "createdAt": chrono_datetime(revision.created_at),
+                "siblings": [],
+                "tags": [],
+                "private": repo.private,
+                "downloads": 0,
+                "likes": 0,
+                "shaRemote": null
+            }))
         }
-    };
-
-    // C-AUTH: 私有 repo 仅 owner 可读 commit 元数据。404 不泄露存在性。
-    if !can_access_repo(&repo, &auth.info.username) {
-        return HttpResponse::NotFound().json(serde_json::json!({
-            "error": "Repository not found",
-            "error_type": "RepositoryNotFoundError"
-        }));
-    }
-
-    // Try to get the revision
-    match metadata.get_revision(repo.id, &revision).await {
-        Ok(rev) => HttpResponse::Ok().json(serde_json::json!({
-            "id": format!("{}/{}", namespace, repo_name),
-            "sha": rev.commit_id,
-            "title": rev.message,
-            "author": rev.author,
-            "createdAt": chrono_datetime(rev.created_at),
-            "siblings": [],
-            "tags": [],
-            "private": repo.private,
-            "downloads": 0,
-            "likes": 0,
-            "shaRemote": null
-        })),
-        Err(_) => {
-            if revision == "main" {
-                // Get the actual HEAD commit hash; null if repo has no commits
-                let head_sha = metadata.get_head(repo.id).await.ok().flatten();
-                let is_empty = head_sha.is_none();
-                HttpResponse::Ok().json(serde_json::json!({
-                    "id": format!("{}/{}", namespace, repo_name),
-                    "sha": head_sha,
-                    "title": if is_empty { "Empty repository" } else { "Initial commit" },
-                    "author": "system",
-                    "createdAt": chrono_datetime(repo.created_at),
-                    "siblings": [],
-                    "tags": [],
-                    "private": repo.private,
-                    "downloads": 0,
-                    "likes": 0,
-                    "shaRemote": null,
-                    "empty": is_empty
-                }))
-            } else {
-                HttpResponse::NotFound().json(serde_json::json!({
-                    "error": format!("Revision not found: {}", revision),
-                    "error_type": "RevisionNotFoundError"
-                }))
-            }
+        Ok(RepoServiceResult::EmptyMainRevision { repo, head_sha }) => {
+            let is_empty = head_sha.is_none();
+            HttpResponse::Ok().json(serde_json::json!({
+                "id": format!("{}/{}", repo.namespace, repo.name),
+                "sha": head_sha,
+                "title": if is_empty { "Empty repository" } else { "Initial commit" },
+                "author": "system",
+                "createdAt": chrono_datetime(repo.created_at),
+                "siblings": [],
+                "tags": [],
+                "private": repo.private,
+                "downloads": 0,
+                "likes": 0,
+                "shaRemote": null,
+                "empty": is_empty
+            }))
         }
+        Err(err) => repo_service_error_response(err, "RepositoryNotFoundError"),
     }
 }
 
