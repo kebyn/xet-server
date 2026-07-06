@@ -4,6 +4,8 @@
 **Date:** 2026-06-10  
 **Implemented:** 2026-06-12  
 
+> **Superseded auth note:** This historical plan predates the current Hub -> CAS token boundary. Any steps where Hub uses an `internal_xxx` token for CAS public object endpoints (`/objects/batch` or `/lfs/objects/{oid}`), or where Hub LFS object endpoints validate `hf_xxx` directly, are superseded. Current code uses short-lived `xet_xxx` user tokens for Hub -> CAS public batch/commit-inline/resolve-inline calls, forwards validated `proxy_xxx` tokens for Hub -> CAS LFS object proxy calls, and reserves `internal_xxx` for `/internal/*` service endpoints.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build a new Rust HTTP service implementing HuggingFace Hub REST API compatibility, enabling `hf upload/download` and `git lfs push/pull` against a private deployment backed by the existing CAS (xet-server).

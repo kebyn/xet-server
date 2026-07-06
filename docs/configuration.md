@@ -85,14 +85,14 @@ export XET_S3_ENDPOINT=https://s3.amazonaws.com
 |---------|------|--------|------|
 | `CAS_PUBLIC_KEY_PATH` | Ed25519 公钥路径 | `/etc/xet/public-key.pem` | 是 |
 | `CAS_TRUSTED_KIDS` | 受信任的密钥 ID 列表 | `hub-key-1` | 是 |
-| `CAS_PRIVATE_KEY_PATH` | Ed25519 私钥路径，用于 Batch API 签发 proxy token | 空（可选） | 否* |
+| `CAS_PRIVATE_KEY_PATH` | Ed25519 私钥路径，用于 Batch API 签发 proxy token | 空（兼容模式） | 否* |
 | `CAS_SIGNING_KID` | Proxy token 签名使用的 Key ID | 空（默认用 `CAS_TRUSTED_KIDS` 第一个） | 否 |
 
 **说明**：
 - `CAS_PUBLIC_KEY_PATH` 指向 Hub 的公钥文件（PEM 格式）
 - `CAS_TRUSTED_KIDS` 是逗号分隔的密钥 ID 列表，用于密钥轮换
 - 默认 trusted kid 为 `hub-key-1`，应与 Hub 的 `HUB_KID` 配置保持一致
-- **`CAS_PRIVATE_KEY_PATH`**：生产环境强烈建议配置。设置后，Batch API 会签发短期 proxy token（5分钟有效期），避免用户长期 token 泄露。未配置时，Batch API 会回退到直接传递用户长期 token（有安全风险）
+- **`CAS_PRIVATE_KEY_PATH`**：生产环境安全基线建议配置。设置后，Batch API 会签发短期 proxy token（5分钟有效期），绑定单个 OID 和 operation。未配置时，Batch API 会兼容回退到直接传递调用者的 `xet_xxx` token；该 token 的权限和 TTL 大于单个 LFS action，可能出现在客户端缓存、代理或日志中，泄露后的影响范围更大。
 
 **示例**：
 ```bash
