@@ -1,8 +1,31 @@
-use super::shared::{can_access_repo, resolve_revision};
 use crate::auth::extract::{AuthRead, AuthUser};
 use crate::config::HubConfig;
 use crate::metadata::{MetadataStore, RepoType};
+use crate::services::resolve::{ResolveFileRequest, ResolveService, ResolveServiceError};
 use actix_web::{HttpRequest, HttpResponse, web};
+use std::sync::Arc;
+
+fn resolve_service(metadata: &web::Data<Arc<dyn MetadataStore>>) -> ResolveService {
+    ResolveService::new(metadata.get_ref().clone())
+}
+
+fn error_json(error: String, error_type: &str) -> serde_json::Value {
+    serde_json::json!({
+        "error": error,
+        "error_type": error_type
+    })
+}
+
+fn resolve_service_error_response(err: ResolveServiceError) -> HttpResponse {
+    match err {
+        ResolveServiceError::NotFound(msg) => {
+            HttpResponse::NotFound().json(error_json(msg, "NotFoundError"))
+        }
+        ResolveServiceError::Internal(msg) => {
+            HttpResponse::InternalServerError().json(error_json(msg, "InternalError"))
+        }
+    }
+}
 
 /// Internal helper for file resolve/download
 async fn handle_resolve(
@@ -14,63 +37,23 @@ async fn handle_resolve(
     config: web::Data<HubConfig>,
 ) -> HttpResponse {
     let (namespace, repo_name, revision, file_path) = path.into_inner();
-
-    // Get the repo
-    let repo = match metadata.get_repo(&namespace, &repo_name, repo_type).await {
-        Ok(r) => r,
-        Err(e) => {
-            return match e {
-                crate::metadata::MetadataError::RepoNotFound(_) => {
-                    HttpResponse::NotFound().json(serde_json::json!({
-                        "error": e.to_string(),
-                        "error_type": "NotFoundError"
-                    }))
-                }
-                _ => HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": e.to_string(),
-                    "error_type": "InternalError"
-                })),
-            };
-        }
+    let service = resolve_service(&metadata);
+    let resolved = match service
+        .resolve_file(ResolveFileRequest {
+            username: &auth.info.username,
+            namespace: &namespace,
+            repo_name: &repo_name,
+            repo_type,
+            revision: &revision,
+            file_path: &file_path,
+        })
+        .await
+    {
+        Ok(resolved) => resolved,
+        Err(err) => return resolve_service_error_response(err),
     };
-
-    // C-AUTH-1: 私有 repo 仅 owner 可访问。返回 404 而非 403,避免泄露私有 repo 的存在性。
-    if !can_access_repo(&repo, &auth.info.username) {
-        return HttpResponse::NotFound().json(serde_json::json!({
-            "error": "Repository not found",
-            "error_type": "NotFoundError"
-        }));
-    }
-
-    // Resolve revision
-    let commit_id = match resolve_revision(metadata.as_ref().as_ref(), repo.id, &revision).await {
-        Ok(c) => c,
-        Err(e) => {
-            return HttpResponse::NotFound().json(serde_json::json!({
-                "error": e,
-                "error_type": "NotFoundError"
-            }));
-        }
-    };
-
-    // Resolve file
-    let file_entry = match metadata.resolve_file(repo.id, &commit_id, &file_path).await {
-        Ok(f) => f,
-        Err(e) => {
-            return match e {
-                crate::metadata::MetadataError::FileNotFound(_) => {
-                    HttpResponse::NotFound().json(serde_json::json!({
-                        "error": e.to_string(),
-                        "error_type": "NotFoundError"
-                    }))
-                }
-                _ => HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": e.to_string(),
-                    "error_type": "InternalError"
-                })),
-            };
-        }
-    };
+    let commit_id = resolved.commit_id;
+    let file_entry = resolved.file_entry;
 
     // I8: Build download URL using Hub's URL (not CAS internal URL)
     // Clients go through Hub, which proxies to CAS
