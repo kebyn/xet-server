@@ -6,6 +6,8 @@
 use sqlx::FromRow;
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 
+use crate::migrations::run_hub_migrations;
+
 /// Token information returned after validation
 #[derive(Debug, Clone)]
 pub struct TokenInfo {
@@ -106,45 +108,7 @@ impl TokenStore {
     }
 
     async fn init_tables(pool: &SqlitePool) -> Result<(), sqlx::Error> {
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS users (
-                user_id TEXT PRIMARY KEY,
-                username TEXT NOT NULL UNIQUE,
-                created_at INTEGER NOT NULL
-            )",
-        )
-        .execute(pool)
-        .await?;
-
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS tokens (
-                token_hash TEXT PRIMARY KEY,
-                user_id TEXT NOT NULL,
-                name TEXT NOT NULL,
-                scope TEXT NOT NULL,
-                created_at INTEGER NOT NULL,
-                expires_at INTEGER,
-                revoked_at INTEGER,
-                FOREIGN KEY (user_id) REFERENCES users(user_id)
-            );
-            CREATE INDEX IF NOT EXISTS idx_tokens_user ON tokens(user_id);",
-        )
-        .execute(pool)
-        .await?;
-
-        // C1 fix: Create config table for persisting critical configuration
-        // This ensures hash salt survives restarts even without env var
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS _config (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL,
-                created_at INTEGER NOT NULL
-            )",
-        )
-        .execute(pool)
-        .await?;
-
-        Ok(())
+        run_hub_migrations(pool).await
     }
 
     /// Get or generate persistent hash salt from database.

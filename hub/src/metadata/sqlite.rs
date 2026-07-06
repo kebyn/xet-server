@@ -8,60 +8,6 @@ use async_trait::async_trait;
 use sqlx::Row;
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 
-// Schema version tracking for future migrations
-// Current version: 1 (initial schema)
-const SCHEMA_VERSION: i64 = 1;
-
-// I15: Extract schema to constant to eliminate duplication
-const SCHEMA: &str = r#"
-CREATE TABLE IF NOT EXISTS schema_version (
-    version INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS repos (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    namespace TEXT NOT NULL,
-    repo_type TEXT NOT NULL,
-    sha TEXT,
-    private INTEGER NOT NULL DEFAULT 0,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL,
-    UNIQUE(namespace, name, repo_type)
-);
-
-CREATE TABLE IF NOT EXISTS revisions (
-    commit_id TEXT PRIMARY KEY,
-    repo_id INTEGER NOT NULL,
-    parent TEXT,
-    message TEXT NOT NULL,
-    author TEXT NOT NULL,
-    created_at INTEGER NOT NULL,
-    FOREIGN KEY (repo_id) REFERENCES repos(id)
-);
-
-CREATE TABLE IF NOT EXISTS heads (
-    repo_id INTEGER PRIMARY KEY,
-    commit_id TEXT NOT NULL,
-    FOREIGN KEY (repo_id) REFERENCES repos(id),
-    FOREIGN KEY (commit_id) REFERENCES revisions(commit_id)
-);
-
-CREATE TABLE IF NOT EXISTS file_tree (
-    path TEXT NOT NULL,
-    repo_id INTEGER NOT NULL,
-    commit_id TEXT NOT NULL,
-    size INTEGER NOT NULL,
-    cas_hash TEXT NOT NULL,
-    is_lfs INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (path, repo_id, commit_id),
-    FOREIGN KEY (repo_id) REFERENCES repos(id),
-    FOREIGN KEY (commit_id) REFERENCES revisions(commit_id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_file_tree_prefix ON file_tree(repo_id, commit_id, path);
-"#;
-
 /// Async SQLite-based metadata store using sqlx connection pool
 ///
 /// Uses SqlitePool for true async operations with connection pooling.
@@ -253,28 +199,9 @@ impl SqliteMetadataStore {
     /// Note: PRAGMA settings (journal_mode, foreign_keys) are set in after_connect callback
     /// to ensure they persist across connection pool recycling (S1 fix).
     async fn init_pool(pool: &SqlitePool) -> Result<(), MetadataError> {
-        // Create tables
-        sqlx::query(SCHEMA)
-            .execute(pool)
+        crate::migrations::run_hub_migrations(pool)
             .await
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
-
-        // Initialize schema version if not present
-        let version_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM schema_version")
-            .fetch_optional(pool)
-            .await
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?
-            .unwrap_or((0,));
-
-        if version_count.0 == 0 {
-            sqlx::query("INSERT INTO schema_version (version) VALUES (?1)")
-                .bind(SCHEMA_VERSION)
-                .execute(pool)
-                .await
-                .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
-        }
-
-        Ok(())
+            .map_err(|e| MetadataError::DatabaseError(e.to_string()))
     }
 }
 
