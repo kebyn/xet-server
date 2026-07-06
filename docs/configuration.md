@@ -224,11 +224,17 @@ export HUB_TOKEN_TTL_SECONDS=7200  # 2 小时
 
 **说明**：
 - 元数据数据库存储仓库、版本、文件树等信息
+- Hub 启动时会运行内置 SQLite migration runner：新库会初始化当前 schema；已有 v1 schema 会补写 `schema_version`；未来版本或无法识别的已有 schema 会拒绝启动
+- Hub server 会自动为连接设置 `PRAGMA journal_mode=WAL`、`PRAGMA foreign_keys=ON` 和 `PRAGMA busy_timeout=5000`
+- `HUB_DB_POOL_SIZE` 是 TokenStore 和 MetadataStore 共享连接池的总连接数；SQLite 仍只有一个并发写入者，调大连接池主要提升读并发和等待写锁时的排队能力
+- 当前实现只提供 SQLite backend。生产部署建议使用本地 SSD 或具备正确 SQLite 文件锁语义的持久卷；不要把普通对象存储、NFS 类弱锁语义路径或多主共享写入当作数据库后端
+- 多 Hub 实例部署仍属于受限模式：所有实例必须连接同一个 SQLite 文件、使用相同 `HUB_TOKEN_HASH_SALT` 和 Hub signing key，并接受 SQLite 单写者限制；项目当前没有内置 Postgres/MySQL 等分布式数据库 backend
 - 建议使用 SSD 存储以获得最佳性能
 
 **示例**：
 ```bash
 export HUB_SQLITE_PATH=/var/lib/xet/hub-metadata.db
+export HUB_DB_POOL_SIZE=5
 ```
 
 ### CAS 客户端设置
@@ -648,12 +654,13 @@ aws s3 ls s3://my-xet-bucket --region us-east-1
 **排查步骤**：
 1. 检查是否有多个进程同时写入
 2. 验证数据库文件权限
-3. 考虑使用 WAL 模式
+3. 检查数据库所在文件系统是否支持 SQLite 需要的文件锁语义
+4. 降低并发写入或调整 `HUB_DB_POOL_SIZE`，但注意 SQLite 仍只有一个并发写入者
 
 **SQLite WAL 模式**（Hub 元数据数据库）：
 ```bash
-# 启用 WAL 模式（提高 Hub 元数据数据库并发性能）
-sqlite3 /var/lib/xet/hub-metadata.db "PRAGMA journal_mode=WAL;"
+# Hub server 会在连接时自动启用 WAL；可用以下命令确认当前模式
+sqlite3 /var/lib/xet/hub-metadata.db "PRAGMA journal_mode;"
 ```
 
 ---
