@@ -3,149 +3,20 @@ use crate::auth::xet_signer::XetSigner;
 use crate::cas_client::CasClientTrait;
 use crate::metadata::{FileEntry, MetadataStore, RepoType, Revision};
 use actix_web::{HttpResponse, web};
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Maximum size for inline file content (10MB)
-const MAX_INLINE_SIZE: usize = 10 * 1024 * 1024;
+mod content;
+mod id;
+mod types;
+mod validation;
 
-/// NDJSON commit operations
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(tag = "key", content = "value")]
-#[serde(rename_all = "camelCase")]
-pub enum CommitOperation {
-    Header(CommitHeader),
-    File(FileOperation),
-    LfsFile(LfsFileOperation),
-    DeletedEntry(DeletedEntryOperation),
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct CommitHeader {
-    pub summary: String,
-    #[serde(default, rename = "parentRevision")]
-    pub parent_revision: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct FileOperation {
-    pub path: String,
-    pub content: String,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct LfsFileOperation {
-    pub path: String,
-    pub oid: String,
-    pub size: u64,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct DeletedEntryOperation {
-    pub path: String,
-}
-
-/// Commit response
-#[derive(Debug, Serialize, Deserialize)]
-pub struct CommitResponse {
-    #[serde(rename = "commitOid")]
-    pub commit_oid: String,
-    #[serde(rename = "commitUrl")]
-    pub commit_url: String,
-    #[serde(rename = "prUrl")]
-    pub pr_url: Option<String>,
-    #[serde(rename = "prNum")]
-    pub pr_num: Option<u64>,
-}
-
-/// Get current Unix timestamp
-fn now_timestamp() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
-}
-
-/// Generate a commit ID from repo_id, parent, message, timestamp, and UUID nonce
-fn generate_commit_id(repo_id: i64, parent: Option<&str>, message: &str, timestamp: i64) -> String {
-    let nonce = uuid::Uuid::new_v4().to_string();
-    let input = format!(
-        "{}:{}:{}:{}:{}",
-        repo_id,
-        parent.unwrap_or(""),
-        message,
-        timestamp,
-        nonce
-    );
-    hex::encode(Sha256::digest(input.as_bytes()))
-}
-
-/// Decode base64 content (handles "base64:" prefix or raw base64)
-fn decode_base64_content(content: &str) -> Result<Vec<u8>, String> {
-    let content_to_decode = content.strip_prefix("base64:").unwrap_or(content);
-    use base64::{Engine as _, engine::general_purpose::STANDARD};
-    STANDARD
-        .decode(content_to_decode)
-        .map_err(|e| format!("Base64 decode error: {}", e))
-}
-
-/// I1 fix: Validate file path to prevent path traversal and other injection attacks.
-///
-/// Rejects:
-/// - Empty paths
-/// - Absolute paths (starting with / or \)
-/// - Paths containing ".." components (path traversal)
-/// - Paths with null bytes
-/// - Paths starting with "/" or "\"
-///
-/// Returns Ok(()) if the path is valid, Err(message) if invalid.
-fn validate_file_path(path: &str) -> Result<(), String> {
-    // Reject empty paths
-    if path.is_empty() {
-        return Err("File path cannot be empty".to_string());
-    }
-
-    // Reject null bytes
-    if path.contains('\0') {
-        return Err("File path cannot contain null bytes".to_string());
-    }
-
-    // Reject absolute paths
-    if path.starts_with('/') || path.starts_with('\\') {
-        return Err(format!("File path cannot be absolute: {}", path));
-    }
-
-    // Reject path traversal: check each component for ".."
-    // Split on both '/' and '\\' to handle Windows-style separators.
-    for component in path.split(['/', '\\']) {
-        if component == ".." {
-            return Err(format!("File path contains path traversal: {}", path));
-        }
-        // Reject empty components (double slashes) except trailing slash
-        // Actually, just reject paths with "//" or "\\\\" anywhere
-    }
-
-    // Check for double slashes (empty components)
-    if path.contains("//") || path.contains("\\\\") {
-        return Err(format!("File path contains empty components: {}", path));
-    }
-
-    // Reject Windows reserved names (defense-in-depth)
-    let first_component = path.split(['/', '\\']).next().unwrap_or("");
-    let reserved = [
-        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
-        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
-    ];
-    if reserved
-        .iter()
-        .any(|r| r.eq_ignore_ascii_case(first_component))
-    {
-        return Err(format!("File path uses reserved name: {}", first_component));
-    }
-
-    Ok(())
-}
+use content::decode_base64_content;
+use id::{generate_commit_id, now_timestamp};
+use types::{
+    CommitHeader, CommitOperation, CommitResponse, DeletedEntryOperation, FileOperation,
+    LfsFileOperation, MAX_INLINE_SIZE,
+};
+use validation::validate_file_path;
 
 /// Internal helper for commit handling
 ///
