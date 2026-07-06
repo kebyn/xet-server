@@ -173,7 +173,7 @@ async fn handle_commit(
         }));
     }
 
-    let (namespace, repo_name, _revision) = path.into_inner();
+    let (namespace, repo_name, revision) = path.into_inner();
 
     // C4 fix: Verify the authenticated user has write access to the target namespace.
     // Users can write to their own namespace. Organization/team namespace support
@@ -302,7 +302,7 @@ async fn handle_commit(
         }
     }
 
-    // Generate internal token for CAS operations
+    // Generate internal token for CAS /internal/* state checks.
     let (internal_token, _) = match signer.sign_internal() {
         Ok(result) => result,
         Err(e) => {
@@ -317,6 +317,26 @@ async fn handle_commit(
     let timestamp = now_timestamp();
     let commit_id =
         generate_commit_id(repo.id, current_head.as_deref(), &header.summary, timestamp);
+
+    let cas_write_token = if files.is_empty() {
+        String::new()
+    } else {
+        match signer.sign(
+            &auth.info.username,
+            "write",
+            &format!("{}/{}", namespace, repo_name),
+            &repo_type.to_string(),
+            &revision,
+        ) {
+            Ok((token, _)) => token,
+            Err(e) => {
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("Failed to sign CAS write token: {}", e),
+                    "error_type": "InternalError"
+                }));
+            }
+        }
+    };
 
     // Build file entries
     let mut file_entries: Vec<FileEntry> = Vec::new();
@@ -355,7 +375,7 @@ async fn handle_commit(
 
         // Store inline file content in CAS (C1)
         if let Err(e) = cas_client
-            .proxy_lfs_upload(&oid, bytes::Bytes::from(decoded_content), &internal_token)
+            .proxy_lfs_upload(&oid, bytes::Bytes::from(decoded_content), &cas_write_token)
             .await
         {
             tracing::error!(
@@ -593,6 +613,8 @@ mod tests {
         existing_oids: std::collections::HashSet<String>,
         /// Whether uploads should succeed
         allow_uploads: bool,
+        /// Optional prefix required for upload tokens.
+        required_upload_token_prefix: Option<&'static str>,
     }
 
     impl MockCasClient {
@@ -600,7 +622,13 @@ mod tests {
             Self {
                 existing_oids: std::collections::HashSet::new(),
                 allow_uploads: true,
+                required_upload_token_prefix: None,
             }
+        }
+
+        fn requiring_upload_token_prefix(mut self, prefix: &'static str) -> Self {
+            self.required_upload_token_prefix = Some(prefix);
+            self
         }
     }
 
@@ -623,8 +651,17 @@ mod tests {
             &self,
             _oid: &str,
             _data: bytes::Bytes,
-            _token: &str,
+            token: &str,
         ) -> Result<(), CasUploadError> {
+            if let Some(prefix) = self.required_upload_token_prefix
+                && !token.starts_with(prefix)
+            {
+                return Err(CasUploadError {
+                    status: 401,
+                    message: format!("expected upload token prefix {prefix}"),
+                });
+            }
+
             if self.allow_uploads {
                 Ok(())
             } else {
@@ -656,7 +693,7 @@ mod tests {
     // Test commit with inline file using mock CAS
     #[actix_web::test]
     async fn test_commit_with_inline_file() {
-        let mock_cas = MockCasClient::new();
+        let mock_cas = MockCasClient::new().requiring_upload_token_prefix("xet_");
         let (token_store, metadata, cas_client, signer) = setup_test_env_with_mock(mock_cas).await;
         let token = token_store
             .create_token("testuser", "test-token", "write")

@@ -479,20 +479,22 @@ pub async fn lfs_batch(
         "Processing LFS batch request"
     );
 
-    // Generate internal token for CAS
-    // I2 fix: Handle signing errors - return HTTP 500 if we can't create internal token
-    let (internal_token, _) = match xet_signer.sign_internal() {
-        Ok(result) => result,
-        Err(e) => {
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Failed to sign internal token: {}", e),
-                "error_type": "InternalError"
-            }));
-        }
-    };
+    // CAS /objects/batch is a public LFS endpoint, not an /internal/* endpoint.
+    // Forward with a short-lived user token matching the operation scope so CAS
+    // can apply the same read/write guard as direct clients.
+    let (cas_batch_token, _) =
+        match xet_signer.sign(&token_info.username, required_scope, "", "", "") {
+            Ok(result) => result,
+            Err(e) => {
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("Failed to sign CAS batch token: {}", e),
+                    "error_type": "InternalError"
+                }));
+            }
+        };
 
     // Forward to CAS
-    let mut response = match cas_client.proxy_batch(&body, &internal_token).await {
+    let mut response = match cas_client.proxy_batch(&body, &cas_batch_token).await {
         Ok(r) => r,
         Err(e) => {
             return HttpResponse::BadGateway().json(serde_json::json!({
@@ -690,22 +692,12 @@ pub async fn lfs_upload(
         }));
     }
 
-    // Stream temp file to CAS
-    let (internal_token, _) = match xet_signer.sign_internal() {
-        Ok(result) => result,
-        Err(e) => {
-            // Clean up temp file
-            let _ = tokio::fs::remove_file(&temp_path).await;
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Failed to sign internal token: {}", e),
-                "error_type": "InternalError"
-            }));
-        }
-    };
+    // CAS /lfs/objects/{oid} accepts either a regular user token or the same
+    // OID/operation-bound proxy token that Hub just validated.
     let file_size = total_bytes;
 
     let result = cas_client
-        .proxy_lfs_upload_from_path(&oid, &temp_path, file_size, &internal_token)
+        .proxy_lfs_upload_from_path(&oid, &temp_path, file_size, &token)
         .await;
 
     // Clean up temp file
@@ -761,23 +753,10 @@ pub async fn lfs_download(
         }));
     }
 
-    // Generate internal token for CAS
-    // I2 fix: Handle signing errors - return HTTP 500 if we can't create internal token
-    let (internal_token, _) = match xet_signer.sign_internal() {
-        Ok(result) => result,
-        Err(e) => {
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Failed to sign internal token: {}", e),
-                "error_type": "InternalError"
-            }));
-        }
-    };
-
-    // C3 fix: Use streaming download with runtime size enforcement
-    match cas_client
-        .proxy_lfs_download_streaming(&oid, &internal_token)
-        .await
-    {
+    // C3 fix: Use streaming download with runtime size enforcement.
+    // CAS /lfs/objects/{oid} accepts the OID/operation-bound proxy token that
+    // Hub just validated; do not use an internal token for this public endpoint.
+    match cas_client.proxy_lfs_download_streaming(&oid, &token).await {
         Ok((content_length, resp)) => {
             // Convert reqwest response body to actix-web streaming body
             let stream = resp.bytes_stream();

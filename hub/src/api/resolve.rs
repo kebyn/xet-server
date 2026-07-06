@@ -124,11 +124,18 @@ async fn handle_resolve(
         let cas_client = req.app_data::<web::Data<std::sync::Arc<crate::cas_client::CasClient>>>();
 
         if let (Some(signer), Some(cas)) = (xet_signer, cas_client) {
-            // I2 fix: Handle signing errors - if we can't sign internal token, skip CAS fetch
-            match signer.sign_internal() {
-                Ok((internal_token, _)) => {
+            // CAS /lfs/objects/{oid} is a public object endpoint. Use a short-lived
+            // user read token for inline fetches, not an internal service token.
+            match signer.sign(
+                auth.username(),
+                "read",
+                &format!("{}/{}", namespace, repo_name),
+                &repo_type.to_string(),
+                &revision,
+            ) {
+                Ok((cas_read_token, _)) => {
                     match cas
-                        .proxy_lfs_download(&file_entry.cas_hash, &internal_token)
+                        .proxy_lfs_download(&file_entry.cas_hash, &cas_read_token)
                         .await
                     {
                         Ok(data) => {
@@ -157,7 +164,7 @@ async fn handle_resolve(
                     }
                 }
                 Err(e) => {
-                    tracing::error!("Failed to sign internal token for CAS download: {}", e);
+                    tracing::error!("Failed to sign CAS read token for inline fetch: {}", e);
                     // Fall through to redirect
                 }
             }
