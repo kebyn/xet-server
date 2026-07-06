@@ -65,6 +65,12 @@ Hub API 提供 HuggingFace Hub 兼容的 REST API，支持使用 `hf` CLI 工具
 | `/objects/batch` | POST | LFS 批量操作代理 |
 | `/lfs/objects/{oid}` | GET/PUT | LFS 对象下载/上传代理 |
 
+### 系统
+| 端点 | 方法 | 描述 |
+|------|------|------|
+| `/health` | GET | 存活检查 |
+| `/ready` | GET | 就绪检查（SQLite + CAS） |
+
 LFS 对象代理当前采用 content-hash capability 模型：`/objects/batch` 只按 Hub token 的 `read`/`write` scope 授权，并为请求体中的 OID 签发短期 `proxy_xxx` action token；`/lfs/objects/{oid}` 只校验该 proxy token 是否绑定同一个 OID 和 operation，不校验 OID 是否属于 URL 中的 repo。Repo 私有性由 tree/resolve/repo metadata API 保护，这些 API 会在返回 OID 前做 repo 权限校验。
 
 ---
@@ -997,6 +1003,28 @@ hf repo info my-org/my-model
 **示例**：
 ```bash
 curl "http://localhost:8080/health"
+```
+
+### 就绪检查
+
+**端点**：`GET /ready`
+
+**响应示例**：
+```json
+{
+  "status": "ready",
+  "checks": {
+    "database": "ok",
+    "cas": "ok"
+  }
+}
+```
+
+`/ready` 用于 readiness probe。它会检查 SQLite 可查询，并调用 CAS `/ready` 确认下游存储服务可接收流量。任一检查失败时返回 `503`，响应中的 `status` 为 `not_ready`。
+
+**示例**：
+```bash
+curl "http://localhost:8080/ready"
 ```
 
 ---
