@@ -4,9 +4,10 @@
 //! Migrated from rusqlite to prevent blocking the async runtime.
 
 use super::{FileEntry, MetadataError, MetadataStore, Repo, RepoType, Revision};
+use crate::sqlite_pool::{connect_hub_sqlite_pool, connect_in_memory_hub_sqlite_pool};
 use async_trait::async_trait;
 use sqlx::Row;
-use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
+use sqlx::sqlite::SqlitePool;
 
 /// Async SQLite-based metadata store using sqlx connection pool
 ///
@@ -130,29 +131,7 @@ fn escape_like_pattern(input: &str) -> String {
 impl SqliteMetadataStore {
     /// Create a new SQLite metadata store with connection pool
     pub async fn new(path: &str, pool_size: u32) -> Result<Self, MetadataError> {
-        // S1 FIX: Use after_connect to ensure PRAGMA settings persist across connection pool recycling.
-        // PRAGMA settings are connection-level, not database-level, so they must be set on each new connection.
-        let pool = SqlitePoolOptions::new()
-            .max_connections(pool_size)
-            .min_connections(1)
-            .acquire_timeout(std::time::Duration::from_secs(5))
-            .after_connect(|conn, _| {
-                Box::pin(async move {
-                    sqlx::query("PRAGMA journal_mode = WAL;")
-                        .execute(&mut *conn)
-                        .await?;
-                    sqlx::query("PRAGMA foreign_keys = ON;")
-                        .execute(&mut *conn)
-                        .await?;
-                    // M4 fix: Wait up to 5 seconds for lock release instead of failing immediately
-                    // with SQLITE_BUSY. Critical for concurrent write workloads.
-                    sqlx::query("PRAGMA busy_timeout = 5000;")
-                        .execute(&mut *conn)
-                        .await?;
-                    Ok(())
-                })
-            })
-            .connect(path)
+        let pool = connect_hub_sqlite_pool(path, pool_size)
             .await
             .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
@@ -173,20 +152,8 @@ impl SqliteMetadataStore {
     pub async fn in_memory() -> Result<Self, MetadataError> {
         // Note: SQLite in-memory databases are per-connection. With a pool of
         // multiple connections, each would see its own empty database. We use
-        // max_connections(1) with file::memory:?cache=shared to ensure all
-        // pool connections share the same in-memory database.
-        // S1 FIX: Use after_connect to ensure PRAGMA settings persist.
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .after_connect(|conn, _| {
-                Box::pin(async move {
-                    sqlx::query("PRAGMA foreign_keys = ON;")
-                        .execute(&mut *conn)
-                        .await?;
-                    Ok(())
-                })
-            })
-            .connect("sqlite::memory:")
+        // max_connections(1) so all operations see the same in-memory database.
+        let pool = connect_in_memory_hub_sqlite_pool()
             .await
             .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
@@ -196,8 +163,7 @@ impl SqliteMetadataStore {
     }
 
     /// Common pool initialization: create schema, set version.
-    /// Note: PRAGMA settings (journal_mode, foreign_keys) are set in after_connect callback
-    /// to ensure they persist across connection pool recycling (S1 fix).
+    /// Note: PRAGMA settings are configured by `sqlite_pool`.
     async fn init_pool(pool: &SqlitePool) -> Result<(), MetadataError> {
         crate::migrations::run_hub_migrations(pool)
             .await

@@ -4,9 +4,10 @@
 //! This prevents blocking the async runtime on database I/O.
 
 use sqlx::FromRow;
-use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
+use sqlx::sqlite::SqlitePool;
 
 use crate::migrations::run_hub_migrations;
+use crate::sqlite_pool::{connect_hub_sqlite_pool, connect_in_memory_hub_sqlite_pool};
 
 /// Token information returned after validation
 #[derive(Debug, Clone)]
@@ -41,12 +42,7 @@ pub struct TokenStore {
 impl TokenStore {
     /// Create a new TokenStore with the given database path
     pub async fn new(db_path: &str, pool_size: u32) -> Result<Self, sqlx::Error> {
-        let pool = SqlitePoolOptions::new()
-            .max_connections(pool_size)
-            .min_connections(1)
-            .acquire_timeout(std::time::Duration::from_secs(5))
-            .connect(db_path)
-            .await?;
+        let pool = connect_hub_sqlite_pool(db_path, pool_size).await?;
 
         Self::init_tables(&pool).await?;
 
@@ -92,10 +88,7 @@ impl TokenStore {
     /// **Warning:** This is intended for testing only. In-memory stores do not persist
     /// data across restarts and should not be used in production deployments.
     pub async fn in_memory() -> Result<Self, sqlx::Error> {
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await?;
+        let pool = connect_in_memory_hub_sqlite_pool().await?;
 
         Self::init_tables(&pool).await?;
 
@@ -408,6 +401,44 @@ mod tests {
         assert_eq!(info.username, "testuser");
         assert_eq!(info.token_name, "test-token");
         assert_eq!(info.scope, "read");
+    }
+
+    #[tokio::test]
+    async fn test_create_token_for_user_rejects_missing_user() {
+        let store = TokenStore::in_memory().await.unwrap();
+
+        let result = store
+            .create_token_for_user("missing-user", "orphan-token", "read")
+            .await;
+
+        assert!(
+            result.is_err(),
+            "tokens must not be created for users that do not exist"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_new_configures_sqlite_pragmas() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("hub.db");
+        let store = TokenStore::new(db_path.to_str().unwrap(), 2).await.unwrap();
+
+        let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        let busy_timeout: i64 = sqlx::query_scalar("PRAGMA busy_timeout")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        let journal_mode: String = sqlx::query_scalar("PRAGMA journal_mode")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+
+        assert_eq!(foreign_keys, 1);
+        assert_eq!(busy_timeout, 5000);
+        assert_eq!(journal_mode.to_lowercase(), "wal");
     }
 
     #[tokio::test]

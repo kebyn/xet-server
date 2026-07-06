@@ -8,34 +8,16 @@ use crate::cas_client::CasClient;
 use crate::config::HubConfig;
 use crate::metadata::MetadataStore;
 use crate::metadata::sqlite::SqliteMetadataStore;
+use crate::sqlite_pool::connect_hub_sqlite_pool;
 
 pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
-    // M2 fix: Create a shared SQLite connection pool for both TokenStore and MetadataStore.
-    // Previously, each created its own pool (default 5 connections each = 10 total to same DB).
-    // SQLite only supports one writer at a time; reducing total connections prevents SQLITE_BUSY.
-    // Shared pool uses the configured pool_size (default 5) for BOTH stores combined.
-    use sqlx::sqlite::SqlitePoolOptions;
-    let shared_pool = SqlitePoolOptions::new()
-        .max_connections(config.metadata.db_pool_size)
-        .min_connections(1)
-        .acquire_timeout(std::time::Duration::from_secs(5))
-        .after_connect(|conn, _| {
-            Box::pin(async move {
-                sqlx::query("PRAGMA journal_mode = WAL;")
-                    .execute(&mut *conn)
-                    .await?;
-                sqlx::query("PRAGMA foreign_keys = ON;")
-                    .execute(&mut *conn)
-                    .await?;
-                sqlx::query("PRAGMA busy_timeout = 5000;")
-                    .execute(&mut *conn)
-                    .await?;
-                Ok(())
-            })
-        })
-        .connect(&config.metadata.sqlite_path)
-        .await
-        .map_err(|e| std::io::Error::other(format!("Failed to connect to database: {}", e)))?;
+    // M2 fix: Create one shared SQLite pool for both TokenStore and MetadataStore.
+    // SQLite only supports one writer at a time; sharing the configured pool keeps
+    // total DB connections bounded across both stores.
+    let shared_pool =
+        connect_hub_sqlite_pool(&config.metadata.sqlite_path, config.metadata.db_pool_size)
+            .await
+            .map_err(|e| std::io::Error::other(format!("Failed to connect to database: {}", e)))?;
 
     let shared_pool_for_shutdown = shared_pool.clone();
     let shared_pool_for_ready = shared_pool.clone();
