@@ -6,7 +6,7 @@ use actix_web::HttpRequest;
 /// Query parameter tokens are intentionally excluded here to avoid leaking user
 /// tokens through URLs. Query parameters are only accepted by `extract_proxy_token`
 /// for short-lived, OID-bound LFS proxy tokens.
-pub(super) fn extract_token(req: &HttpRequest) -> Option<String> {
+pub(crate) fn extract_token(req: &HttpRequest) -> Option<String> {
     if let Some(auth) = req.headers().get("Authorization") {
         let auth_str = auth.to_str().ok()?;
 
@@ -32,7 +32,7 @@ pub(super) fn extract_token(req: &HttpRequest) -> Option<String> {
 ///
 /// Query parameter proxy tokens are supported for redirects from `/resolve/*`.
 /// They are short-lived and OID-bound, which limits log-leakage blast radius.
-pub(super) fn extract_proxy_token(req: &HttpRequest) -> Option<String> {
+pub(crate) fn extract_proxy_token(req: &HttpRequest) -> Option<String> {
     if let Some(query) = req.uri().query() {
         for pair in query.split('&') {
             if let Some((key, value)) = pair.split_once('=')
@@ -56,7 +56,7 @@ pub(super) fn extract_proxy_token(req: &HttpRequest) -> Option<String> {
 ///
 /// Cryptographic verification, prefix format and token type are handled by
 /// `signer.verify_proxy_token`; this helper checks the business-level binding.
-pub(super) fn validate_proxy_token(
+pub(crate) fn validate_proxy_token(
     token: &str,
     expected_oid: &str,
     expected_operation: &str,

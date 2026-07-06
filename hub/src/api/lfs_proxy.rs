@@ -2,19 +2,18 @@ use crate::auth::token_store::TokenStore;
 use crate::auth::xet_signer::XetSigner;
 use crate::cas_client::CasClient;
 use crate::config::HubConfig;
-use crate::lfs_proxy::oid::validate_oid;
+use crate::lfs_proxy::tokens::{extract_proxy_token, extract_token};
 use crate::services::lfs_batch::{
     LfsBatchCasClient, LfsBatchRequest, LfsBatchService, LfsBatchServiceError,
 };
+use crate::services::lfs_object::{LfsObjectGuard, LfsObjectGuardError, LfsObjectOperation};
 use actix_web::{HttpRequest, HttpResponse, web};
 use futures_util::{StreamExt, TryStreamExt};
 use std::sync::Arc;
 
 mod streaming;
-mod tokens;
 
 use streaming::MaxBytesStream;
-use tokens::{extract_proxy_token, extract_token, validate_proxy_token};
 
 /// Handle Git LFS batch request
 ///
@@ -139,6 +138,19 @@ fn lfs_batch_error_response(err: LfsBatchServiceError) -> HttpResponse {
     }
 }
 
+fn lfs_object_guard_error_response(err: LfsObjectGuardError) -> HttpResponse {
+    match err {
+        LfsObjectGuardError::InvalidOid => HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "Invalid OID format",
+            "error_type": "ValidationError"
+        })),
+        LfsObjectGuardError::InvalidToken => HttpResponse::Unauthorized().json(serde_json::json!({
+            "error": "Invalid or expired proxy token",
+            "error_type": "AuthenticationError"
+        })),
+    }
+}
+
 /// Handle LFS object upload
 /// Proxy LFS upload from client to CAS — streaming version
 ///
@@ -170,21 +182,9 @@ pub async fn lfs_upload(
     };
 
     let oid = path.into_inner();
-
-    // Validate OID format
-    if !validate_oid(&oid) {
-        return HttpResponse::BadRequest().json(serde_json::json!({
-            "error": "Invalid OID format",
-            "error_type": "ValidationError"
-        }));
-    }
-
-    // Validate proxy token
-    if !validate_proxy_token(&token, &oid, "upload", &xet_signer) {
-        return HttpResponse::Unauthorized().json(serde_json::json!({
-            "error": "Invalid or expired proxy token",
-            "error_type": "AuthenticationError"
-        }));
+    let guard = LfsObjectGuard::new(xet_signer.get_ref().clone());
+    if let Err(err) = guard.authorize(&token, &oid, LfsObjectOperation::Upload) {
+        return lfs_object_guard_error_response(err);
     }
 
     // Create temp directory if it doesn't exist
@@ -364,21 +364,9 @@ pub async fn lfs_download(
     };
 
     let oid = path.into_inner();
-
-    // I7: Validate OID format
-    if !validate_oid(&oid) {
-        return HttpResponse::BadRequest().json(serde_json::json!({
-            "error": "Invalid OID format",
-            "error_type": "ValidationError"
-        }));
-    }
-
-    // Validate proxy token
-    if !validate_proxy_token(&token, &oid, "download", &xet_signer) {
-        return HttpResponse::Unauthorized().json(serde_json::json!({
-            "error": "Invalid or expired proxy token",
-            "error_type": "AuthenticationError"
-        }));
+    let guard = LfsObjectGuard::new(xet_signer.get_ref().clone());
+    if let Err(err) = guard.authorize(&token, &oid, LfsObjectOperation::Download) {
+        return lfs_object_guard_error_response(err);
     }
 
     // C3 fix: Use streaming download with runtime size enforcement.
@@ -423,8 +411,8 @@ pub async fn lfs_download(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::lfs_proxy::batch::{rewrite_action_url, rewrite_batch_urls};
+    use crate::lfs_proxy::tokens::validate_proxy_token;
 
     #[test]
     fn test_rewrite_action_url_drops_on_parse_failure() {
