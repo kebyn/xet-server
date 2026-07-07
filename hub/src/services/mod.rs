@@ -8,3 +8,4 @@ pub(crate) mod resolve;
 pub(crate) mod shared;
 pub(crate) mod token_exchange;
 pub(crate) mod tree;
+pub(crate) mod whoami;

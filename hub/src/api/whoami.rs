@@ -1,21 +1,11 @@
 use crate::auth::extract::AuthAny;
 use crate::auth::extract::AuthUser;
+use crate::services::whoami::WhoamiService;
 use actix_web::HttpResponse;
 
 /// GET /api/whoami - Get current user info from token
 pub async fn whoami(auth: AuthUser<AuthAny>) -> HttpResponse {
-    HttpResponse::Ok().json(serde_json::json!({
-        "name": auth.info.username,
-        "email": "",
-        "orgs": [],
-        "auth": {
-            "type": "access_token",
-            "accessToken": {
-                "name": auth.info.token_name,
-                "role": auth.info.scope
-            }
-        }
-    }))
+    HttpResponse::Ok().json(WhoamiService::build_response(&auth.info))
 }
 
 #[cfg(test)]
