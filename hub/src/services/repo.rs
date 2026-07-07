@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::metadata::{MetadataError, MetadataStore, Repo, RepoType, Revision};
-use crate::services::shared::can_access_repo;
+use crate::services::shared::{can_access_repo, can_write_repo};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RepoServiceError {
@@ -109,7 +109,7 @@ impl RepoService {
         repo_type: RepoType,
     ) -> Result<(), RepoServiceError> {
         let repo = self.load_repo(namespace, repo_name, repo_type).await?;
-        if repo.namespace != username {
+        if !can_write_repo(&repo, username) {
             return Err(RepoServiceError::Forbidden(
                 "You do not have permission to delete this repository".to_string(),
             ));

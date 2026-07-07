@@ -4,6 +4,10 @@ pub(crate) fn can_access_repo(repo: &Repo, username: &str) -> bool {
     !repo.private || repo.namespace == username
 }
 
+pub(crate) fn can_write_repo(repo: &Repo, username: &str) -> bool {
+    repo.namespace == username
+}
+
 pub(crate) async fn resolve_revision_id(
     metadata: &dyn MetadataStore,
     repo_id: i64,
@@ -58,5 +62,13 @@ mod tests {
     fn private_repo_can_only_be_read_by_owner() {
         assert!(can_access_repo(&repo("owner", true), "owner"));
         assert!(!can_access_repo(&repo("owner", true), "reader"));
+    }
+
+    #[test]
+    fn only_repo_owner_can_write_repo() {
+        assert!(can_write_repo(&repo("owner", false), "owner"));
+        assert!(!can_write_repo(&repo("owner", false), "reader"));
+        assert!(can_write_repo(&repo("owner", true), "owner"));
+        assert!(!can_write_repo(&repo("owner", true), "reader"));
     }
 }

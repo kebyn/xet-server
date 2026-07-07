@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::auth::xet_signer::XetSigner;
 use crate::metadata::{MetadataError, MetadataStore, Repo, RepoType};
-use crate::services::shared::can_access_repo;
+use crate::services::shared::{can_access_repo, can_write_repo};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TokenExchangeServiceError {
@@ -120,7 +120,7 @@ impl TokenExchangeService {
 fn can_exchange_repo(repo: &Repo, username: &str, scope: ExchangeScope) -> bool {
     match scope {
         ExchangeScope::Read => can_access_repo(repo, username),
-        ExchangeScope::Write => repo.namespace == username,
+        ExchangeScope::Write => can_write_repo(repo, username),
     }
 }
 

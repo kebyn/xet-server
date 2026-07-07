@@ -3,7 +3,6 @@ pub mod lfs_proxy;
 pub mod preupload;
 pub mod repo;
 pub mod resolve;
-pub mod shared;
 pub mod token_exchange;
 pub mod tree;
 pub mod whoami;
