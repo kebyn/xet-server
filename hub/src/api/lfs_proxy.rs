@@ -2,6 +2,7 @@ use crate::auth::token_store::TokenStore;
 use crate::auth::xet_signer::XetSigner;
 use crate::cas_client::CasClient;
 use crate::config::HubConfig;
+use crate::lfs_proxy::streaming::MaxBytesStream;
 use crate::lfs_proxy::tokens::{extract_proxy_token, extract_token};
 use crate::services::lfs_batch::{
     LfsBatchCasClient, LfsBatchRequest, LfsBatchService, LfsBatchServiceError,
@@ -11,10 +12,6 @@ use crate::services::lfs_upload::{LfsUploadStoreError, write_payload_to_temp_fil
 use actix_web::{HttpRequest, HttpResponse, web};
 use futures_util::{StreamExt, TryStreamExt};
 use std::sync::Arc;
-
-mod streaming;
-
-use streaming::MaxBytesStream;
 
 /// Handle Git LFS batch request
 ///

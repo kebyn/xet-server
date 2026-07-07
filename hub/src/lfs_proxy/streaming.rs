@@ -6,7 +6,7 @@ use std::task::{Context, Poll};
 /// Stream wrapper that enforces a maximum byte limit during streaming.
 /// This prevents unbounded data transfer even if Content-Length is missing or incorrect.
 #[pin_project]
-pub(super) struct MaxBytesStream<S> {
+pub(crate) struct MaxBytesStream<S> {
     #[pin]
     stream: S,
     max_bytes: u64,
@@ -18,7 +18,7 @@ where
     S: Stream<Item = Result<B, std::io::Error>>,
     B: AsRef<[u8]>,
 {
-    pub(super) fn new(stream: S, max_bytes: u64) -> Self {
+    pub(crate) fn new(stream: S, max_bytes: u64) -> Self {
         Self {
             stream,
             max_bytes,
@@ -51,9 +51,51 @@ where
                     Poll::Ready(Some(Ok(chunk)))
                 }
             }
-            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
+            Poll::Ready(Some(Err(err))) => Poll::Ready(Some(Err(err))),
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => Poll::Pending,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::Bytes;
+    use futures_util::{StreamExt, stream};
+
+    #[tokio::test]
+    async fn max_bytes_stream_allows_chunks_up_to_limit() {
+        let stream = stream::iter(vec![
+            Ok::<_, std::io::Error>(Bytes::from_static(b"abc")),
+            Ok::<_, std::io::Error>(Bytes::from_static(b"de")),
+        ]);
+        let mut limited = super::MaxBytesStream::new(stream, 5);
+
+        assert_eq!(
+            limited.next().await.unwrap().unwrap(),
+            Bytes::from_static(b"abc")
+        );
+        assert_eq!(
+            limited.next().await.unwrap().unwrap(),
+            Bytes::from_static(b"de")
+        );
+        assert!(limited.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn max_bytes_stream_errors_once_limit_is_exceeded() {
+        let stream = stream::iter(vec![
+            Ok::<_, std::io::Error>(Bytes::from_static(b"abc")),
+            Ok::<_, std::io::Error>(Bytes::from_static(b"def")),
+        ]);
+        let mut limited = super::MaxBytesStream::new(stream, 5);
+
+        assert_eq!(
+            limited.next().await.unwrap().unwrap(),
+            Bytes::from_static(b"abc")
+        );
+        let err = limited.next().await.unwrap().unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("maximum size of 5 bytes"));
     }
 }
