@@ -8,7 +8,9 @@ use crate::services::lfs_batch::{
     LfsBatchCasClient, LfsBatchRequest, LfsBatchService, LfsBatchServiceError,
 };
 use crate::services::lfs_object::{LfsObjectGuard, LfsObjectGuardError, LfsObjectOperation};
-use crate::services::lfs_upload::{LfsUploadStoreError, write_payload_to_temp_file};
+use crate::services::lfs_upload::{
+    LfsUploadCasClient, LfsUploadService, LfsUploadServiceError, LfsUploadStoreError,
+};
 use actix_web::{HttpRequest, HttpResponse, web};
 use futures_util::{StreamExt, TryStreamExt};
 use std::sync::Arc;
@@ -204,6 +206,36 @@ fn lfs_upload_store_error_response(err: LfsUploadStoreError, temp_dir: &str) -> 
     }
 }
 
+fn lfs_upload_service_error_response(
+    err: LfsUploadServiceError,
+    oid: &str,
+    temp_dir: &str,
+) -> HttpResponse {
+    match err {
+        LfsUploadServiceError::Store(err) => lfs_upload_store_error_response(err, temp_dir),
+        LfsUploadServiceError::HashMismatch { computed, size } => {
+            tracing::warn!(
+                "Hash mismatch for OID {}: computed {} ({} bytes)",
+                oid,
+                computed,
+                size
+            );
+            HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "Hash mismatch: uploaded content does not match OID",
+                "error_type": "ValidationError"
+            }))
+        }
+        LfsUploadServiceError::Cas { status, message } => {
+            let status_code = actix_web::http::StatusCode::from_u16(status)
+                .unwrap_or(actix_web::http::StatusCode::BAD_GATEWAY);
+            HttpResponse::build(status_code).json(serde_json::json!({
+                "error": message,
+                "error_type": "CasError"
+            }))
+        }
+    }
+}
+
 /// Handle LFS object upload
 /// Proxy LFS upload from client to CAS — streaming version
 ///
@@ -241,49 +273,21 @@ pub async fn lfs_upload(
     }
 
     let temp_dir = std::path::Path::new(&config.storage.upload_temp_dir);
-    let stored_upload =
-        match write_payload_to_temp_file(payload, temp_dir, config.storage.max_upload_size).await {
-            Ok(stored_upload) => stored_upload,
-            Err(err) => {
-                return lfs_upload_store_error_response(err, &config.storage.upload_temp_dir);
-            }
-        };
-
-    // Verify hash
-    if stored_upload.sha256 != oid {
-        tracing::warn!(
-            "Hash mismatch for OID {}: computed {} ({} bytes)",
-            oid,
-            stored_upload.sha256,
-            stored_upload.size
-        );
-        // Clean up temp file
-        let _ = tokio::fs::remove_file(&stored_upload.path).await;
-        return HttpResponse::BadRequest().json(serde_json::json!({
-            "error": "Hash mismatch: uploaded content does not match OID",
-            "error_type": "ValidationError"
-        }));
-    }
-
-    // CAS /lfs/objects/{oid} accepts either a regular user token or the same
-    // OID/operation-bound proxy token that Hub just validated.
-    let result = cas_client
-        .proxy_lfs_upload_from_path(&oid, &stored_upload.path, stored_upload.size, &token)
-        .await;
-
-    // Clean up temp file
-    let _ = tokio::fs::remove_file(&stored_upload.path).await;
-
-    match result {
-        Ok(_) => HttpResponse::Ok().finish(),
-        Err(e) => {
-            let status_code = actix_web::http::StatusCode::from_u16(e.status)
-                .unwrap_or(actix_web::http::StatusCode::BAD_GATEWAY);
-            HttpResponse::build(status_code).json(serde_json::json!({
-                "error": e.message,
-                "error_type": "CasError"
-            }))
-        }
+    let upload_cas_client: Arc<dyn LfsUploadCasClient> = cas_client.get_ref().clone();
+    let service = LfsUploadService::new(upload_cas_client);
+    // CAS accepts the same OID/operation-bound proxy token that Hub just validated.
+    match service
+        .upload(
+            &oid,
+            &token,
+            payload,
+            temp_dir,
+            config.storage.max_upload_size,
+        )
+        .await
+    {
+        Ok(()) => HttpResponse::Ok().finish(),
+        Err(err) => lfs_upload_service_error_response(err, &oid, &config.storage.upload_temp_dir),
     }
 }
 
