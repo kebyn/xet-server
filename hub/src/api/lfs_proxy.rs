@@ -7,6 +7,7 @@ use crate::services::lfs_batch::{
     LfsBatchCasClient, LfsBatchRequest, LfsBatchService, LfsBatchServiceError,
 };
 use crate::services::lfs_object::{LfsObjectGuard, LfsObjectGuardError, LfsObjectOperation};
+use crate::services::lfs_upload::{LfsUploadStoreError, write_payload_to_temp_file};
 use actix_web::{HttpRequest, HttpResponse, web};
 use futures_util::{StreamExt, TryStreamExt};
 use std::sync::Arc;
@@ -151,6 +152,61 @@ fn lfs_object_guard_error_response(err: LfsObjectGuardError) -> HttpResponse {
     }
 }
 
+fn lfs_upload_store_error_response(err: LfsUploadStoreError, temp_dir: &str) -> HttpResponse {
+    match err {
+        LfsUploadStoreError::CreateTempDir(message) => {
+            tracing::error!("Failed to create temp dir {}: {}", temp_dir, message);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Failed to initialize upload",
+                "error_type": "InternalError"
+            }))
+        }
+        LfsUploadStoreError::CreateTempFile(message) => {
+            tracing::error!("Failed to create temp file: {}", message);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Failed to create temporary file",
+                "error_type": "InternalError"
+            }))
+        }
+        LfsUploadStoreError::PrepareTempFile(message) => {
+            tracing::error!("Failed to detach temp file ownership: {}", message);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Failed to prepare upload storage",
+                "error_type": "InternalError"
+            }))
+        }
+        LfsUploadStoreError::OpenTempFile(message)
+        | LfsUploadStoreError::WriteTempFile(message) => {
+            tracing::error!("Failed to write temp upload file: {}", message);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Failed to write upload data",
+                "error_type": "InternalError"
+            }))
+        }
+        LfsUploadStoreError::ReadPayload(message) => {
+            tracing::error!("Error reading payload: {}", message);
+            HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "Error reading upload data",
+                "error_type": "ClientError"
+            }))
+        }
+        LfsUploadStoreError::PayloadTooLarge { actual, max } => {
+            tracing::warn!("Upload too large: {} bytes (max {})", actual, max);
+            HttpResponse::PayloadTooLarge().json(serde_json::json!({
+                "error": format!("Upload too large ({} bytes), max allowed: {} bytes", actual, max),
+                "error_type": "PayloadTooLarge"
+            }))
+        }
+        LfsUploadStoreError::FlushTempFile(message) => {
+            tracing::error!("Failed to flush temp file: {}", message);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Failed to finalize upload data",
+                "error_type": "InternalError"
+            }))
+        }
+    }
+}
+
 /// Handle LFS object upload
 /// Proxy LFS upload from client to CAS — streaming version
 ///
@@ -165,7 +221,7 @@ fn lfs_object_guard_error_response(err: LfsObjectGuardError) -> HttpResponse {
 pub async fn lfs_upload(
     req: HttpRequest,
     path: web::Path<String>,
-    mut payload: web::Payload,
+    payload: web::Payload,
     config: web::Data<crate::config::HubConfig>,
     xet_signer: web::Data<std::sync::Arc<XetSigner>>,
     cas_client: web::Data<std::sync::Arc<CasClient>>,
@@ -187,133 +243,25 @@ pub async fn lfs_upload(
         return lfs_object_guard_error_response(err);
     }
 
-    // Create temp directory if it doesn't exist
     let temp_dir = std::path::Path::new(&config.storage.upload_temp_dir);
-    if let Err(e) = tokio::fs::create_dir_all(temp_dir).await {
-        tracing::error!(
-            "Failed to create temp dir {}: {}",
-            config.storage.upload_temp_dir,
-            e
-        );
-        return HttpResponse::InternalServerError().json(serde_json::json!({
-            "error": "Failed to initialize upload",
-            "error_type": "InternalError"
-        }));
-    }
-
-    // Create temporary file
-    let temp_file = match tempfile::Builder::new()
-        .prefix("upload-")
-        .tempfile_in(temp_dir)
-    {
-        Ok(f) => f,
-        Err(e) => {
-            tracing::error!("Failed to create temp file: {}", e);
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Failed to create temporary file",
-                "error_type": "InternalError"
-            }));
-        }
-    };
-
-    let temp_path = temp_file.path().to_path_buf();
-
-    // I4 fix: Detach NamedTempFile ownership — we manage cleanup explicitly on all exit paths.
-    // This prevents Drop from racing with our tokio::fs::remove_file calls.
-    // M6 fix: Check return value instead of ignoring potential errors.
-    if let Err(e) = temp_file.keep() {
-        tracing::error!("Failed to detach temp file ownership: {}", e);
-        return HttpResponse::InternalServerError().json(serde_json::json!({
-            "error": "Failed to prepare upload storage",
-            "error_type": "InternalError"
-        }));
-    }
-
-    // Stream payload to temp file while computing hash
-    use futures_util::StreamExt;
-    use sha2::{Digest, Sha256};
-    use tokio::io::AsyncWriteExt;
-
-    let mut hasher = Sha256::new();
-    let mut file_writer = match tokio::fs::File::create(&temp_path).await {
-        Ok(f) => tokio::io::BufWriter::new(f),
-        Err(e) => {
-            tracing::error!("Failed to open temp file for writing: {}", e);
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Failed to write upload data",
-                "error_type": "InternalError"
-            }));
-        }
-    };
-
-    let mut total_bytes: u64 = 0;
-    // M2: Use configurable max upload size from config
-    let max_upload_size = config.storage.max_upload_size;
-
-    while let Some(chunk_result) = payload.next().await {
-        let chunk = match chunk_result {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::error!("Error reading payload: {}", e);
-                // I4 fix: Explicit temp file cleanup on error path
-                let _ = tokio::fs::remove_file(&temp_path).await;
-                return HttpResponse::BadRequest().json(serde_json::json!({
-                    "error": "Error reading upload data",
-                    "error_type": "ClientError"
-                }));
+    let stored_upload =
+        match write_payload_to_temp_file(payload, temp_dir, config.storage.max_upload_size).await {
+            Ok(stored_upload) => stored_upload,
+            Err(err) => {
+                return lfs_upload_store_error_response(err, &config.storage.upload_temp_dir);
             }
         };
 
-        total_bytes += chunk.len() as u64;
-        if total_bytes > max_upload_size {
-            tracing::warn!(
-                "Upload too large: {} bytes (max {})",
-                total_bytes,
-                max_upload_size
-            );
-            // I4 fix: Explicit temp file cleanup on error path
-            let _ = tokio::fs::remove_file(&temp_path).await;
-            return HttpResponse::PayloadTooLarge().json(serde_json::json!({
-                "error": format!("Upload too large ({} bytes), max allowed: {} bytes", total_bytes, max_upload_size),
-                "error_type": "PayloadTooLarge"
-            }));
-        }
-
-        hasher.update(&chunk);
-        if let Err(e) = file_writer.write_all(&chunk).await {
-            tracing::error!("Failed to write to temp file: {}", e);
-            // I4 fix: Explicit temp file cleanup on error path
-            let _ = tokio::fs::remove_file(&temp_path).await;
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Failed to write upload data",
-                "error_type": "InternalError"
-            }));
-        }
-    }
-
-    // Flush and close file
-    if let Err(e) = file_writer.flush().await {
-        tracing::error!("Failed to flush temp file: {}", e);
-        // I4 fix: Explicit temp file cleanup on error path
-        let _ = tokio::fs::remove_file(&temp_path).await;
-        return HttpResponse::InternalServerError().json(serde_json::json!({
-            "error": "Failed to finalize upload data",
-            "error_type": "InternalError"
-        }));
-    }
-    drop(file_writer);
-
     // Verify hash
-    let computed_hash = hex::encode(hasher.finalize());
-    if computed_hash != oid {
+    if stored_upload.sha256 != oid {
         tracing::warn!(
             "Hash mismatch for OID {}: computed {} ({} bytes)",
             oid,
-            computed_hash,
-            total_bytes
+            stored_upload.sha256,
+            stored_upload.size
         );
         // Clean up temp file
-        let _ = tokio::fs::remove_file(&temp_path).await;
+        let _ = tokio::fs::remove_file(&stored_upload.path).await;
         return HttpResponse::BadRequest().json(serde_json::json!({
             "error": "Hash mismatch: uploaded content does not match OID",
             "error_type": "ValidationError"
@@ -322,14 +270,12 @@ pub async fn lfs_upload(
 
     // CAS /lfs/objects/{oid} accepts either a regular user token or the same
     // OID/operation-bound proxy token that Hub just validated.
-    let file_size = total_bytes;
-
     let result = cas_client
-        .proxy_lfs_upload_from_path(&oid, &temp_path, file_size, &token)
+        .proxy_lfs_upload_from_path(&oid, &stored_upload.path, stored_upload.size, &token)
         .await;
 
     // Clean up temp file
-    let _ = tokio::fs::remove_file(&temp_path).await;
+    let _ = tokio::fs::remove_file(&stored_upload.path).await;
 
     match result {
         Ok(_) => HttpResponse::Ok().finish(),

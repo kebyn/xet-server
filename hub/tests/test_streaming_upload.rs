@@ -272,6 +272,14 @@ async fn start_mock_cas(response_status: u16, response_body: Option<String>) -> 
     url
 }
 
+async fn assert_dir_empty(path: &std::path::Path) {
+    let mut entries = tokio::fs::read_dir(path).await.unwrap();
+    assert!(
+        entries.next_entry().await.unwrap().is_none(),
+        "expected upload temp dir to be empty"
+    );
+}
+
 /// Test end-to-end: streaming upload succeeds when mock CAS returns 200.
 /// Verifies the full pipeline: Hub receives stream → forwards to CAS → CAS returns 200.
 #[actix_web::test]
@@ -330,11 +338,11 @@ async fn test_streaming_lfs_upload_success_via_mock_cas() {
     );
 }
 
-/// Test that CAS 400 (hash mismatch) is relayed as 400 to the client, not 502.
-/// This verifies the error code propagation fix from the code review.
+/// Test that Hub rejects a local hash mismatch and removes the temp upload file.
 #[actix_web::test]
 async fn test_streaming_lfs_upload_hash_mismatch_returns_400() {
     let cas_url = start_mock_cas(400, Some("Hash mismatch: OID does not match".to_string())).await;
+    let upload_temp_dir = tempfile::tempdir().unwrap();
 
     let mut csprng = OsRng;
     let signing_key = SigningKey::generate(&mut csprng);
@@ -348,7 +356,8 @@ async fn test_streaming_lfs_upload_hash_mismatch_returns_400() {
         })
         .expect("CAS client should be created"),
     );
-    let config = HubConfig::default();
+    let mut config = HubConfig::default();
+    config.storage.upload_temp_dir = upload_temp_dir.path().to_string_lossy().into_owned();
 
     let oid = "a".repeat(64);
     let (proxy_token, _) = xet_signer
@@ -379,7 +388,7 @@ async fn test_streaming_lfs_upload_hash_mismatch_returns_400() {
     assert_eq!(
         resp.status(),
         400,
-        "CAS hash mismatch (400) should be relayed to client as 400"
+        "Local hash mismatch should be rejected before forwarding to CAS"
     );
 
     let body: serde_json::Value = test::read_body_json(resp).await;
@@ -388,6 +397,7 @@ async fn test_streaming_lfs_upload_hash_mismatch_returns_400() {
         "Error should mention hash mismatch: {}",
         body["error"]
     );
+    assert_dir_empty(upload_temp_dir.path()).await;
 }
 
 /// Test that CAS 413 (oversized) is relayed as 413 to the client.
