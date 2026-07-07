@@ -123,3 +123,180 @@ pub(crate) fn rewrite_action_url(
     }
     true
 }
+
+#[cfg(test)]
+mod tests {
+    use ed25519_dalek::SigningKey;
+    use rand::rngs::OsRng;
+    use serde_json::json;
+
+    use crate::auth::xet_signer::XetSigner;
+
+    use super::{rewrite_action_url, rewrite_batch_urls};
+
+    fn signer() -> XetSigner {
+        let signing_key = SigningKey::generate(&mut OsRng);
+        XetSigner::new(signing_key, "test-key", 3600, 300)
+    }
+
+    #[test]
+    fn rewrite_action_url_drops_on_parse_failure() {
+        let hub = url::Url::parse("https://hub.example.com").unwrap();
+        let mut action = json!({"href": "not a valid url at all"});
+
+        let ok = rewrite_action_url(&mut action, &hub, "proxy_tok");
+
+        assert!(!ok, "unparseable href should let caller drop action");
+    }
+
+    #[test]
+    fn rewrite_action_url_rewrites_valid_href() {
+        let hub = url::Url::parse("https://hub.example.com:9000").unwrap();
+        let mut action = json!({"href": "http://cas-internal:5000/lfs/objects/abc"});
+
+        let ok = rewrite_action_url(&mut action, &hub, "proxy_tok");
+
+        assert!(ok);
+        let href = action.get("href").unwrap().as_str().unwrap();
+        assert!(href.contains("hub.example.com"));
+        assert!(href.contains("token=proxy_tok"));
+        assert!(!href.contains("cas-internal"));
+    }
+
+    #[test]
+    fn rewrite_batch_urls_rewrites_upload_and_download_actions() {
+        let signer = signer();
+        let valid_oid = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
+        let mut response = json!({
+            "objects": [
+                {
+                    "oid": valid_oid,
+                    "size": 1024,
+                    "actions": {
+                        "upload": {
+                            "href": format!("http://cas:9090/lfs/objects/{}", valid_oid)
+                        },
+                        "download": {
+                            "href": format!("http://cas:9090/lfs/objects/{}", valid_oid)
+                        }
+                    }
+                }
+            ]
+        });
+
+        rewrite_batch_urls(&mut response, "http://hub:8080", &signer, "testuser");
+
+        let objects = response.get("objects").unwrap().as_array().unwrap();
+        let actions = objects[0].get("actions").unwrap();
+        let upload_href = actions
+            .get("upload")
+            .unwrap()
+            .get("href")
+            .unwrap()
+            .as_str()
+            .unwrap();
+        let download_href = actions
+            .get("download")
+            .unwrap()
+            .get("href")
+            .unwrap()
+            .as_str()
+            .unwrap();
+
+        assert!(upload_href.starts_with(&format!(
+            "http://hub:8080/lfs/objects/{}?token=proxy_",
+            valid_oid
+        )));
+        assert!(download_href.starts_with(&format!(
+            "http://hub:8080/lfs/objects/{}?token=proxy_",
+            valid_oid
+        )));
+    }
+
+    #[test]
+    fn rewrite_batch_urls_leaves_objects_without_actions_unchanged() {
+        let signer = signer();
+        let mut response = json!({
+            "objects": [
+                {
+                    "oid": "abc123",
+                    "size": 1024
+                }
+            ]
+        });
+
+        rewrite_batch_urls(&mut response, "http://hub:8080", &signer, "testuser");
+
+        assert_eq!(
+            response,
+            json!({
+                "objects": [
+                    {
+                        "oid": "abc123",
+                        "size": 1024
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn rewrite_batch_urls_handles_partial_action_sets() {
+        let signer = signer();
+        let oid1 = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
+        let oid2 = "b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3";
+        let mut response = json!({
+            "objects": [
+                {
+                    "oid": oid1,
+                    "size": 1024,
+                    "actions": {
+                        "upload": {
+                            "href": format!("http://cas:9090/lfs/objects/{}", oid1)
+                        }
+                    }
+                },
+                {
+                    "oid": oid2,
+                    "size": 2048,
+                    "actions": {
+                        "download": {
+                            "href": format!("http://cas:9090/lfs/objects/{}", oid2)
+                        }
+                    }
+                }
+            ]
+        });
+
+        rewrite_batch_urls(&mut response, "http://hub:8080", &signer, "testuser");
+
+        let objects = response.get("objects").unwrap().as_array().unwrap();
+        let upload_href = objects[0]
+            .get("actions")
+            .unwrap()
+            .get("upload")
+            .unwrap()
+            .get("href")
+            .unwrap()
+            .as_str()
+            .unwrap();
+        let download_href = objects[1]
+            .get("actions")
+            .unwrap()
+            .get("download")
+            .unwrap()
+            .get("href")
+            .unwrap()
+            .as_str()
+            .unwrap();
+
+        assert!(upload_href.starts_with(&format!(
+            "http://hub:8080/lfs/objects/{}?token=proxy_",
+            oid1
+        )));
+        assert!(download_href.starts_with(&format!(
+            "http://hub:8080/lfs/objects/{}?token=proxy_",
+            oid2
+        )));
+    }
+}

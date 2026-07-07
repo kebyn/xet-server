@@ -116,3 +116,195 @@ pub(crate) fn validate_proxy_token(
 
     true
 }
+
+#[cfg(test)]
+mod tests {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use ed25519_dalek::{Signer, SigningKey};
+    use rand::rngs::OsRng;
+
+    use crate::auth::xet_signer::XetSigner;
+
+    use super::validate_proxy_token;
+
+    fn signer() -> XetSigner {
+        let signing_key = SigningKey::generate(&mut OsRng);
+        XetSigner::new(signing_key, "test-key", 3600, 300)
+    }
+
+    fn sign_proxy_token_with_type(token_type: &str) -> (String, XetSigner) {
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let signer = XetSigner::new(signing_key.clone(), "test-key", 3600, 300);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let header = serde_json::json!({
+            "alg": "EdDSA",
+            "typ": "JWT",
+            "kid": "test-key",
+        });
+        let claims = serde_json::json!({
+            "sub": "testuser",
+            "scope": "lfs-upload",
+            "repo_id": "",
+            "repo_type": "",
+            "revision": "",
+            "exp": now + 300,
+            "iat": now,
+            "kid": "test-key",
+            "token_type": token_type,
+            "oid": "abc123def456",
+            "operation": "upload",
+        });
+
+        let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap());
+        let claims_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
+        let signing_input = format!("{}.{}", header_b64, claims_b64);
+        let signature = signing_key.sign(signing_input.as_bytes());
+        let sig_b64 = URL_SAFE_NO_PAD.encode(signature.to_bytes());
+
+        (format!("proxy_{}.{}", signing_input, sig_b64), signer)
+    }
+
+    #[test]
+    fn valid_proxy_token_is_accepted() {
+        let signer = signer();
+        let (token, _) = signer
+            .sign_proxy("testuser", "abc123def456", "upload", "", "")
+            .unwrap();
+
+        let result = validate_proxy_token(&token, "abc123def456", "upload", &signer);
+
+        assert!(result, "Valid proxy token should be accepted");
+    }
+
+    #[test]
+    fn non_expired_proxy_token_is_accepted() {
+        let signer = signer();
+        let (token, _) = signer
+            .sign_proxy("testuser", "abc123def456", "upload", "", "")
+            .unwrap();
+
+        let result = validate_proxy_token(&token, "abc123def456", "upload", &signer);
+
+        assert!(result, "Non-expired token should be accepted");
+    }
+
+    #[test]
+    fn proxy_token_with_wrong_oid_is_rejected() {
+        let signer = signer();
+        let (token, _) = signer
+            .sign_proxy("testuser", "abc123def456", "upload", "", "")
+            .unwrap();
+
+        let result = validate_proxy_token(&token, "wrongoid", "upload", &signer);
+
+        assert!(!result, "Token with wrong OID should be rejected");
+    }
+
+    #[test]
+    fn proxy_token_with_wrong_operation_is_rejected() {
+        let signer = signer();
+        let (token, _) = signer
+            .sign_proxy("testuser", "abc123def456", "upload", "", "")
+            .unwrap();
+
+        let result = validate_proxy_token(&token, "abc123def456", "download", &signer);
+
+        assert!(!result, "Token with wrong operation should be rejected");
+    }
+
+    #[test]
+    fn proxy_token_with_wrong_scope_is_rejected() {
+        let signer = signer();
+        let (token, _) = signer
+            .sign_proxy_claims_for_test(
+                "testuser",
+                "lfs-upload",
+                "abc123def456",
+                "download",
+                "",
+                "",
+            )
+            .unwrap();
+
+        let result = validate_proxy_token(&token, "abc123def456", "download", &signer);
+
+        assert!(!result, "Token with wrong scope should be rejected");
+    }
+
+    #[test]
+    fn proxy_token_with_invalid_signature_is_rejected() {
+        let signer = signer();
+        let (token, _) = signer
+            .sign_proxy("testuser", "abc123def456", "upload", "", "")
+            .unwrap();
+        let tampered_token = format!("{}x", &token[..token.len() - 1]);
+
+        let result = validate_proxy_token(&tampered_token, "abc123def456", "upload", &signer);
+
+        assert!(!result, "Token with invalid signature should be rejected");
+    }
+
+    #[test]
+    fn user_token_is_rejected_as_proxy_token() {
+        let signer = signer();
+        let (user_token, _) = signer
+            .sign("testuser", "read", "repo", "model", "main")
+            .unwrap();
+
+        let result = validate_proxy_token(&user_token, "abc123def456", "upload", &signer);
+
+        assert!(!result, "User token should be rejected as proxy token");
+    }
+
+    #[test]
+    fn malformed_proxy_tokens_are_rejected() {
+        let signer = signer();
+
+        assert!(
+            !validate_proxy_token("", "abc123", "upload", &signer),
+            "Empty token should be rejected"
+        );
+        assert!(
+            !validate_proxy_token("proxy_", "abc123", "upload", &signer),
+            "Empty body should be rejected"
+        );
+        assert!(
+            !validate_proxy_token("proxy_abc", "abc123", "upload", &signer),
+            "Single part should be rejected"
+        );
+        assert!(
+            !validate_proxy_token("proxy_abc.def", "abc123", "upload", &signer),
+            "Two parts should be rejected"
+        );
+        assert!(
+            !validate_proxy_token("proxy_abc.def.ghi.jkl", "abc123", "upload", &signer),
+            "Four parts should be rejected"
+        );
+    }
+
+    #[test]
+    fn proxy_token_with_wrong_token_type_is_rejected() {
+        let (tampered_token, signer) = sign_proxy_token_with_type("user");
+
+        let result = validate_proxy_token(&tampered_token, "abc123def456", "upload", &signer);
+
+        assert!(!result, "Token with wrong token_type should be rejected");
+    }
+
+    #[test]
+    fn proxy_token_with_wrong_kid_is_rejected() {
+        let signer1 = XetSigner::new(SigningKey::generate(&mut OsRng), "key-id-1", 3600, 300);
+        let signer2 = XetSigner::new(SigningKey::generate(&mut OsRng), "key-id-2", 3600, 300);
+        let (token, _) = signer1
+            .sign_proxy("testuser", "abc123def456", "upload", "", "")
+            .unwrap();
+
+        let result = validate_proxy_token(&token, "abc123def456", "upload", &signer2);
+
+        assert!(!result, "Token with wrong kid should be rejected");
+    }
+}
