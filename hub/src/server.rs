@@ -1,6 +1,6 @@
 use actix_governor::{Governor, GovernorConfigBuilder};
 use actix_web::{App, HttpResponse, HttpServer, middleware::Logger, web};
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use crate::auth::token_store::TokenStore;
 use crate::auth::xet_signer::XetSigner;
@@ -9,6 +9,17 @@ use crate::config::HubConfig;
 use crate::metadata::MetadataStore;
 use crate::metadata::sqlite::SqliteMetadataStore;
 use crate::sqlite_pool::connect_hub_sqlite_pool;
+
+const NANOS_PER_MINUTE: u64 = 60_000_000_000;
+
+fn rate_limit_period(rpm: u32) -> Option<Duration> {
+    if rpm == 0 {
+        return None;
+    }
+
+    let period_nanos = NANOS_PER_MINUTE.div_ceil(u64::from(rpm));
+    Some(Duration::from_nanos(period_nanos))
+}
 
 pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
     // M2 fix: Create one shared SQLite pool for both TokenStore and MetadataStore.
@@ -143,33 +154,29 @@ pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
         );
     }
 
-    // I5 fix: Configure rate limiting for public API endpoints.
     // Internal endpoints (/internal/*) and health check bypass rate limiting.
-    // Uses default PeerIpKeyExtractor for per-IP rate limiting (not global).
+    // Governor replenishes one token per configured period, so the period must be
+    // 60 seconds divided by RPM. The burst capacity remains RPM.
     //
-    // Governor's rate limiter uses a token bucket algorithm:
-    // - per_second(60): Token refill window is 60 seconds
-    // - burst_size(rpm): Maximum tokens (requests) allowed per window
-    //
-    // Example with default rpm=120:
-    // - A client can make up to 120 requests in any 60-second window
-    // - Tokens refill at 2 per second (120 tokens / 60 seconds)
-    // - Burst allows 120 rapid requests, then must wait for refill
-    //
-    // This is effectively "requests per minute" with burst tolerance.
+    // The default PeerIpKeyExtractor uses the direct TCP peer address and deliberately
+    // ignores Forwarded/X-Forwarded-For headers. Behind a reverse proxy, all clients
+    // therefore share the proxy's bucket. Enforce per-client limits at the trusted proxy
+    // or implement a key extractor that validates a trusted-proxy allowlist.
     let rpm = config.server.rate_limit_rpm;
+    let period = rate_limit_period(rpm)
+        .ok_or_else(|| std::io::Error::other("Rate limit RPM must be greater than zero"))?;
     let governor_conf = GovernorConfigBuilder::default()
-        .per_second(60) // 60-second refill window
-        .burst_size(rpm) // configured requests per window
+        .period(period)
+        .burst_size(rpm)
         .finish()
         .ok_or_else(|| std::io::Error::other("Failed to configure rate limiter"))?;
 
     tracing::info!(
-        "Rate limiting: {} requests per 60-second window per IP for public endpoints \
-         (internal/health excluded). Burst: {}, refill: {} tokens/second",
+        "Rate limiting: {} sustained requests/minute per peer IP for public endpoints \
+         (internal/health excluded). Burst: {}, token period: {:.6}s",
         rpm,
         rpm,
-        rpm
+        period.as_secs_f64()
     );
 
     HttpServer::new(move || {
@@ -492,6 +499,22 @@ mod tests {
     use actix_web::{App, HttpResponse, HttpServer, test, web};
     use sqlx::sqlite::SqlitePoolOptions;
     use std::net::TcpListener;
+
+    #[actix_web::test]
+    async fn rate_limit_period_matches_requests_per_minute() {
+        assert_eq!(rate_limit_period(10), Some(Duration::from_secs(6)));
+        assert_eq!(rate_limit_period(60), Some(Duration::from_secs(1)));
+        assert_eq!(rate_limit_period(120), Some(Duration::from_millis(500)));
+    }
+
+    #[actix_web::test]
+    async fn rate_limit_period_rejects_zero_and_rounds_up() {
+        assert_eq!(rate_limit_period(0), None);
+        assert_eq!(
+            rate_limit_period(7),
+            Some(Duration::from_nanos(8_571_428_572))
+        );
+    }
 
     async fn start_mock_cas_ready(status: actix_web::http::StatusCode) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();

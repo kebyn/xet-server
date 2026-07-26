@@ -25,7 +25,7 @@ CAS Server 是 Xet Server 的核心存储引擎，负责内容寻址存储、文
 | `XET_PORT` | 服务器端口 | `8081` | 否 |
 | `XET_PUBLIC_BASE_URL` | 公共访问 URL | `http://{host}:{port}` | 否* |
 | `XET_MAX_BODY_SIZE_MB` | 流式上传的最大文件大小（MB） | `2048` | 否 |
-| `XET_RATE_LIMIT_RPM` | 公共端点速率限制（令牌桶算法，60秒窗口，突发容忍） | `60` | 否 |
+| `XET_RATE_LIMIT_RPM` | 公共端点持续速率（请求/分钟/peer IP；突发上限同 RPM） | `60` | 否 |
 | `XET_INDEX_REBUILD_STRICT` | 启动时 MetadataIndex 重建失败是否直接退出 | `false` | 否 |
 
 **注意**：
@@ -165,7 +165,7 @@ Hub API 提供 HuggingFace Hub 兼容的 REST API，负责仓库管理、提交�
 | `HUB_HOST` | 服务器绑定地址 | `0.0.0.0` | 否 |
 | `HUB_PORT` | 服务器端口 | `8080` | 否 |
 | `HUB_PUBLIC_BASE_URL` | 公共访问 URL | `http://{host}:{port}` | 否* |
-| `HUB_RATE_LIMIT_RPM` | 公共端点速率限制（令牌桶算法，60秒窗口，突发容忍） | `120` | 否 |
+| `HUB_RATE_LIMIT_RPM` | 公共端点持续速率（请求/分钟/peer IP；突发上限同 RPM） | `120` | 否 |
 
 **注意**：
 - `HUB_PUBLIC_BASE_URL` 在服务器位于反向代理后时必须设置

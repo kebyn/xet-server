@@ -7,7 +7,7 @@ use actix_web::{
     web,
 };
 use parking_lot::RwLock;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use crate::api::auth::AuthVerifier;
 use crate::api::guard::{AuthNeed, require_auth};
@@ -15,6 +15,17 @@ use crate::config::ServerConfig;
 use crate::conversion::ConvertingOids;
 use crate::middleware::metrics_middleware;
 use crate::storage::{StorageBackend, create_storage};
+
+const NANOS_PER_MINUTE: u64 = 60_000_000_000;
+
+fn rate_limit_period(rpm: u32) -> Option<Duration> {
+    if rpm == 0 {
+        return None;
+    }
+
+    let period_nanos = NANOS_PER_MINUTE.div_ceil(u64::from(rpm));
+    Some(Duration::from_nanos(period_nanos))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IndexReadiness {
@@ -152,42 +163,28 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
     // Internal endpoints (/internal/*) bypass rate limiting to avoid
     // disrupting Hub-to-CAS communication.
     //
-    // I5 fix: Rate limiter semantics documentation.
-    // Governor's rate limiter uses a token bucket algorithm:
-    // - per_second(60): Token refill window is 60 seconds
-    // - burst_size(rpm): Maximum tokens (requests) allowed per window
+    // Governor replenishes one token per configured period, so the period must be
+    // 60 seconds divided by RPM. The burst capacity remains RPM.
     //
-    // Example with default rpm=60:
-    // - A client can make up to 60 requests in any 60-second window
-    // - Tokens refill at 1 per second (60 tokens / 60 seconds)
-    // - Burst allows 60 rapid requests, then must wait for refill
-    //
-    // Example with rpm=10 (low rate):
-    // - A client can burst 10 requests instantly
-    // - Then must wait 60 seconds for full refill (10 tokens)
-    // - This is "burst tolerance" - allows short bursts but limits sustained rate
-    //
-    // This is effectively "requests per minute" with burst tolerance.
-    // Uses default PeerIpKeyExtractor for per-IP rate limiting (not global).
-    //
-    // IMPORTANT: When running behind a reverse proxy (nginx, ALB, etc.), ensure the proxy
-    // sets X-Forwarded-For or X-Real-IP headers. Without these, all requests appear to
-    // come from the proxy's IP, causing all clients to share a single rate limit bucket.
-    // Configure your proxy to pass the real client IP, and if using actix-web's
-    // trusted proxies feature, set the appropriate trust configuration.
+    // The default PeerIpKeyExtractor uses the direct TCP peer address and deliberately
+    // ignores Forwarded/X-Forwarded-For headers. Behind a reverse proxy, all clients
+    // therefore share the proxy's bucket. Enforce per-client limits at the trusted proxy
+    // or implement a key extractor that validates a trusted-proxy allowlist.
     let rpm = config.server.rate_limit_rpm;
+    let period = rate_limit_period(rpm)
+        .ok_or_else(|| std::io::Error::other("Rate limit RPM must be greater than zero"))?;
     let governor_conf = GovernorConfigBuilder::default()
-        .per_second(60) // 60-second refill window
-        .burst_size(rpm) // rpm requests per window
+        .period(period)
+        .burst_size(rpm)
         .finish()
         .ok_or_else(|| std::io::Error::other("Failed to configure rate limiter"))?;
 
     tracing::info!(
-        "Rate limiting: {} requests per 60-second window per IP for public endpoints \
-         (internal endpoints excluded). Burst: {}, refill: {} tokens/second",
+        "Rate limiting: {} sustained requests/minute per peer IP for public endpoints \
+         (internal endpoints excluded). Burst: {}, token period: {:.6}s",
         rpm,
         rpm,
-        rpm
+        period.as_secs_f64()
     );
 
     HttpServer::new(move || {
@@ -351,4 +348,26 @@ pub async fn metrics_endpoint(
     HttpResponse::Ok()
         .content_type("text/plain; version=0.0.4")
         .body(metrics)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rate_limit_period;
+    use std::time::Duration;
+
+    #[test]
+    fn rate_limit_period_matches_requests_per_minute() {
+        assert_eq!(rate_limit_period(10), Some(Duration::from_secs(6)));
+        assert_eq!(rate_limit_period(60), Some(Duration::from_secs(1)));
+        assert_eq!(rate_limit_period(120), Some(Duration::from_millis(500)));
+    }
+
+    #[test]
+    fn rate_limit_period_rejects_zero_and_rounds_up() {
+        assert_eq!(rate_limit_period(0), None);
+        assert_eq!(
+            rate_limit_period(7),
+            Some(Duration::from_nanos(8_571_428_572))
+        );
+    }
 }

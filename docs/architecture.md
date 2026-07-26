@@ -418,8 +418,8 @@ export CAS_TRUSTED_KIDS=hub-key-1,backup-key-1            # 受信任的密钥 I
 
 1. **令牌桶算法**：
    - 使用 `actix-governor` 库实现 token bucket 算法
-   - 60秒 refill 窗口，burst_size = RPM
-   - 允许短时突发到 RPM，稳定速 = RPM/60 per second
+   - 每个 token 的补充周期为 `60秒 / RPM`，`burst_size = RPM`
+   - 允许短时突发到 RPM，稳定速率为 RPM requests/minute
    - 超过限制时返回 `429 Too Many Requests`
 
 2. **内部端点豁免**：
@@ -436,9 +436,9 @@ export CAS_TRUSTED_KIDS=hub-key-1,backup-key-1            # 受信任的密钥 I
 
 ### 最佳实践
 
-- 使用反向代理（Nginx/Caddy）时，配置 `X-Forwarded-For` 头
-- CAS Server 会优先使用 `X-Forwarded-For` 中的第一个 IP
-- 对于大规模部署，建议在反向代理层面实施更细粒度的速率限制
+- 默认 key extractor 只使用 TCP peer IP，不读取 `Forwarded`、`X-Forwarded-For` 或 `X-Real-IP`
+- 使用反向代理（Nginx/Caddy）时，所有客户端默认共享代理 IP 的限流桶
+- 如需按真实客户端限流，应在可信反向代理层实施，或实现仅信任明确代理 allowlist 的自定义 key extractor；不得直接信任客户端可伪造的转发头
 
 ---
 
