@@ -30,6 +30,7 @@ async fn test_metrics_endpoint() {
 
     let auth_config = AuthConfig {
         public_key_path: pub_key_path.to_str().unwrap().to_string(),
+        public_keys: Vec::new(),
         trusted_kids: vec![kp.kid()],
         private_key_path: None,
         signing_kid: None,
@@ -103,6 +104,7 @@ async fn test_upload_records_metrics() {
 
     let auth_config = AuthConfig {
         public_key_path: pub_key_path.to_str().unwrap().to_string(),
+        public_keys: Vec::new(),
         trusted_kids: vec![kp.kid()],
         private_key_path: None,
         signing_kid: None,

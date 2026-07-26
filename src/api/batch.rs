@@ -299,6 +299,7 @@ mod tests {
 
         let auth_config = crate::config::AuthConfig {
             public_key_path: public_key_path.to_string_lossy().into_owned(),
+            public_keys: Vec::new(),
             trusted_kids: vec![kp.kid()],
             private_key_path: None,
             signing_kid: None,

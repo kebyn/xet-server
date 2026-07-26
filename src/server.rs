@@ -84,10 +84,19 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
             std::io::Error::other(format!("Failed to load auth public key: {}", e))
         })?);
 
-    // Check public key file permissions for security
-    if let Some(warning) = crate::config::check_public_key_permissions(&config.auth.public_key_path)
+    // Check every active public key file once. In legacy mode several kids may
+    // intentionally share one path.
+    let mut checked_public_key_paths = std::collections::HashSet::new();
+    for (_, path) in config
+        .auth
+        .verification_key_paths()
+        .map_err(std::io::Error::other)?
     {
-        tracing::warn!("{}", warning);
+        if checked_public_key_paths.insert(path) {
+            if let Some(warning) = crate::config::check_public_key_permissions(path) {
+                tracing::warn!("{}", warning);
+            }
+        }
     }
 
     // Validate storage backend

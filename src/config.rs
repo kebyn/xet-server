@@ -156,8 +156,13 @@ impl StorageConfig {
 /// Authentication configuration (Ed25519-based)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthConfig {
-    /// Path to the public key PEM file for token verification
+    /// Legacy path to one public key PEM file for token verification.
+    /// Used only when `public_keys` is empty.
     pub public_key_path: String,
+    /// Ordered verification keyring. Each key ID maps to exactly one public key.
+    /// An empty keyring preserves the legacy `public_key_path` behavior.
+    #[serde(default)]
+    pub public_keys: Vec<PublicKeyConfig>,
     /// List of trusted key IDs (kid values) that are accepted
     pub trusted_kids: Vec<String>,
     /// I5 fix: Optional path to private key PEM for signing proxy tokens.
@@ -170,6 +175,117 @@ pub struct AuthConfig {
     /// Kid to use when signing proxy tokens. Must match public key.
     /// Defaults to first entry in trusted_kids.
     pub signing_kid: Option<String>,
+}
+
+/// One key ID to public-key-file mapping in the CAS verification keyring.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PublicKeyConfig {
+    pub kid: String,
+    pub path: String,
+}
+
+impl AuthConfig {
+    fn validate(&self) -> Result<(), String> {
+        let mut configured_kids = std::collections::HashSet::new();
+        if self.public_keys.is_empty() {
+            if self.public_key_path.trim().is_empty() {
+                return Err("CAS_PUBLIC_KEY_PATH must not be empty in legacy key mode".to_string());
+            }
+        } else {
+            for key in &self.public_keys {
+                if key.kid.trim().is_empty() {
+                    return Err("CAS_PUBLIC_KEYS must not contain an empty key ID".to_string());
+                }
+                if key.path.trim().is_empty() {
+                    return Err(format!(
+                        "CAS_PUBLIC_KEYS path for key ID '{}' must not be empty",
+                        key.kid
+                    ));
+                }
+                if !configured_kids.insert(key.kid.as_str()) {
+                    return Err(format!(
+                        "CAS_PUBLIC_KEYS contains duplicate key ID '{}'",
+                        key.kid
+                    ));
+                }
+            }
+        }
+
+        if self.trusted_kids.is_empty() {
+            return Err("CAS_TRUSTED_KIDS must contain at least one key ID".to_string());
+        }
+        let mut trusted_kids = std::collections::HashSet::new();
+        for kid in &self.trusted_kids {
+            if kid.trim().is_empty() {
+                return Err("CAS_TRUSTED_KIDS must not contain empty key IDs".to_string());
+            }
+            if !trusted_kids.insert(kid.as_str()) {
+                return Err(format!(
+                    "CAS_TRUSTED_KIDS contains duplicate key ID '{}'",
+                    kid
+                ));
+            }
+            if !self.public_keys.is_empty() && !configured_kids.contains(kid.as_str()) {
+                return Err(format!(
+                    "CAS_TRUSTED_KIDS contains key ID '{}' that is not configured in CAS_PUBLIC_KEYS",
+                    kid
+                ));
+            }
+        }
+
+        if self
+            .private_key_path
+            .as_deref()
+            .is_some_and(|path| path.trim().is_empty())
+        {
+            return Err("CAS_PRIVATE_KEY_PATH must not be empty when set".to_string());
+        }
+        if let Some(signing_kid) = &self.signing_kid {
+            if signing_kid.trim().is_empty() {
+                return Err("CAS_SIGNING_KID must not be empty when set".to_string());
+            }
+            if !trusted_kids.contains(signing_kid.as_str()) {
+                return Err(format!(
+                    "CAS_SIGNING_KID '{}' is not present in CAS_TRUSTED_KIDS",
+                    signing_kid
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn verification_key_paths(&self) -> Result<Vec<(&str, &str)>, String> {
+        self.validate()?;
+
+        if self.public_keys.is_empty() {
+            return Ok(self
+                .trusted_kids
+                .iter()
+                .map(|kid| (kid.as_str(), self.public_key_path.as_str()))
+                .collect());
+        }
+
+        Ok(self
+            .public_keys
+            .iter()
+            .filter(|key| self.trusted_kids.iter().any(|kid| kid == &key.kid))
+            .map(|key| (key.kid.as_str(), key.path.as_str()))
+            .collect())
+    }
+
+    pub(crate) fn effective_signing_kid(&self) -> Option<&str> {
+        self.signing_kid.as_deref().or_else(|| {
+            if self.public_keys.is_empty() {
+                self.trusted_kids.first().map(String::as_str)
+            } else {
+                self.public_keys
+                    .iter()
+                    .find(|key| self.trusted_kids.iter().any(|kid| kid == &key.kid))
+                    .map(|key| key.kid.as_str())
+            }
+        })
+    }
 }
 
 /// Conversion pipeline configuration
@@ -243,6 +359,7 @@ impl Default for ServerConfig {
                 // M2 fix: Use /etc/xet instead of /tmp for better security
                 // /tmp is world-writable and vulnerable to symlink attacks
                 public_key_path: "/etc/xet/public-key.pem".to_string(), // Production default
+                public_keys: Vec::new(),
                 trusted_kids: vec!["hub-key-1".to_string()], // Changed from "test-kid" to match Hub default
                 private_key_path: None, // I5 fix: Optional, set CAS_PRIVATE_KEY_PATH to enable proxy token generation
                 signing_kid: None,
@@ -277,6 +394,43 @@ impl ServerConfig {
             },
             Err(_) => Ok(default),
         }
+    }
+
+    fn parse_public_keys(value: &str) -> Result<Vec<PublicKeyConfig>, String> {
+        if value.trim().is_empty() {
+            return Err("CAS_PUBLIC_KEYS must not be empty when set".to_string());
+        }
+
+        let mut public_keys = Vec::new();
+        let mut seen_kids = std::collections::HashSet::new();
+        for mapping in value.split(',') {
+            let (kid, path) = mapping.split_once('=').ok_or_else(|| {
+                format!(
+                    "CAS_PUBLIC_KEYS entry '{}' is invalid; expected kid=/path/to/public.pem",
+                    mapping
+                )
+            })?;
+            let kid = kid.trim();
+            let path = path.trim();
+            if kid.is_empty() || path.is_empty() {
+                return Err(format!(
+                    "CAS_PUBLIC_KEYS entry '{}' must contain a non-empty key ID and path",
+                    mapping
+                ));
+            }
+            if !seen_kids.insert(kid.to_string()) {
+                return Err(format!(
+                    "CAS_PUBLIC_KEYS contains duplicate key ID '{}'",
+                    kid
+                ));
+            }
+            public_keys.push(PublicKeyConfig {
+                kid: kid.to_string(),
+                path: path.to_string(),
+            });
+        }
+
+        Ok(public_keys)
     }
 
     /// Validate configuration parameters.
@@ -350,43 +504,7 @@ impl ServerConfig {
             return Err("XET_RECONSTRUCTION_TEMP_DIR must not be empty".to_string());
         }
 
-        if self.auth.public_key_path.trim().is_empty() {
-            return Err("CAS_PUBLIC_KEY_PATH must not be empty".to_string());
-        }
-        if self.auth.trusted_kids.is_empty() {
-            return Err("CAS_TRUSTED_KIDS must contain at least one key ID".to_string());
-        }
-        let mut unique_kids = std::collections::HashSet::new();
-        for kid in &self.auth.trusted_kids {
-            if kid.trim().is_empty() {
-                return Err("CAS_TRUSTED_KIDS must not contain empty key IDs".to_string());
-            }
-            if !unique_kids.insert(kid) {
-                return Err(format!(
-                    "CAS_TRUSTED_KIDS contains duplicate key ID '{}'",
-                    kid
-                ));
-            }
-        }
-        if self
-            .auth
-            .private_key_path
-            .as_deref()
-            .is_some_and(|path| path.trim().is_empty())
-        {
-            return Err("CAS_PRIVATE_KEY_PATH must not be empty when set".to_string());
-        }
-        if let Some(signing_kid) = &self.auth.signing_kid {
-            if signing_kid.trim().is_empty() {
-                return Err("CAS_SIGNING_KID must not be empty when set".to_string());
-            }
-            if !unique_kids.contains(signing_kid) {
-                return Err(format!(
-                    "CAS_SIGNING_KID '{}' is not present in CAS_TRUSTED_KIDS",
-                    signing_kid
-                ));
-            }
-        }
+        self.auth.validate()?;
 
         match self.conversion.compression_scheme.to_lowercase().as_str() {
             "none" | "lz4" | "bg4lz4" => {}
@@ -453,13 +571,28 @@ impl ServerConfig {
         // M2 fix: Use /etc/xet instead of /tmp for better security
         let public_key_path = std::env::var("CAS_PUBLIC_KEY_PATH")
             .unwrap_or_else(|_| "/etc/xet/public-key.pem".to_string());
-        let trusted_kids = std::env::var("CAS_TRUSTED_KIDS")
-            .ok()
-            .map(|s| s.split(',').map(|kid| kid.trim().to_string()).collect())
-            .unwrap_or_else(|| {
-                tracing::warn!("CAS_TRUSTED_KIDS not set, using default 'hub-key-1'. Ensure this matches Hub's HUB_KID configuration.");
-                vec!["hub-key-1".to_string()]  // Changed from "test-kid" to match Hub default
-            });
+        let public_keys = match std::env::var("CAS_PUBLIC_KEYS") {
+            Ok(value) => Self::parse_public_keys(&value)?,
+            Err(std::env::VarError::NotPresent) => Vec::new(),
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err("CAS_PUBLIC_KEYS must contain valid Unicode".to_string());
+            }
+        };
+        let trusted_kids = match std::env::var("CAS_TRUSTED_KIDS") {
+            Ok(value) => value.split(',').map(|kid| kid.trim().to_string()).collect(),
+            Err(std::env::VarError::NotPresent) if !public_keys.is_empty() => {
+                public_keys.iter().map(|key| key.kid.clone()).collect()
+            }
+            Err(std::env::VarError::NotPresent) => {
+                tracing::warn!(
+                    "CAS_TRUSTED_KIDS not set, using default 'hub-key-1'. Ensure this matches Hub's HUB_KID configuration."
+                );
+                vec!["hub-key-1".to_string()]
+            }
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err("CAS_TRUSTED_KIDS must contain valid Unicode".to_string());
+            }
+        };
         // I5 fix: Optional private key for signing proxy tokens in batch API responses
         let private_key_path = std::env::var("CAS_PRIVATE_KEY_PATH").ok();
         let signing_kid = std::env::var("CAS_SIGNING_KID").ok();
@@ -493,6 +626,7 @@ impl ServerConfig {
             },
             auth: AuthConfig {
                 public_key_path,
+                public_keys,
                 trusted_kids,
                 private_key_path,
                 signing_kid,

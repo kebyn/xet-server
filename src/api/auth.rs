@@ -5,7 +5,9 @@
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use std::time::{SystemTime, UNIX_EPOCH};
-use xet_auth_types::{TokenKind, TokenWireError, sign_claims, verify_token_any_kind};
+use xet_auth_types::{
+    TokenKind, TokenWireError, sign_claims, unverified_token_kid, verify_token_any_kind,
+};
 
 /// Error types for authentication operations
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -198,14 +200,19 @@ pub fn authorize_endpoint(claims: &XetClaims, required_scope: &str) -> bool {
     check_scope(claims, required_scope)
 }
 
+#[derive(Clone)]
+struct VerificationKey {
+    kid: String,
+    key: VerifyingKey,
+}
+
 /// Pre-loaded verification keys for authentication.
 /// Created at server startup from AuthConfig to avoid per-request file I/O.
-/// Holds the public key and trusted key IDs (kids) for token verification.
+/// Holds an ordered key ID to public-key mapping for token verification.
 /// I5 fix: Optionally holds a signing key for generating proxy tokens in batch API responses.
 #[derive(Clone)]
 pub struct AuthVerifier {
-    public_key: VerifyingKey,
-    trusted_kids: Vec<String>,
+    verification_keys: Vec<VerificationKey>,
     /// I5 fix: Optional signing key for generating proxy tokens.
     /// When present, batch API generates short-lived proxy tokens instead of
     /// passing through the user's long-lived token.
@@ -226,12 +233,34 @@ fn key_permissions_too_open(path: &std::path::Path) -> bool {
 impl AuthVerifier {
     /// Load verification keys from AuthConfig at server startup.
     ///
-    /// Reads the public key PEM file once and caches the VerifyingKey.
-    /// Returns an error if the key file cannot be read or parsed.
+    /// Reads each configured public key PEM file once and caches the keyring.
+    /// The legacy single-key configuration maps every trusted kid to the same
+    /// public key for backward compatibility.
     pub fn from_config(auth_config: &crate::config::AuthConfig) -> Result<Self, AuthError> {
-        let pem_content = std::fs::read_to_string(&auth_config.public_key_path)
+        let key_paths = auth_config
+            .verification_key_paths()
             .map_err(|_| AuthError::InvalidKey)?;
-        let public_key = KeyPair::public_key_from_pem(&pem_content)?;
+        let mut verification_keys = Vec::with_capacity(key_paths.len());
+        for (kid, path) in key_paths {
+            let pem_content = std::fs::read_to_string(path).map_err(|error| {
+                tracing::error!(
+                    "Failed to read CAS public key for kid '{}' from {}: {}",
+                    kid,
+                    path,
+                    error
+                );
+                AuthError::InvalidKey
+            })?;
+            verification_keys.push(VerificationKey {
+                kid: kid.to_string(),
+                key: KeyPair::public_key_from_pem(&pem_content)?,
+            });
+        }
+
+        let signing_kid = auth_config
+            .effective_signing_kid()
+            .ok_or(AuthError::InvalidKey)?
+            .to_string();
 
         // I5 fix: Optionally load private key for proxy token generation
         let signing_key = if let Some(ref pk_path) = auth_config.private_key_path {
@@ -247,6 +276,17 @@ impl AuthVerifier {
                 AuthError::InvalidKey
             })?;
             let keypair = KeyPair::private_key_from_pem(&pk_pem)?;
+            let configured_signing_key = verification_keys
+                .iter()
+                .find(|entry| entry.kid == signing_kid)
+                .ok_or(AuthError::InvalidKey)?;
+            if configured_signing_key.key != keypair.verifying_key() {
+                tracing::error!(
+                    "CAS private key does not match the public key configured for signing kid '{}'",
+                    signing_kid
+                );
+                return Err(AuthError::InvalidKey);
+            }
             tracing::info!(
                 "CAS private key loaded from {} — proxy token generation enabled",
                 pk_path
@@ -261,32 +301,22 @@ impl AuthVerifier {
         };
 
         Ok(AuthVerifier {
-            public_key,
-            trusted_kids: auth_config.trusted_kids.clone(),
+            verification_keys,
             signing_key,
-            signing_kid: auth_config
-                .signing_kid
-                .clone()
-                .or_else(|| auth_config.trusted_kids.first().cloned()),
+            signing_kid: Some(signing_kid),
         })
     }
 
-    /// Verify a xet token against the cached public key and trusted kids.
-    ///
-    /// Tries each trusted kid until one succeeds, ensuring the token's kid
-    /// matches an expected trusted kid.
+    /// Select a cached public key by the unverified header kid, then verify the
+    /// token signature and claims with that exact key.
     pub fn verify_token(&self, token: &str) -> Result<XetClaims, AuthError> {
-        // Try each trusted kid
-        for trusted_kid in &self.trusted_kids {
-            if let Ok(claims) = verify_xet_token(token, &self.public_key, trusted_kid) {
-                // Also verify the token's kid matches what we expect
-                if claims.kid == *trusted_kid {
-                    return Ok(claims);
-                }
-            }
-        }
-
-        Err(AuthError::UnknownKid)
+        let kid = unverified_token_kid(token).map_err(map_token_wire_error)?;
+        let verification_key = self
+            .verification_keys
+            .iter()
+            .find(|entry| entry.kid == kid)
+            .ok_or(AuthError::UnknownKid)?;
+        verify_xet_token(token, &verification_key.key, &kid)
     }
 
     /// I5 fix: Sign a short-lived proxy token for LFS operations.
@@ -300,7 +330,7 @@ impl AuthVerifier {
         operation: &str,
     ) -> Option<SignedProxyToken> {
         let signing_key = self.signing_key.as_ref()?;
-        let kid = self.signing_kid.as_deref().unwrap_or("cas-key");
+        let kid = self.signing_kid.as_deref()?;
 
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -534,8 +564,10 @@ mod tests {
         let public_key = keypair.verifying_key();
         let kid = "test-kid".to_string();
         let verifier = AuthVerifier {
-            public_key,
-            trusted_kids: vec![kid.clone()],
+            verification_keys: vec![VerificationKey {
+                kid: kid.clone(),
+                key: public_key,
+            }],
             signing_key: Some(keypair.signing_key),
             signing_kid: Some(kid.clone()),
         };
@@ -569,11 +601,108 @@ mod tests {
     }
 
     #[test]
+    fn test_keyring_default_signing_kid_uses_keyring_order() {
+        use crate::config::{AuthConfig, PublicKeyConfig};
+        use ed25519_dalek::pkcs8::EncodePrivateKey;
+
+        let old_key = KeyPair::generate();
+        let new_key = KeyPair::generate();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let old_public_path = temp_dir.path().join("old-public.pem");
+        let new_public_path = temp_dir.path().join("new-public.pem");
+        let old_private_path = temp_dir.path().join("old-private.pem");
+        std::fs::write(
+            &old_public_path,
+            KeyPair::public_key_to_pem(&old_key.verifying_key()).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            &new_public_path,
+            KeyPair::public_key_to_pem(&new_key.verifying_key()).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            &old_private_path,
+            old_key
+                .signing_key
+                .to_pkcs8_pem(pkcs8::LineEnding::LF)
+                .unwrap()
+                .as_bytes(),
+        )
+        .unwrap();
+
+        let verifier = AuthVerifier::from_config(&AuthConfig {
+            public_key_path: String::new(),
+            public_keys: vec![
+                PublicKeyConfig {
+                    kid: "old".to_string(),
+                    path: old_public_path.to_string_lossy().into_owned(),
+                },
+                PublicKeyConfig {
+                    kid: "new".to_string(),
+                    path: new_public_path.to_string_lossy().into_owned(),
+                },
+            ],
+            // Deliberately reverse the allowlist order. Keyring order is authoritative.
+            trusted_kids: vec!["new".to_string(), "old".to_string()],
+            private_key_path: Some(old_private_path.to_string_lossy().into_owned()),
+            signing_kid: None,
+        })
+        .unwrap();
+
+        let signed = verifier
+            .sign_proxy_token("alice", &"a".repeat(64), "download")
+            .expect("matching private key should enable proxy signing");
+        assert_eq!(verifier.verify_token(&signed.token).unwrap().kid, "old");
+    }
+
+    #[test]
+    fn test_keyring_rejects_private_key_mismatch() {
+        use crate::config::{AuthConfig, PublicKeyConfig};
+        use ed25519_dalek::pkcs8::EncodePrivateKey;
+
+        let public_key = KeyPair::generate();
+        let different_private_key = KeyPair::generate();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let public_path = temp_dir.path().join("public.pem");
+        let private_path = temp_dir.path().join("private.pem");
+        std::fs::write(
+            &public_path,
+            KeyPair::public_key_to_pem(&public_key.verifying_key()).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            &private_path,
+            different_private_key
+                .signing_key
+                .to_pkcs8_pem(pkcs8::LineEnding::LF)
+                .unwrap()
+                .as_bytes(),
+        )
+        .unwrap();
+
+        let result = AuthVerifier::from_config(&AuthConfig {
+            public_key_path: String::new(),
+            public_keys: vec![PublicKeyConfig {
+                kid: "signing".to_string(),
+                path: public_path.to_string_lossy().into_owned(),
+            }],
+            trusted_kids: vec!["signing".to_string()],
+            private_key_path: Some(private_path.to_string_lossy().into_owned()),
+            signing_kid: None,
+        });
+
+        assert!(matches!(result, Err(AuthError::InvalidKey)));
+    }
+
+    #[test]
     fn test_sign_proxy_token_without_signing_key_returns_none() {
         let keypair = KeyPair::generate();
         let verifier = AuthVerifier {
-            public_key: keypair.verifying_key(),
-            trusted_kids: vec!["test-kid".to_string()],
+            verification_keys: vec![VerificationKey {
+                kid: "test-kid".to_string(),
+                key: keypair.verifying_key(),
+            }],
             signing_key: None,
             signing_kid: Some("test-kid".to_string()),
         };

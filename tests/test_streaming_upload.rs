@@ -32,6 +32,7 @@ fn create_test_config_with_temp_dir(temp_dir: &str) -> TestContext {
 
     let auth_config = xet_server::config::AuthConfig {
         public_key_path: pub_key_path.to_str().unwrap().to_string(),
+        public_keys: Vec::new(),
         trusted_kids: vec![kp.kid()],
         private_key_path: None,
         signing_kid: None,

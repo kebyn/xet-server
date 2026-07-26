@@ -89,6 +89,7 @@ pub fn test_config_with_key(kp: &KeyPair) -> TestContext {
 
     let auth_config = AuthConfig {
         public_key_path: temp_path.to_str().unwrap().to_string(),
+        public_keys: Vec::new(),
         trusted_kids: vec![kp.kid()],
         private_key_path: None,
         signing_kid: None,
@@ -141,6 +142,7 @@ pub fn test_config_with_new_key() -> TestContext {
 
     let auth_config = AuthConfig {
         public_key_path: temp_path.to_str().unwrap().to_string(),
+        public_keys: Vec::new(),
         trusted_kids: vec![kp.kid()],
         private_key_path: None,
         signing_kid: None,

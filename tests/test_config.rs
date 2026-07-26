@@ -1,6 +1,6 @@
 //! Tests for configuration module
 
-use xet_server::config::{AuthConfig, ServerConfig, StorageConfig};
+use xet_server::config::{AuthConfig, PublicKeyConfig, ServerConfig, StorageConfig};
 
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -75,6 +75,7 @@ fn test_config_auth_settings() {
     let config = ServerConfig {
         auth: AuthConfig {
             public_key_path: "/path/to/key.pem".to_string(),
+            public_keys: Vec::new(),
             trusted_kids: vec!["kid1".to_string(), "kid2".to_string()],
             private_key_path: None,
             signing_kid: None,
@@ -220,6 +221,78 @@ fn test_try_from_env_rejects_invalid_auth_key_ids() {
 }
 
 #[test]
+fn test_try_from_env_builds_ordered_public_keyring() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let _public_base_url = ScopedEnv::remove("XET_PUBLIC_BASE_URL");
+    let _legacy_key = ScopedEnv::set("CAS_PUBLIC_KEY_PATH", "");
+    let _public_keys = ScopedEnv::set(
+        "CAS_PUBLIC_KEYS",
+        "old=/keys/old-public.pem,new=/keys/new-public.pem",
+    );
+    let _trusted_kids = ScopedEnv::remove("CAS_TRUSTED_KIDS");
+    let _signing_kid = ScopedEnv::remove("CAS_SIGNING_KID");
+
+    let config = ServerConfig::try_from_env().expect("valid keyring should load");
+
+    assert_eq!(
+        config.auth.public_keys,
+        vec![
+            PublicKeyConfig {
+                kid: "old".to_string(),
+                path: "/keys/old-public.pem".to_string(),
+            },
+            PublicKeyConfig {
+                kid: "new".to_string(),
+                path: "/keys/new-public.pem".to_string(),
+            },
+        ]
+    );
+    assert_eq!(config.auth.trusted_kids, vec!["old", "new"]);
+}
+
+#[test]
+fn test_try_from_env_applies_keyring_allowlist() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let _public_base_url = ScopedEnv::remove("XET_PUBLIC_BASE_URL");
+    let _public_keys = ScopedEnv::set(
+        "CAS_PUBLIC_KEYS",
+        "old=/keys/old-public.pem,new=/keys/new-public.pem",
+    );
+
+    {
+        let _trusted_kids = ScopedEnv::set("CAS_TRUSTED_KIDS", "new");
+        let config = ServerConfig::try_from_env().expect("known allowlist kid should load");
+        assert_eq!(config.auth.trusted_kids, vec!["new"]);
+    }
+    {
+        let _trusted_kids = ScopedEnv::set("CAS_TRUSTED_KIDS", "missing");
+        let err = ServerConfig::try_from_env()
+            .expect_err("allowlist kid absent from keyring should be rejected");
+        assert!(err.contains("not configured in CAS_PUBLIC_KEYS"));
+    }
+}
+
+#[test]
+fn test_try_from_env_rejects_malformed_public_keyring() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let _public_base_url = ScopedEnv::remove("XET_PUBLIC_BASE_URL");
+    let _trusted_kids = ScopedEnv::remove("CAS_TRUSTED_KIDS");
+
+    for value in [
+        "",
+        "missing-separator",
+        "=/keys/public.pem",
+        "kid=",
+        "kid=/keys/one.pem,kid=/keys/two.pem",
+    ] {
+        let public_keys = ScopedEnv::set("CAS_PUBLIC_KEYS", value);
+        let err = ServerConfig::try_from_env().expect_err("malformed keyring should be rejected");
+        assert!(err.contains("CAS_PUBLIC_KEYS"), "unexpected error: {err}");
+        drop(public_keys);
+    }
+}
+
+#[test]
 fn test_try_from_env_requires_http_urls() {
     let _guard = ENV_LOCK.lock().unwrap();
 
@@ -245,6 +318,7 @@ fn test_config_serialization() {
     let json = serde_json::to_string(&config).unwrap();
     let deserialized: ServerConfig = serde_json::from_str(&json).unwrap();
     assert_eq!(deserialized.server.port, config.server.port);
+    assert_eq!(deserialized.auth.public_keys, config.auth.public_keys);
     assert_eq!(deserialized.auth.trusted_kids, config.auth.trusted_kids);
 }
 

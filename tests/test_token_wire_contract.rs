@@ -8,7 +8,7 @@ use xet_server::api::auth::{
     AuthError, AuthVerifier, KeyPair, XetClaims, sign_internal_token, sign_proxy_claims_token,
     sign_xet_token, verify_xet_token,
 };
-use xet_server::config::AuthConfig;
+use xet_server::config::{AuthConfig, PublicKeyConfig};
 
 fn verifier_for_signing_key(
     signing_key: &SigningKey,
@@ -21,6 +21,7 @@ fn verifier_for_signing_key(
 
     let verifier = AuthVerifier::from_config(&AuthConfig {
         public_key_path: public_key_path.to_str().unwrap().to_string(),
+        public_keys: Vec::new(),
         trusted_kids: vec![kid.to_string()],
         private_key_path: None,
         signing_kid: None,
@@ -117,6 +118,172 @@ fn hub_signed_user_proxy_and_internal_tokens_verify_in_cas() {
     let internal_claims = verifier.verify_token(&internal_token).unwrap();
     assert_eq!(internal_claims.token_type, "internal");
     assert_eq!(internal_claims.scope, "internal");
+}
+
+#[test]
+fn cas_keyring_selects_the_exact_public_key_by_kid() {
+    let old_key = SigningKey::generate(&mut OsRng);
+    let new_key = SigningKey::generate(&mut OsRng);
+    let temp_dir = tempfile::tempdir().unwrap();
+    let old_path = temp_dir.path().join("old-public.pem");
+    let new_path = temp_dir.path().join("new-public.pem");
+    std::fs::write(
+        &old_path,
+        KeyPair::public_key_to_pem(&old_key.verifying_key()).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        &new_path,
+        KeyPair::public_key_to_pem(&new_key.verifying_key()).unwrap(),
+    )
+    .unwrap();
+
+    let verifier = AuthVerifier::from_config(&AuthConfig {
+        public_key_path: String::new(),
+        public_keys: vec![
+            PublicKeyConfig {
+                kid: "old".to_string(),
+                path: old_path.to_string_lossy().into_owned(),
+            },
+            PublicKeyConfig {
+                kid: "new".to_string(),
+                path: new_path.to_string_lossy().into_owned(),
+            },
+        ],
+        trusted_kids: vec!["old".to_string(), "new".to_string()],
+        private_key_path: None,
+        signing_kid: None,
+    })
+    .unwrap();
+
+    for (key, kid) in [(&old_key, "old"), (&new_key, "new")] {
+        let token = sign_raw_token(
+            key,
+            &claims(TokenKind::User, kid, "read"),
+            "xet_",
+            "EdDSA",
+            "JWT",
+            kid,
+        );
+        assert_eq!(verifier.verify_token(&token).unwrap().kid, kid);
+    }
+
+    let wrong_key_token = sign_raw_token(
+        &new_key,
+        &claims(TokenKind::User, "old", "read"),
+        "xet_",
+        "EdDSA",
+        "JWT",
+        "old",
+    );
+    assert_eq!(
+        verifier.verify_token(&wrong_key_token),
+        Err(AuthError::InvalidSignature)
+    );
+
+    let unknown_kid_token = sign_raw_token(
+        &new_key,
+        &claims(TokenKind::User, "unknown", "read"),
+        "xet_",
+        "EdDSA",
+        "JWT",
+        "unknown",
+    );
+    assert_eq!(
+        verifier.verify_token(&unknown_kid_token),
+        Err(AuthError::UnknownKid)
+    );
+}
+
+#[test]
+fn legacy_single_public_key_accepts_each_trusted_kid() {
+    let signing_key = SigningKey::generate(&mut OsRng);
+    let temp_dir = tempfile::tempdir().unwrap();
+    let public_key_path = temp_dir.path().join("legacy-public.pem");
+    std::fs::write(
+        &public_key_path,
+        KeyPair::public_key_to_pem(&signing_key.verifying_key()).unwrap(),
+    )
+    .unwrap();
+    let verifier = AuthVerifier::from_config(&AuthConfig {
+        public_key_path: public_key_path.to_string_lossy().into_owned(),
+        public_keys: Vec::new(),
+        trusted_kids: vec!["old".to_string(), "new".to_string()],
+        private_key_path: None,
+        signing_kid: None,
+    })
+    .unwrap();
+
+    for kid in ["old", "new"] {
+        let token = sign_raw_token(
+            &signing_key,
+            &claims(TokenKind::User, kid, "read"),
+            "xet_",
+            "EdDSA",
+            "JWT",
+            kid,
+        );
+        assert_eq!(verifier.verify_token(&token).unwrap().kid, kid);
+    }
+}
+
+#[test]
+fn keyring_allowlist_excludes_untrusted_key_without_loading_it() {
+    let signing_key = SigningKey::generate(&mut OsRng);
+    let temp_dir = tempfile::tempdir().unwrap();
+    let trusted_path = temp_dir.path().join("trusted-public.pem");
+    std::fs::write(
+        &trusted_path,
+        KeyPair::public_key_to_pem(&signing_key.verifying_key()).unwrap(),
+    )
+    .unwrap();
+    let verifier = AuthVerifier::from_config(&AuthConfig {
+        public_key_path: String::new(),
+        public_keys: vec![
+            PublicKeyConfig {
+                kid: "excluded".to_string(),
+                path: temp_dir
+                    .path()
+                    .join("does-not-exist.pem")
+                    .to_string_lossy()
+                    .into_owned(),
+            },
+            PublicKeyConfig {
+                kid: "trusted".to_string(),
+                path: trusted_path.to_string_lossy().into_owned(),
+            },
+        ],
+        trusted_kids: vec!["trusted".to_string()],
+        private_key_path: None,
+        signing_kid: None,
+    })
+    .expect("excluded key path must not be loaded");
+
+    let trusted_token = sign_raw_token(
+        &signing_key,
+        &claims(TokenKind::User, "trusted", "read"),
+        "xet_",
+        "EdDSA",
+        "JWT",
+        "trusted",
+    );
+    assert_eq!(
+        verifier.verify_token(&trusted_token).unwrap().kid,
+        "trusted"
+    );
+
+    let excluded_token = sign_raw_token(
+        &signing_key,
+        &claims(TokenKind::User, "excluded", "read"),
+        "xet_",
+        "EdDSA",
+        "JWT",
+        "excluded",
+    );
+    assert_eq!(
+        verifier.verify_token(&excluded_token),
+        Err(AuthError::UnknownKid)
+    );
 }
 
 #[test]

@@ -94,6 +94,42 @@ struct JwtHeader {
     kid: String,
 }
 
+fn token_parts(token: &str) -> Result<(TokenKind, [&str; 3]), TokenWireError> {
+    let (kind, token_body) = TokenKind::from_prefix(token).ok_or(TokenWireError::InvalidToken)?;
+    let mut parts = token_body.split('.');
+    let header = parts.next().ok_or(TokenWireError::InvalidToken)?;
+    let claims = parts.next().ok_or(TokenWireError::InvalidToken)?;
+    let signature = parts.next().ok_or(TokenWireError::InvalidToken)?;
+    if parts.next().is_some() {
+        return Err(TokenWireError::InvalidToken);
+    }
+    Ok((kind, [header, claims, signature]))
+}
+
+fn decode_header(encoded: &str) -> Result<JwtHeader, TokenWireError> {
+    let header_bytes = URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|_| TokenWireError::InvalidToken)?;
+    let header: JwtHeader =
+        serde_json::from_slice(&header_bytes).map_err(|_| TokenWireError::InvalidToken)?;
+    if header.alg != "EdDSA" || header.typ != "JWT" {
+        return Err(TokenWireError::InvalidToken);
+    }
+    if header.kid.is_empty() {
+        return Err(TokenWireError::UnknownKid);
+    }
+    Ok(header)
+}
+
+/// Read the unverified `kid` from a structurally valid token header.
+///
+/// The returned value is only a key-selection hint. Callers must still verify
+/// the signature and claims with the selected key before trusting it.
+pub fn unverified_token_kid(token: &str) -> Result<String, TokenWireError> {
+    let (_, parts) = token_parts(token)?;
+    Ok(decode_header(parts[0])?.kid)
+}
+
 pub fn sign_claims(
     claims: &XetClaims,
     signing_key: &SigningKey,
@@ -142,20 +178,8 @@ pub fn verify_token_any_kind(
     public_key: &VerifyingKey,
     expected_kid: &str,
 ) -> Result<(TokenKind, XetClaims), TokenWireError> {
-    let (kind, token_body) = TokenKind::from_prefix(token).ok_or(TokenWireError::InvalidToken)?;
-    let parts: Vec<&str> = token_body.split('.').collect();
-    if parts.len() != 3 {
-        return Err(TokenWireError::InvalidToken);
-    }
-
-    let header_bytes = URL_SAFE_NO_PAD
-        .decode(parts[0])
-        .map_err(|_| TokenWireError::InvalidToken)?;
-    let header: JwtHeader =
-        serde_json::from_slice(&header_bytes).map_err(|_| TokenWireError::InvalidToken)?;
-    if header.alg != "EdDSA" || header.typ != "JWT" {
-        return Err(TokenWireError::InvalidToken);
-    }
+    let (kind, parts) = token_parts(token)?;
+    let header = decode_header(parts[0])?;
     if header.kid != expected_kid {
         return Err(TokenWireError::UnknownKid);
     }
@@ -186,7 +210,7 @@ pub fn verify_token_any_kind(
         .duration_since(UNIX_EPOCH)
         .map_err(|_| TokenWireError::InvalidToken)?
         .as_secs();
-    if claims.exp < now {
+    if claims.exp <= now {
         return Err(TokenWireError::Expired);
     }
 
@@ -301,6 +325,34 @@ mod tests {
 
         assert_eq!(kind, TokenKind::Internal);
         assert_eq!(verified, claims);
+    }
+
+    #[test]
+    fn unverified_kid_is_available_for_key_selection() {
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let claims = claims(TokenKind::User, "rotation-key");
+        let token = sign_claims(&claims, &signing_key, TokenKind::User).unwrap();
+
+        assert_eq!(
+            unverified_token_kid(&token).unwrap(),
+            "rotation-key".to_string()
+        );
+    }
+
+    #[test]
+    fn token_expiring_at_current_second_is_expired() {
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let kid = "kid-1";
+        let now = now_secs();
+        let mut claims = claims(TokenKind::User, kid);
+        claims.iat = now;
+        claims.exp = now;
+        let token = sign_claims(&claims, &signing_key, TokenKind::User).unwrap();
+
+        let err = verify_token(&token, &signing_key.verifying_key(), kid, TokenKind::User)
+            .expect_err("exp equal to current time must be rejected");
+
+        assert_eq!(err, TokenWireError::Expired);
     }
 
     #[test]
