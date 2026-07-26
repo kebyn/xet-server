@@ -1,11 +1,16 @@
 [workspace]
 members = [".", "hub", "xet-auth-types"]
-resolver = "2"
+resolver = "3"
+
+[patch.crates-io]
+lru = { path = "vendor/lru" }
+time = { path = "vendor/time" }
 
 [package]
 name = "xet-server"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 
 [dependencies]
 xet-auth-types = { path = "xet-auth-types" }
@@ -21,11 +26,9 @@ tokio-util = { version = "0.7", features = ["io"] }
 async-stream = "0.3"
 actix-web = "4.5"
 serde_json = "1.0"
-bincode = "1.3"
 async-trait = "0.1"
 bytes = "1.5"
 aws-sdk-s3 = { version = "1.15", default-features = false, features = ["sigv4a", "http-1x", "default-https-client", "rt-tokio"] }
-aws-config = "1.1"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 lazy_static = "1.4"

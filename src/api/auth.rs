@@ -356,9 +356,10 @@ pub fn extract_token_from_request(req: &actix_web::HttpRequest) -> Option<String
     }
 
     // Try Basic auth (username:password where password is JWT token)
-    if let Some(encoded) = auth_str.strip_prefix("Basic ")
-        && let Ok(decoded) = BASE64.decode(encoded)
-        && let Ok(credentials) = String::from_utf8(decoded)
+    if let Some(credentials) = auth_str
+        .strip_prefix("Basic ")
+        .and_then(|encoded| BASE64.decode(encoded).ok())
+        .and_then(|decoded| String::from_utf8(decoded).ok())
     {
         // Format: username:password (split only on first colon to preserve
         // passwords that may contain ':' characters)

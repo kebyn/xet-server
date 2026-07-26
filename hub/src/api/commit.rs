@@ -237,13 +237,13 @@ mod tests {
             _data: bytes::Bytes,
             token: &str,
         ) -> Result<(), CasUploadError> {
-            if let Some(prefix) = self.required_upload_token_prefix
-                && !token.starts_with(prefix)
-            {
-                return Err(CasUploadError {
-                    status: 401,
-                    message: format!("expected upload token prefix {prefix}"),
-                });
+            if let Some(prefix) = self.required_upload_token_prefix {
+                if !token.starts_with(prefix) {
+                    return Err(CasUploadError {
+                        status: 401,
+                        message: format!("expected upload token prefix {prefix}"),
+                    });
+                }
             }
 
             if self.allow_uploads {

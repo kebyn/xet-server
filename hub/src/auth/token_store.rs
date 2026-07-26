@@ -245,9 +245,7 @@ impl TokenStore {
                 }
 
                 // Check if expired
-                if let Some(exp) = row.expires_at
-                    && exp < now
-                {
+                if row.expires_at.is_some_and(|exp| exp < now) {
                     return Ok(None);
                 }
 

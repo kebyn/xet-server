@@ -16,9 +16,13 @@ pub(crate) fn extract_token(req: &HttpRequest) -> Option<String> {
 
         if let Some(encoded) = auth_str.strip_prefix("Basic ") {
             use base64::{Engine as _, engine::general_purpose::STANDARD};
-            if let Ok(decoded) = STANDARD.decode(encoded)
-                && let Ok(creds) = String::from_utf8(decoded)
-                && let Some((_user, pass)) = creds.split_once(':')
+            let credentials = STANDARD
+                .decode(encoded)
+                .ok()
+                .and_then(|decoded| String::from_utf8(decoded).ok());
+            if let Some(pass) = credentials
+                .as_deref()
+                .and_then(|creds| creds.split_once(':').map(|(_user, pass)| pass))
             {
                 return Some(pass.to_string());
             }
@@ -35,11 +39,16 @@ pub(crate) fn extract_token(req: &HttpRequest) -> Option<String> {
 pub(crate) fn extract_proxy_token(req: &HttpRequest) -> Option<String> {
     if let Some(query) = req.uri().query() {
         for pair in query.split('&') {
-            if let Some((key, value)) = pair.split_once('=')
-                && key == "token"
-                && let Ok(decoded) = percent_encoding::percent_decode_str(value).decode_utf8()
-                && decoded.starts_with("proxy_")
-            {
+            let Some((key, value)) = pair.split_once('=') else {
+                continue;
+            };
+            if key != "token" {
+                continue;
+            }
+            let Ok(decoded) = percent_encoding::percent_decode_str(value).decode_utf8() else {
+                continue;
+            };
+            if decoded.starts_with("proxy_") {
                 tracing::info!(
                     path = %req.uri().path(),
                     "Proxy token received via query parameter (short-lived, OID-bound)"
