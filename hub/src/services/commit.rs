@@ -101,26 +101,41 @@ impl CommitService {
             .await
             .map_err(map_metadata_load_error)?;
 
-        let ParsedCommit {
-            header,
-            files,
-            lfs_files,
-            deleted_entries,
-        } = parse_commit_body(request.body)?;
+        let ParsedCommit { header, operations } = parse_commit_body(request.body)?;
 
-        let current_head = self.metadata.get_head(repo.id).await.ok().flatten();
+        let current_head = self
+            .metadata
+            .get_head(repo.id)
+            .await
+            .map_err(map_metadata_load_error)?;
         let parent_revision = header.parent_revision.clone();
         ensure_parent_matches_head(parent_revision.as_deref(), current_head.as_deref())?;
+        let parent_entries = self
+            .load_parent_tree(repo.id, current_head.as_deref())
+            .await?;
 
-        let (internal_token, _) = self.signer.sign_internal().map_err(|err| {
-            CommitServiceError::Internal(format!("Failed to sign internal token: {}", err))
-        })?;
+        let internal_token = if operations
+            .iter()
+            .any(|operation| matches!(operation, TreeOperation::LfsFile(_)))
+        {
+            self.signer
+                .sign_internal()
+                .map(|(token, _)| token)
+                .map_err(|err| {
+                    CommitServiceError::Internal(format!("Failed to sign internal token: {}", err))
+                })?
+        } else {
+            String::new()
+        };
 
         let timestamp = now_timestamp();
         let commit_id =
             generate_commit_id(repo.id, current_head.as_deref(), &header.summary, timestamp);
 
-        let cas_write_token = if files.is_empty() {
+        let cas_write_token = if operations
+            .iter()
+            .all(|operation| !matches!(operation, TreeOperation::File(_)))
+        {
             String::new()
         } else {
             self.signer
@@ -137,30 +152,31 @@ impl CommitService {
                 })?
         };
 
-        let mut file_entries: Vec<FileEntry> = Vec::new();
-        for file_op in files {
-            let entry = self
-                .process_inline_file(file_op, repo.id, &commit_id, &cas_write_token)
-                .await?;
-            file_entries.push(entry);
+        let mut changes = Vec::with_capacity(operations.len());
+        for operation in operations {
+            let change = match operation {
+                TreeOperation::File(file_op) => TreeChange::Upsert(
+                    self.process_inline_file(file_op, repo.id, &commit_id, &cas_write_token)
+                        .await?,
+                ),
+                TreeOperation::LfsFile(lfs_op) => TreeChange::Upsert(
+                    self.process_lfs_file(lfs_op, repo.id, &commit_id, &internal_token)
+                        .await?,
+                ),
+                TreeOperation::DeletedEntry(deleted) => {
+                    validate_file_path(&deleted.path).map_err(|msg| {
+                        CommitServiceError::Validation(format!(
+                            "Invalid deleted entry path: {}",
+                            msg
+                        ))
+                    })?;
+                    TreeChange::Delete(deleted.path)
+                }
+            };
+            changes.push(change);
         }
 
-        for lfs_op in lfs_files {
-            let entry = self
-                .process_lfs_file(lfs_op, repo.id, &commit_id, &internal_token)
-                .await?;
-            file_entries.push(entry);
-        }
-
-        let final_entries = self
-            .build_final_tree(
-                repo.id,
-                current_head.as_deref(),
-                &commit_id,
-                deleted_entries,
-                file_entries,
-            )
-            .await?;
+        let final_entries = Self::build_final_tree(repo.id, &commit_id, parent_entries, changes);
 
         let revision = Revision {
             commit_id: commit_id.clone(),
@@ -207,7 +223,7 @@ impl CommitService {
             .metadata
             .is_namespace_member(username, namespace)
             .await
-            .unwrap_or(false);
+            .map_err(map_metadata_load_error)?;
         if has_access {
             return Ok(());
         }
@@ -283,6 +299,12 @@ impl CommitService {
                 lfs_op.path
             )));
         }
+        i64::try_from(lfs_op.size).map_err(|_| {
+            CommitServiceError::Validation(format!(
+                "LFS file size for {} exceeds the supported metadata range",
+                lfs_op.path
+            ))
+        })?;
 
         match self.cas_client.head_blob(&lfs_op.oid, internal_token).await {
             Ok(_) => {}
@@ -310,66 +332,71 @@ impl CommitService {
         })
     }
 
-    async fn build_final_tree(
+    async fn load_parent_tree(
         &self,
         repo_id: i64,
         current_head: Option<&str>,
-        commit_id: &str,
-        deleted_entries: Vec<DeletedEntryOperation>,
-        file_entries: Vec<FileEntry>,
     ) -> Result<Vec<FileEntry>, CommitServiceError> {
-        let parent_entries = if let Some(parent_commit) = current_head {
+        if let Some(parent_commit) = current_head {
             self.metadata
                 .get_file_tree(repo_id, parent_commit)
                 .await
-                .ok()
-                .unwrap_or_default()
+                .map_err(map_metadata_load_error)
         } else {
-            Vec::new()
-        };
+            Ok(Vec::new())
+        }
+    }
 
+    fn build_final_tree(
+        repo_id: i64,
+        commit_id: &str,
+        parent_entries: Vec<FileEntry>,
+        changes: Vec<TreeChange>,
+    ) -> Vec<FileEntry> {
         let mut final_entries: HashMap<String, FileEntry> = HashMap::new();
-        for entry in parent_entries {
+        for mut entry in parent_entries {
+            entry.repo_id = repo_id;
+            entry.commit_id = commit_id.to_string();
             final_entries.insert(entry.path.clone(), entry);
         }
 
-        for deleted in deleted_entries {
-            validate_file_path(&deleted.path).map_err(|msg| {
-                CommitServiceError::Validation(format!("Invalid deleted entry path: {}", msg))
-            })?;
-            final_entries.remove(&deleted.path);
+        for change in changes {
+            match change {
+                TreeChange::Delete(path) => {
+                    final_entries.remove(&path);
+                }
+                TreeChange::Upsert(mut entry) => {
+                    entry.repo_id = repo_id;
+                    entry.commit_id = commit_id.to_string();
+                    final_entries.insert(entry.path.clone(), entry);
+                }
+            }
         }
 
-        for entry in file_entries {
-            final_entries.insert(
-                entry.path.clone(),
-                FileEntry {
-                    path: entry.path,
-                    repo_id,
-                    commit_id: commit_id.to_string(),
-                    size: entry.size,
-                    cas_hash: entry.cas_hash,
-                    is_lfs: entry.is_lfs,
-                },
-            );
-        }
-
-        Ok(final_entries.values().cloned().collect())
+        final_entries.into_values().collect()
     }
 }
 
 struct ParsedCommit {
     header: CommitHeader,
-    files: Vec<FileOperation>,
-    lfs_files: Vec<LfsFileOperation>,
-    deleted_entries: Vec<DeletedEntryOperation>,
+    operations: Vec<TreeOperation>,
+}
+
+enum TreeOperation {
+    File(FileOperation),
+    LfsFile(LfsFileOperation),
+    DeletedEntry(DeletedEntryOperation),
+}
+
+enum TreeChange {
+    Upsert(FileEntry),
+    Delete(String),
 }
 
 fn parse_commit_body(body: &str) -> Result<ParsedCommit, CommitServiceError> {
     let mut header: Option<CommitHeader> = None;
-    let mut files = Vec::new();
-    let mut lfs_files = Vec::new();
-    let mut deleted_entries = Vec::new();
+    let mut operations = Vec::new();
+    let mut operation_index = 0usize;
 
     for line in body.lines() {
         if line.trim().is_empty() {
@@ -378,23 +405,38 @@ fn parse_commit_body(body: &str) -> Result<ParsedCommit, CommitServiceError> {
         let op: CommitOperation = serde_json::from_str(line).map_err(|err| {
             CommitServiceError::Validation(format!("Invalid NDJSON line: {}", err))
         })?;
-        match op {
-            CommitOperation::Header(parsed_header) => header = Some(parsed_header),
-            CommitOperation::File(file) => files.push(file),
-            CommitOperation::LfsFile(lfs_file) => lfs_files.push(lfs_file),
-            CommitOperation::DeletedEntry(deleted_entry) => deleted_entries.push(deleted_entry),
+        if operation_index == 0 {
+            match op {
+                CommitOperation::Header(parsed_header) => header = Some(parsed_header),
+                _ => {
+                    return Err(CommitServiceError::Validation(
+                        "Commit header must be the first non-empty operation".to_string(),
+                    ));
+                }
+            }
+        } else {
+            match op {
+                CommitOperation::Header(_) => {
+                    return Err(CommitServiceError::Validation(
+                        "Commit must contain exactly one header".to_string(),
+                    ));
+                }
+                CommitOperation::File(file) => operations.push(TreeOperation::File(file)),
+                CommitOperation::LfsFile(lfs_file) => {
+                    operations.push(TreeOperation::LfsFile(lfs_file));
+                }
+                CommitOperation::DeletedEntry(deleted_entry) => {
+                    operations.push(TreeOperation::DeletedEntry(deleted_entry));
+                }
+            }
         }
+        operation_index += 1;
     }
 
     let header = header
         .ok_or_else(|| CommitServiceError::Validation("Missing header in commit".to_string()))?;
 
-    Ok(ParsedCommit {
-        header,
-        files,
-        lfs_files,
-        deleted_entries,
-    })
+    Ok(ParsedCommit { header, operations })
 }
 
 fn ensure_parent_matches_head(
@@ -448,9 +490,11 @@ mod tests {
     use crate::auth::xet_signer::XetSigner;
     use crate::cas_client::{BlobState, CasClientTrait, CasUploadError};
     use crate::error::HubError;
-    use crate::metadata::{MetadataStore, RepoType, SqliteMetadataStore};
+    use crate::metadata::{
+        FileEntry, MetadataError, MetadataStore, Repo, RepoType, Revision, SqliteMetadataStore,
+    };
 
-    use super::{CommitRequest, CommitService};
+    use super::{CommitRequest, CommitService, CommitServiceError, parse_commit_body};
 
     struct MockCasClient;
 
@@ -474,6 +518,146 @@ mod tests {
     fn signer() -> Arc<XetSigner> {
         let signing_key = SigningKey::generate(&mut OsRng);
         Arc::new(XetSigner::new(signing_key, "test-key", 3600, 300))
+    }
+
+    #[derive(Clone, Copy)]
+    enum FailurePoint {
+        GetHead,
+        GetFileTree,
+        Membership,
+    }
+
+    struct FaultMetadataStore {
+        failure: FailurePoint,
+    }
+
+    impl FaultMetadataStore {
+        fn repo() -> Repo {
+            Repo {
+                id: 1,
+                name: "repo".to_string(),
+                namespace: "owner".to_string(),
+                repo_type: RepoType::Model,
+                sha: None,
+                private: false,
+                created_at: 1,
+                updated_at: 1,
+            }
+        }
+
+        fn injected_error(operation: &str) -> MetadataError {
+            MetadataError::DatabaseError(format!("injected {} failure", operation))
+        }
+    }
+
+    #[async_trait]
+    impl MetadataStore for FaultMetadataStore {
+        async fn create_repo(
+            &self,
+            _namespace: &str,
+            _name: &str,
+            _repo_type: RepoType,
+            _private: bool,
+        ) -> Result<Repo, MetadataError> {
+            unreachable!("create_repo is not used by these tests")
+        }
+
+        async fn get_repo(
+            &self,
+            _namespace: &str,
+            _name: &str,
+            _repo_type: RepoType,
+        ) -> Result<Repo, MetadataError> {
+            Ok(Self::repo())
+        }
+
+        async fn delete_repo(&self, _repo_id: i64) -> Result<(), MetadataError> {
+            unreachable!("delete_repo is not used by these tests")
+        }
+
+        async fn add_revision(&self, _revision: Revision) -> Result<(), MetadataError> {
+            unreachable!("add_revision is not used by these tests")
+        }
+
+        async fn get_revision(
+            &self,
+            _repo_id: i64,
+            _commit_id: &str,
+        ) -> Result<Revision, MetadataError> {
+            unreachable!("get_revision is not used by these tests")
+        }
+
+        async fn get_head(&self, _repo_id: i64) -> Result<Option<String>, MetadataError> {
+            match self.failure {
+                FailurePoint::GetHead => Err(Self::injected_error("get_head")),
+                _ => Ok(Some("parent".to_string())),
+            }
+        }
+
+        async fn set_head(&self, _repo_id: i64, _commit_id: &str) -> Result<(), MetadataError> {
+            unreachable!("set_head is not used by these tests")
+        }
+
+        async fn get_commit_log(
+            &self,
+            _repo_id: i64,
+            _limit: Option<usize>,
+        ) -> Result<Vec<Revision>, MetadataError> {
+            unreachable!("get_commit_log is not used by these tests")
+        }
+
+        async fn add_file_entries(&self, _entries: Vec<FileEntry>) -> Result<(), MetadataError> {
+            unreachable!("add_file_entries is not used by these tests")
+        }
+
+        async fn get_file_tree(
+            &self,
+            _repo_id: i64,
+            _commit_id: &str,
+        ) -> Result<Vec<FileEntry>, MetadataError> {
+            match self.failure {
+                FailurePoint::GetFileTree => Err(Self::injected_error("get_file_tree")),
+                _ => Ok(Vec::new()),
+            }
+        }
+
+        async fn get_file_tree_prefix(
+            &self,
+            _repo_id: i64,
+            _commit_id: &str,
+            _prefix: &str,
+        ) -> Result<Vec<FileEntry>, MetadataError> {
+            unreachable!("get_file_tree_prefix is not used by these tests")
+        }
+
+        async fn resolve_file(
+            &self,
+            _repo_id: i64,
+            _commit_id: &str,
+            _path: &str,
+        ) -> Result<FileEntry, MetadataError> {
+            unreachable!("resolve_file is not used by these tests")
+        }
+
+        async fn commit_atomic(
+            &self,
+            _rev: &Revision,
+            _entries: &[FileEntry],
+            _expected_parent: Option<&str>,
+        ) -> Result<(), MetadataError> {
+            unreachable!("commit_atomic must not run after an injected read failure")
+        }
+
+        async fn is_namespace_member(
+            &self,
+            _username: &str,
+            _namespace: &str,
+        ) -> Result<bool, MetadataError> {
+            match self.failure {
+                FailurePoint::Membership => Err(Self::injected_error("membership")),
+                _ => Ok(true),
+            }
+        }
     }
 
     #[tokio::test]
@@ -512,5 +696,202 @@ mod tests {
             metadata.get_head(repo.id).await.unwrap(),
             Some(result.commit_oid)
         );
+    }
+
+    #[test]
+    fn commit_header_must_be_unique_and_first() {
+        let header =
+            "{\"key\":\"header\",\"value\":{\"summary\":\"first\",\"parentRevision\":null}}";
+        let file = "{\"key\":\"file\",\"value\":{\"path\":\"a.txt\",\"content\":\"YQ==\"}}";
+
+        let err = parse_commit_body(&format!("{}\n{}", file, header))
+            .err()
+            .expect("header after a file must be rejected");
+        assert!(matches!(err, CommitServiceError::Validation(_)));
+        assert!(err_message(err).contains("first non-empty"));
+
+        let err = parse_commit_body(&format!("{}\n{}", header, header))
+            .err()
+            .expect("duplicate header must be rejected");
+        assert!(err_message(err).contains("exactly one header"));
+
+        let parsed = parse_commit_body(&format!("\n  \n{}\n", header))
+            .expect("blank lines before the sole header are allowed");
+        assert_eq!(parsed.header.summary, "first");
+    }
+
+    fn err_message(err: CommitServiceError) -> String {
+        match err {
+            CommitServiceError::Validation(message) | CommitServiceError::Internal(message) => {
+                message
+            }
+            other => panic!("unexpected commit error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn commit_preserves_parent_snapshot_and_request_operation_order() {
+        let metadata = Arc::new(SqliteMetadataStore::in_memory().await.unwrap());
+        let repo = metadata
+            .create_repo("owner", "ordered", RepoType::Model, false)
+            .await
+            .unwrap();
+        let service = CommitService::new(metadata.clone(), Arc::new(MockCasClient), signer());
+
+        let initial = service
+            .commit(CommitRequest {
+                username: "owner",
+                namespace: "owner",
+                repo_name: "ordered",
+                revision: "main",
+                repo_type: RepoType::Model,
+                body: "{\"key\":\"header\",\"value\":{\"summary\":\"initial\",\"parentRevision\":null}}\n\
+                       {\"key\":\"file\",\"value\":{\"path\":\"keep.txt\",\"content\":\"a2VlcA==\"}}\n\
+                       {\"key\":\"file\",\"value\":{\"path\":\"target.txt\",\"content\":\"b2xk\"}}",
+            })
+            .await
+            .unwrap();
+
+        let file_then_delete = format!(
+            "{{\"key\":\"header\",\"value\":{{\"summary\":\"file then delete\",\"parentRevision\":\"{}\"}}}}\n\
+             {{\"key\":\"file\",\"value\":{{\"path\":\"target.txt\",\"content\":\"bmV3\"}}}}\n\
+             {{\"key\":\"deletedEntry\",\"value\":{{\"path\":\"target.txt\"}}}}",
+            initial.commit_oid
+        );
+        let second = service
+            .commit(CommitRequest {
+                username: "owner",
+                namespace: "owner",
+                repo_name: "ordered",
+                revision: "main",
+                repo_type: RepoType::Model,
+                body: &file_then_delete,
+            })
+            .await
+            .unwrap();
+        let second_tree = metadata
+            .get_file_tree(repo.id, &second.commit_oid)
+            .await
+            .unwrap();
+        assert_eq!(
+            second_tree
+                .iter()
+                .map(|entry| entry.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["keep.txt"]
+        );
+        assert!(
+            second_tree
+                .iter()
+                .all(|entry| entry.commit_id == second.commit_oid),
+            "unchanged parent entries must be copied into the new snapshot"
+        );
+
+        let delete_then_file = format!(
+            "{{\"key\":\"header\",\"value\":{{\"summary\":\"delete then file\",\"parentRevision\":\"{}\"}}}}\n\
+             {{\"key\":\"deletedEntry\",\"value\":{{\"path\":\"target.txt\"}}}}\n\
+             {{\"key\":\"file\",\"value\":{{\"path\":\"target.txt\",\"content\":\"bmV3\"}}}}",
+            second.commit_oid
+        );
+        let third = service
+            .commit(CommitRequest {
+                username: "owner",
+                namespace: "owner",
+                repo_name: "ordered",
+                revision: "main",
+                repo_type: RepoType::Model,
+                body: &delete_then_file,
+            })
+            .await
+            .unwrap();
+        let third_tree = metadata
+            .get_file_tree(repo.id, &third.commit_oid)
+            .await
+            .unwrap();
+        assert_eq!(
+            third_tree
+                .iter()
+                .map(|entry| entry.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["keep.txt", "target.txt"]
+        );
+    }
+
+    #[tokio::test]
+    async fn commit_propagates_metadata_read_failures() {
+        for (failure, username, namespace, parent, expected_message) in [
+            (FailurePoint::GetHead, "owner", "owner", None, "get_head"),
+            (
+                FailurePoint::GetFileTree,
+                "owner",
+                "owner",
+                Some("parent"),
+                "get_file_tree",
+            ),
+            (
+                FailurePoint::Membership,
+                "member",
+                "organization",
+                None,
+                "membership",
+            ),
+        ] {
+            let metadata: Arc<dyn MetadataStore> = Arc::new(FaultMetadataStore { failure });
+            let service = CommitService::new(metadata, Arc::new(MockCasClient), signer());
+            let parent_json = parent
+                .map(|value| format!("\"{}\"", value))
+                .unwrap_or_else(|| "null".to_string());
+            let body = format!(
+                "{{\"key\":\"header\",\"value\":{{\"summary\":\"failure\",\"parentRevision\":{}}}}}",
+                parent_json
+            );
+
+            let err = service
+                .commit(CommitRequest {
+                    username,
+                    namespace,
+                    repo_name: "repo",
+                    revision: "main",
+                    repo_type: RepoType::Model,
+                    body: &body,
+                })
+                .await
+                .expect_err("metadata failure must abort the commit");
+
+            assert!(matches!(err, CommitServiceError::Internal(_)));
+            assert!(err_message(err).contains(expected_message));
+        }
+    }
+
+    #[tokio::test]
+    async fn commit_rejects_lfs_size_above_sqlite_integer_range() {
+        let metadata: Arc<dyn MetadataStore> =
+            Arc::new(SqliteMetadataStore::in_memory().await.unwrap());
+        metadata
+            .create_repo("owner", "oversized", RepoType::Model, false)
+            .await
+            .unwrap();
+        let service = CommitService::new(metadata, Arc::new(MockCasClient), signer());
+        let body = format!(
+            "{{\"key\":\"header\",\"value\":{{\"summary\":\"oversized\",\"parentRevision\":null}}}}\n\
+             {{\"key\":\"lfsFile\",\"value\":{{\"path\":\"huge.bin\",\"oid\":\"{}\",\"size\":{}}}}}",
+            "a".repeat(64),
+            u64::MAX
+        );
+
+        let err = service
+            .commit(CommitRequest {
+                username: "owner",
+                namespace: "owner",
+                repo_name: "oversized",
+                revision: "main",
+                repo_type: RepoType::Model,
+                body: &body,
+            })
+            .await
+            .expect_err("oversized LFS metadata must be rejected before CAS lookup");
+
+        assert!(matches!(err, CommitServiceError::Validation(_)));
+        assert!(err_message(err).contains("supported metadata range"));
     }
 }

@@ -98,6 +98,16 @@ fn row_to_revision(row: &sqlx::sqlite::SqliteRow) -> Result<Revision, MetadataEr
 
 /// Map a `sqlx::Row` to a `FileEntry` value.
 fn row_to_file_entry(row: &sqlx::sqlite::SqliteRow) -> Result<FileEntry, MetadataError> {
+    let stored_size = row
+        .try_get::<i64, _>(3)
+        .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+    let size = u64::try_from(stored_size).map_err(|_| {
+        MetadataError::DatabaseError(format!(
+            "Corrupt file_tree row contains negative size {}",
+            stored_size
+        ))
+    })?;
+
     Ok(FileEntry {
         path: row
             .try_get(0)
@@ -108,9 +118,7 @@ fn row_to_file_entry(row: &sqlx::sqlite::SqliteRow) -> Result<FileEntry, Metadat
         commit_id: row
             .try_get(2)
             .map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
-        size: row
-            .try_get::<i64, _>(3)
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))? as u64,
+        size,
         cas_hash: row
             .try_get(4)
             .map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
@@ -118,6 +126,12 @@ fn row_to_file_entry(row: &sqlx::sqlite::SqliteRow) -> Result<FileEntry, Metadat
             .try_get::<i64, _>(5)
             .map_err(|e| MetadataError::DatabaseError(e.to_string()))?
             != 0,
+    })
+}
+
+fn file_size_to_sql(size: u64) -> Result<i64, MetadataError> {
+    i64::try_from(size).map_err(|_| {
+        MetadataError::InvalidOperation(format!("File size {} exceeds SQLite INTEGER range", size))
     })
 }
 
@@ -416,13 +430,14 @@ impl MetadataStore for SqliteMetadataStore {
 
         for entry in &entries {
             let is_lfs_int: i64 = if entry.is_lfs { 1 } else { 0 };
+            let size = file_size_to_sql(entry.size)?;
             sqlx::query(
                 "INSERT OR REPLACE INTO file_tree (path, repo_id, commit_id, size, cas_hash, is_lfs) VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
             )
             .bind(&entry.path)
             .bind(entry.repo_id)
             .bind(&entry.commit_id)
-            .bind(entry.size as i64)
+            .bind(size)
             .bind(&entry.cas_hash)
             .bind(is_lfs_int)
             .execute(&mut *tx)
@@ -583,13 +598,14 @@ impl MetadataStore for SqliteMetadataStore {
             // Insert file entries
             for entry in entries {
                 let is_lfs_int: i64 = if entry.is_lfs { 1 } else { 0 };
+                let size = file_size_to_sql(entry.size)?;
                 sqlx::query(
                     "INSERT OR REPLACE INTO file_tree (path, repo_id, commit_id, size, cas_hash, is_lfs) VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
                 )
                 .bind(&entry.path)
                 .bind(entry.repo_id)
                 .bind(&entry.commit_id)
-                .bind(entry.size as i64)
+                .bind(size)
                 .bind(&entry.cas_hash)
                 .bind(is_lfs_int)
                 .execute(&mut *conn)
@@ -685,5 +701,81 @@ mod tests {
             .unwrap();
         let paths: Vec<_> = entries.into_iter().map(|e| e.path).collect();
         assert_eq!(paths, vec!["models/a.bin".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_negative_stored_file_size_is_reported_as_corruption() {
+        let store = SqliteMetadataStore::in_memory().await.unwrap();
+        let repo = store
+            .create_repo("ns", "negative-size", RepoType::Model, false)
+            .await
+            .unwrap();
+        let revision = Revision {
+            commit_id: "negative-size-commit".to_string(),
+            repo_id: repo.id,
+            parent: None,
+            message: "corrupt fixture".to_string(),
+            author: "ns".to_string(),
+            created_at: 1,
+        };
+        store.add_revision(revision).await.unwrap();
+        sqlx::query(
+            "INSERT INTO file_tree (path, repo_id, commit_id, size, cas_hash, is_lfs) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )
+        .bind("bad.bin")
+        .bind(repo.id)
+        .bind("negative-size-commit")
+        .bind(-1_i64)
+        .bind("bad-hash")
+        .bind(1_i64)
+        .execute(&store.pool)
+        .await
+        .unwrap();
+
+        let err = store
+            .get_file_tree(repo.id, "negative-size-commit")
+            .await
+            .expect_err("negative SQLite size must not become a huge u64");
+
+        assert!(matches!(err, MetadataError::DatabaseError(_)));
+        assert!(err.to_string().contains("negative size"));
+    }
+
+    #[tokio::test]
+    async fn test_commit_atomic_rejects_file_size_above_sqlite_range() {
+        let store = SqliteMetadataStore::in_memory().await.unwrap();
+        let repo = store
+            .create_repo("ns", "oversized", RepoType::Model, false)
+            .await
+            .unwrap();
+        let revision = Revision {
+            commit_id: "oversized-commit".to_string(),
+            repo_id: repo.id,
+            parent: None,
+            message: "oversized".to_string(),
+            author: "ns".to_string(),
+            created_at: 1,
+        };
+        let entry = FileEntry {
+            path: "huge.bin".to_string(),
+            repo_id: repo.id,
+            commit_id: revision.commit_id.clone(),
+            size: u64::MAX,
+            cas_hash: "hash".to_string(),
+            is_lfs: true,
+        };
+
+        let err = store
+            .commit_atomic(&revision, &[entry], None)
+            .await
+            .expect_err("u64 size above i64::MAX must be rejected");
+
+        assert!(matches!(err, MetadataError::InvalidOperation(_)));
+        assert_eq!(store.get_head(repo.id).await.unwrap(), None);
+        assert!(matches!(
+            store.get_revision(repo.id, &revision.commit_id).await,
+            Err(MetadataError::RevisionNotFound(_))
+        ));
     }
 }
