@@ -3,6 +3,12 @@ use std::fs::File;
 use std::io::{Cursor, Read, Result, Seek, SeekFrom, Write};
 use std::path::Path;
 
+const SHARD_HEADER_SIZE: u64 = 48;
+const SHARD_FOOTER_SIZE: u64 = 208;
+const SEQUENCE_HEADER_SIZE: u64 = 48;
+const SEQUENCE_ENTRY_SIZE: u64 = 48;
+const CHUNK_LOOKUP_ENTRY_SIZE: u64 = 68;
+
 /// Shard file header (48 bytes)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MDBShardFileHeader {
@@ -367,7 +373,7 @@ impl ChunkLookupEntry {
 /// High-level shard file representation
 ///
 /// Contains parsed metadata from a shard file for indexing and querying.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MDBShardFile {
     pub header: MDBShardFileHeader,
     pub footer: MDBShardFileFooter,
@@ -377,214 +383,249 @@ pub struct MDBShardFile {
     pub xorb_chunk_entries: Vec<XorbChunkSequenceEntry>,
     pub chunk_lookup_entries: Vec<ChunkLookupEntry>,
     pub file_hashes: Vec<MerkleHash>,
-    pub chunk_mappings: Vec<(MerkleHash, MerkleHash, u32)>, // (chunk_hash, xorb_hash, chunk_index)
-    raw_data: Vec<u8>,
+    pub chunk_mappings: Vec<(MerkleHash, MerkleHash, u32)>,
+    hash: String,
 }
 
 impl MDBShardFile {
-    /// Parse a shard file from binary data
+    /// Parse a shard file from binary data without retaining a copy of the input.
     pub fn parse(data: &[u8]) -> XetResult<Self> {
-        let mut cursor = Cursor::new(data);
+        let file_len = u64::try_from(data.len()).map_err(|_| {
+            crate::error::XetError::ParseError("Shard length does not fit in u64".to_string())
+        })?;
+        let hash = crate::hash::compute_data_hash(data).to_hex();
+        Self::parse_reader(&mut Cursor::new(data), file_len, hash)
+    }
 
-        // Parse header
-        let header = MDBShardFileHeader::deserialize(&mut cursor)?;
+    /// Parse a complete shard from disk while keeping memory bounded to parsed
+    /// metadata plus a 64 KiB hashing buffer.
+    pub fn parse_from_file(path: &Path) -> XetResult<Self> {
+        let mut file = File::open(path)?;
+        let file_len = file.metadata()?.len();
+        let hash = Self::hash_reader(&mut file, file_len)?;
+        Self::parse_reader(&mut file, file_len, hash)
+    }
 
-        // Verify magic tag
-        let expected_tag = MDBShardFileHeader::default().tag;
-        if header.tag != expected_tag {
+    /// Compute the BLAKE3 hash of a shard file incrementally.
+    pub fn compute_hash_from_file(path: &Path) -> XetResult<String> {
+        let mut file = File::open(path)?;
+        let file_len = file.metadata()?.len();
+        Self::hash_reader(&mut file, file_len)
+    }
+
+    /// Return the hash computed while parsing the shard.
+    pub fn compute_hash(&self) -> String {
+        self.hash.clone()
+    }
+
+    /// Get file hashes contained in this shard.
+    pub fn file_hashes(&self) -> &[MerkleHash] {
+        &self.file_hashes
+    }
+
+    /// Get chunk-to-xorb mappings.
+    pub fn chunk_mappings(&self) -> &[(MerkleHash, MerkleHash, u32)] {
+        &self.chunk_mappings
+    }
+
+    fn parse_reader<R: Read + Seek>(
+        reader: &mut R,
+        file_len: u64,
+        hash: String,
+    ) -> XetResult<Self> {
+        let minimum_size = SHARD_HEADER_SIZE + SHARD_FOOTER_SIZE;
+        if file_len < minimum_size {
+            return Err(crate::error::XetError::ParseError(format!(
+                "Shard is too small: {} bytes, minimum is {}",
+                file_len, minimum_size
+            )));
+        }
+        let footer_start = file_len.checked_sub(SHARD_FOOTER_SIZE).ok_or_else(|| {
+            crate::error::XetError::ParseError("Shard footer offset underflow".to_string())
+        })?;
+
+        reader.seek(SeekFrom::Start(0))?;
+        let header = MDBShardFileHeader::deserialize(reader)?;
+        let expected_header = MDBShardFileHeader::default();
+        if header.tag != expected_header.tag {
             return Err(crate::error::XetError::ParseError(
                 "Invalid shard magic tag".to_string(),
             ));
         }
-
-        // Verify footer offset
-        if header.footer_size != 208 {
+        if header.version != expected_header.version {
             return Err(crate::error::XetError::ParseError(format!(
-                "Invalid footer size: expected 208, got {}",
-                header.footer_size
+                "Unsupported shard version: {}",
+                header.version
+            )));
+        }
+        if header.footer_size != SHARD_FOOTER_SIZE {
+            return Err(crate::error::XetError::ParseError(format!(
+                "Invalid footer size: expected {}, got {}",
+                SHARD_FOOTER_SIZE, header.footer_size
             )));
         }
 
-        // Parse footer (at end of file)
-        // Validate minimum size before subtraction to prevent panic
-        if data.len() < 208 {
+        reader.seek(SeekFrom::Start(footer_start))?;
+        let footer = MDBShardFileFooter::deserialize(reader)?;
+        if footer.version != header.version {
             return Err(crate::error::XetError::ParseError(format!(
-                "Shard data too small: {} bytes, minimum 208 bytes required",
-                data.len()
+                "Shard version mismatch: header={}, footer={}",
+                header.version, footer.version
             )));
         }
-        let footer_start = data.len() - 208;
-        let mut footer_cursor = Cursor::new(&data[footer_start..]);
-        let footer = MDBShardFileFooter::deserialize(&mut footer_cursor)?;
-
-        // Parse file info section
-        let mut file_entries = Vec::new();
-        let mut file_data_entries = Vec::new();
-        let mut file_hashes = Vec::new();
-        if footer.file_info_offset > 0 && footer.file_info_offset < data.len() as u64 {
-            let mut file_cursor = Cursor::new(&data[footer.file_info_offset as usize..]);
-
-            // When file_lookup_offset marks the end of the file section (i.e., it points
-            // to the xorb info section), use it as the loop boundary so the parser does
-            // not bleed across sections.  The boundary is relative to the cursor start
-            // (file_info_offset).
-            let file_section_end = if footer.file_lookup_offset > footer.file_info_offset {
-                (footer.file_lookup_offset - footer.file_info_offset) as usize
-            } else {
-                0
-            };
-
-            // Parse all file entries
-            loop {
-                let pos = file_cursor.position() as usize;
-                if pos + 48 > file_section_end {
-                    break; // Reached end of file info section
-                }
-
-                match FileDataSequenceHeader::deserialize(&mut file_cursor) {
-                    Ok(file_header) => {
-                        file_hashes.push(file_header.file_hash);
-
-                        // Parse file entries for this file
-                        // I6 fix: Track how many entries were actually parsed vs expected.
-                        // Log warning if fewer entries parsed (shard may be truncated/corrupt).
-                        let mut parsed_entries = 0u32;
-                        for _ in 0..file_header.num_entries {
-                            match FileDataSequenceEntry::deserialize(&mut file_cursor) {
-                                Ok(entry) => {
-                                    file_data_entries.push(entry);
-                                    parsed_entries += 1;
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "Shard parse: truncated file entries for file {}: \
-                                         expected {} entries, got {} (error: {}). \
-                                         Shard data may be incomplete.",
-                                        file_header.file_hash.to_hex(),
-                                        file_header.num_entries,
-                                        parsed_entries,
-                                        e
-                                    );
-                                    break;
-                                }
-                            }
-                        }
-
-                        file_entries.push(file_header);
-                    }
-                    Err(_) => break,
-                }
-            }
+        if footer.footer_offset != footer_start {
+            return Err(crate::error::XetError::ParseError(format!(
+                "Invalid footer offset: declared {}, physical {}",
+                footer.footer_offset, footer_start
+            )));
         }
 
-        // Parse xorb info section
-        let mut xorb_entries = Vec::new();
-        let mut xorb_chunk_entries = Vec::new();
-        if footer.xorb_info_offset > 0 && footer.xorb_info_offset < data.len() as u64 {
-            let mut xorb_cursor = Cursor::new(&data[footer.xorb_info_offset as usize..]);
-
-            // xorb_lookup_offset marks the start of the xorb lookup section, which is
-            // immediately after the xorb info section.  Use it as the loop boundary so
-            // the parser does not read lookup data as xorb headers.
-            let xorb_section_end = if footer.xorb_lookup_offset > footer.xorb_info_offset {
-                (footer.xorb_lookup_offset - footer.xorb_info_offset) as usize
-            } else {
-                data.len() - footer_start
-            };
-
-            // Parse all xorb entries
-            loop {
-                let pos = xorb_cursor.position() as usize;
-                if pos + 48 > xorb_section_end {
-                    break; // Reached end of xorb info section
-                }
-
-                match XorbChunkSequenceHeader::deserialize(&mut xorb_cursor) {
-                    Ok(xorb_header) => {
-                        let xorb_hash = xorb_header.xorb_hash;
-                        let num_chunks = xorb_header.num_entries;
-                        xorb_entries.push(xorb_header);
-
-                        // I6 fix: Track parsed entries and warn on truncation.
-                        let mut parsed_chunks = 0u32;
-                        // Parse chunk entries for this xorb
-                        for _ in 0..num_chunks {
-                            match XorbChunkSequenceEntry::deserialize(&mut xorb_cursor) {
-                                Ok(chunk_entry) => {
-                                    xorb_chunk_entries.push(chunk_entry);
-                                    parsed_chunks += 1;
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "Shard parse: truncated chunk entries for xorb {}: \
-                                         expected {} entries, got {} (error: {}). \
-                                         Shard data may be incomplete.",
-                                        xorb_hash.to_hex(),
-                                        num_chunks,
-                                        parsed_chunks,
-                                        e
-                                    );
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    Err(_) => break,
-                }
+        let mut next_offset = SHARD_HEADER_SIZE;
+        let (file_entries, file_data_entries, file_hashes) = if footer.file_info_offset == 0 {
+            if footer.file_lookup_offset != 0 || footer.file_lookup_num_entry != 0 {
+                return Err(crate::error::XetError::ParseError(
+                    "File section metadata is inconsistent".to_string(),
+                ));
             }
-        }
+            (Vec::new(), Vec::new(), Vec::new())
+        } else {
+            if footer.file_info_offset != next_offset {
+                return Err(crate::error::XetError::ParseError(format!(
+                    "File section must start at {}, got {}",
+                    next_offset, footer.file_info_offset
+                )));
+            }
+            Self::validate_section_bounds(
+                "file",
+                footer.file_info_offset,
+                footer.file_lookup_offset,
+                footer_start,
+            )?;
+            let parsed = Self::parse_file_section(
+                reader,
+                footer.file_info_offset,
+                footer.file_lookup_offset,
+            )?;
+            if u64::try_from(parsed.0.len()).ok() != Some(footer.file_lookup_num_entry) {
+                return Err(crate::error::XetError::ParseError(format!(
+                    "File sequence count mismatch: declared {}, parsed {}",
+                    footer.file_lookup_num_entry,
+                    parsed.0.len()
+                )));
+            }
+            next_offset = footer.file_lookup_offset;
+            parsed
+        };
 
-        if !xorb_chunk_entries.is_empty()
-            && (footer.chunk_lookup_offset == 0 || footer.chunk_lookup_num_entry == 0)
-        {
-            return Err(crate::error::XetError::ParseError(
-                "Shard missing required raw chunk lookup section".to_string(),
-            ));
-        }
+        let (xorb_entries, xorb_chunk_entries) = if footer.xorb_info_offset == 0 {
+            if footer.xorb_lookup_offset != 0 || footer.xorb_lookup_num_entry != 0 {
+                return Err(crate::error::XetError::ParseError(
+                    "Xorb section metadata is inconsistent".to_string(),
+                ));
+            }
+            (Vec::new(), Vec::new())
+        } else {
+            if footer.xorb_info_offset != next_offset {
+                return Err(crate::error::XetError::ParseError(format!(
+                    "Xorb section must start at {}, got {}",
+                    next_offset, footer.xorb_info_offset
+                )));
+            }
+            Self::validate_section_bounds(
+                "xorb",
+                footer.xorb_info_offset,
+                footer.xorb_lookup_offset,
+                footer_start,
+            )?;
+            let parsed = Self::parse_xorb_section(
+                reader,
+                footer.xorb_info_offset,
+                footer.xorb_lookup_offset,
+            )?;
+            if u64::try_from(parsed.0.len()).ok() != Some(footer.xorb_lookup_num_entry) {
+                return Err(crate::error::XetError::ParseError(format!(
+                    "Xorb sequence count mismatch: declared {}, parsed {}",
+                    footer.xorb_lookup_num_entry,
+                    parsed.0.len()
+                )));
+            }
+            next_offset = footer.xorb_lookup_offset;
+            parsed
+        };
 
-        let mut chunk_lookup_entries = Vec::new();
-        if footer.chunk_lookup_offset > 0
-            && footer.chunk_lookup_offset < data.len() as u64
-            && footer.chunk_lookup_num_entry > 0
-        {
-            let chunk_lookup_start = footer.chunk_lookup_offset as usize;
-            let footer_start = footer.footer_offset as usize;
-            let chunk_lookup_end = if footer.footer_offset > footer.chunk_lookup_offset
-                && footer_start <= data.len()
-            {
-                footer_start
-            } else {
-                data.len().saturating_sub(208)
-            };
-
-            let max_entries =
-                (chunk_lookup_end.saturating_sub(chunk_lookup_start)) / ChunkLookupEntry::SIZE;
-            let entries_to_parse = (footer.chunk_lookup_num_entry as usize).min(max_entries);
-
-            if entries_to_parse < footer.chunk_lookup_num_entry as usize {
-                tracing::warn!(
-                    "Shard parse: truncated chunk lookup entries: expected {}, got {}",
-                    footer.chunk_lookup_num_entry,
-                    entries_to_parse
-                );
+        let chunk_lookup_entries = if footer.chunk_lookup_offset == 0 {
+            if footer.chunk_lookup_num_entry != 0 {
+                return Err(crate::error::XetError::ParseError(
+                    "Chunk lookup count is non-zero but its offset is zero".to_string(),
+                ));
+            }
+            if !xorb_chunk_entries.is_empty() {
+                return Err(crate::error::XetError::ParseError(
+                    "Shard missing required raw chunk lookup section".to_string(),
+                ));
+            }
+            Vec::new()
+        } else {
+            if footer.chunk_lookup_num_entry == 0 {
+                return Err(crate::error::XetError::ParseError(
+                    "Chunk lookup offset is non-zero but its count is zero".to_string(),
+                ));
+            }
+            if footer.chunk_lookup_offset != next_offset {
+                return Err(crate::error::XetError::ParseError(format!(
+                    "Chunk lookup section must start at {}, got {}",
+                    next_offset, footer.chunk_lookup_offset
+                )));
+            }
+            let byte_len = footer
+                .chunk_lookup_num_entry
+                .checked_mul(CHUNK_LOOKUP_ENTRY_SIZE)
+                .ok_or_else(|| {
+                    crate::error::XetError::ParseError(
+                        "Chunk lookup byte length overflow".to_string(),
+                    )
+                })?;
+            let end = footer
+                .chunk_lookup_offset
+                .checked_add(byte_len)
+                .ok_or_else(|| {
+                    crate::error::XetError::ParseError(
+                        "Chunk lookup end offset overflow".to_string(),
+                    )
+                })?;
+            if end != footer_start {
+                return Err(crate::error::XetError::ParseError(format!(
+                    "Chunk lookup section ends at {}, expected footer at {}",
+                    end, footer_start
+                )));
             }
 
-            let mut chunk_lookup_cursor = Cursor::new(&data[chunk_lookup_start..chunk_lookup_end]);
-            for entry_idx in 0..entries_to_parse {
-                match ChunkLookupEntry::deserialize(&mut chunk_lookup_cursor) {
-                    Ok(entry) => chunk_lookup_entries.push(entry),
-                    Err(e) => {
-                        tracing::warn!(
-                            "Shard parse: failed to parse chunk lookup entry {}: {}",
-                            entry_idx,
-                            e
-                        );
-                        break;
-                    }
-                }
+            let count = usize::try_from(footer.chunk_lookup_num_entry).map_err(|_| {
+                crate::error::XetError::ParseError(
+                    "Chunk lookup count does not fit in usize".to_string(),
+                )
+            })?;
+            let mut entries = Vec::new();
+            entries.try_reserve_exact(count).map_err(|e| {
+                crate::error::XetError::ParseError(format!(
+                    "Unable to allocate chunk lookup entries: {}",
+                    e
+                ))
+            })?;
+            reader.seek(SeekFrom::Start(footer.chunk_lookup_offset))?;
+            for _ in 0..count {
+                entries.push(ChunkLookupEntry::deserialize(reader)?);
             }
-        }
+            next_offset = end;
+            entries
+        };
 
+        if next_offset != footer_start {
+            return Err(crate::error::XetError::ParseError(format!(
+                "Unaccounted shard bytes between offset {} and footer {}",
+                next_offset, footer_start
+            )));
+        }
         if chunk_lookup_entries.len() != xorb_chunk_entries.len() {
             return Err(crate::error::XetError::ParseError(format!(
                 "Shard chunk lookup count mismatch: got {}, expected {}",
@@ -608,158 +649,252 @@ impl MDBShardFile {
             chunk_lookup_entries,
             file_hashes,
             chunk_mappings,
-            raw_data: data.to_vec(),
+            hash,
         })
     }
 
-    /// Parse only the header and footer from a shard file on disk.
-    ///
-    /// This is a memory-efficient parsing method that reads only the 48-byte header
-    /// at the start and 208-byte footer at the end of the file. All data sections
-    /// (file_entries, chunk_mappings, xorb_entries, etc.) are returned as empty vectors.
-    ///
-    /// Use this when you only need structural metadata (header/footer) and will compute
-    /// the shard hash externally via streaming (e.g., during upload verification).
-    /// The `raw_data` field is intentionally left empty since this method does not
-    /// retain the file contents.
-    ///
-    /// For full parsing with all data sections populated, use `parse()` instead.
-    pub fn parse_header_footer_from_file(path: &Path) -> XetResult<Self> {
-        let mut file = File::open(path).map_err(|e| {
-            crate::error::XetError::IoError(std::io::Error::other(format!(
-                "Failed to open shard file {}: {}",
-                path.display(),
-                e
-            )))
-        })?;
+    fn parse_file_section<R: Read + Seek>(
+        reader: &mut R,
+        start: u64,
+        end: u64,
+    ) -> XetResult<(
+        Vec<FileDataSequenceHeader>,
+        Vec<FileDataSequenceEntry>,
+        Vec<MerkleHash>,
+    )> {
+        reader.seek(SeekFrom::Start(start))?;
+        let mut headers = Vec::new();
+        let mut entries = Vec::new();
+        let mut hashes = Vec::new();
 
-        let file_len = file
-            .metadata()
-            .map_err(|e| {
-                crate::error::XetError::IoError(std::io::Error::other(format!(
-                    "Failed to get file metadata: {}",
-                    e
-                )))
-            })?
-            .len();
+        while reader.stream_position()? < end {
+            let position = reader.stream_position()?;
+            Self::ensure_record_fits("file sequence header", position, SEQUENCE_HEADER_SIZE, end)?;
+            let header = FileDataSequenceHeader::deserialize(reader)?;
+            let entries_len = u64::from(header.num_entries)
+                .checked_mul(SEQUENCE_ENTRY_SIZE)
+                .ok_or_else(|| {
+                    crate::error::XetError::ParseError(
+                        "File sequence entry byte length overflow".to_string(),
+                    )
+                })?;
+            let entries_start = reader.stream_position()?;
+            Self::ensure_record_fits("file sequence entries", entries_start, entries_len, end)?;
 
-        if file_len < 256 {
-            return Err(crate::error::XetError::ParseError(format!(
-                "Shard file too small: {} bytes, minimum 256 bytes required (48-byte header + 208-byte footer)",
-                file_len
-            )));
-        }
-
-        // Read header from start of file
-        // Read enough bytes for the header (48 bytes: 32 tag + 8 version + 8 footer_size)
-        let mut header_buf = [0u8; 48];
-        file.read_exact(&mut header_buf).map_err(|e| {
-            crate::error::XetError::IoError(std::io::Error::other(format!(
-                "Failed to read shard header: {}",
-                e
-            )))
-        })?;
-        let mut header_cursor = Cursor::new(&header_buf[..]);
-        let header = MDBShardFileHeader::deserialize(&mut header_cursor)?;
-
-        // Verify magic tag
-        let expected_tag = MDBShardFileHeader::default().tag;
-        if header.tag != expected_tag {
-            return Err(crate::error::XetError::ParseError(
-                "Invalid shard magic tag".to_string(),
-            ));
-        }
-
-        // Verify footer size
-        if header.footer_size != 208 {
-            return Err(crate::error::XetError::ParseError(format!(
-                "Invalid footer size: expected 208, got {}",
-                header.footer_size
-            )));
-        }
-
-        // Read footer from end of file
-        file.seek(SeekFrom::End(-208)).map_err(|e| {
-            crate::error::XetError::IoError(std::io::Error::other(format!(
-                "Failed to seek to shard footer: {}",
-                e
-            )))
-        })?;
-        let mut footer_buf = [0u8; 208];
-        file.read_exact(&mut footer_buf).map_err(|e| {
-            crate::error::XetError::IoError(std::io::Error::other(format!(
-                "Failed to read shard footer: {}",
-                e
-            )))
-        })?;
-        let mut footer_cursor = Cursor::new(&footer_buf[..]);
-        let footer = MDBShardFileFooter::deserialize(&mut footer_cursor)?;
-
-        // Simplified parse — same as parse() above
-        let file_hashes = Vec::new();
-        let chunk_mappings = Vec::new();
-        let file_entries = Vec::new();
-        let file_data_entries = Vec::new();
-        let xorb_entries = Vec::new();
-        let xorb_chunk_entries = Vec::new();
-        let chunk_lookup_entries = Vec::new();
-
-        Ok(Self {
-            header,
-            footer,
-            file_entries,
-            file_data_entries,
-            xorb_entries,
-            xorb_chunk_entries,
-            chunk_lookup_entries,
-            file_hashes,
-            chunk_mappings,
-            raw_data: Vec::new(), // Hash computed externally via streaming
-        })
-    }
-
-    /// Compute the BLAKE3 hash of a shard file on disk.
-    /// Reads the file incrementally to bound memory usage.
-    pub fn compute_hash_from_file(path: &Path) -> XetResult<String> {
-        use crate::util::StreamingHasher;
-        let mut file = File::open(path).map_err(|e| {
-            crate::error::XetError::IoError(std::io::Error::other(format!(
-                "Failed to open shard file for hashing: {}",
-                e
-            )))
-        })?;
-
-        let mut hasher = StreamingHasher::new();
-        let mut buf = [0u8; 64 * 1024];
-        loop {
-            let n = file.read(&mut buf).map_err(|e| {
-                crate::error::XetError::IoError(std::io::Error::other(format!(
-                    "Failed to read shard file for hashing: {}",
-                    e
-                )))
-            })?;
-            if n == 0 {
-                break;
+            hashes.push(header.file_hash);
+            for _ in 0..header.num_entries {
+                entries.push(FileDataSequenceEntry::deserialize(reader)?);
             }
-            hasher.update(&buf[..n]);
+            headers.push(header);
+        }
+
+        Ok((headers, entries, hashes))
+    }
+
+    fn parse_xorb_section<R: Read + Seek>(
+        reader: &mut R,
+        start: u64,
+        end: u64,
+    ) -> XetResult<(Vec<XorbChunkSequenceHeader>, Vec<XorbChunkSequenceEntry>)> {
+        reader.seek(SeekFrom::Start(start))?;
+        let mut headers = Vec::new();
+        let mut entries = Vec::new();
+
+        while reader.stream_position()? < end {
+            let position = reader.stream_position()?;
+            Self::ensure_record_fits("xorb sequence header", position, SEQUENCE_HEADER_SIZE, end)?;
+            let header = XorbChunkSequenceHeader::deserialize(reader)?;
+            let entries_len = u64::from(header.num_entries)
+                .checked_mul(SEQUENCE_ENTRY_SIZE)
+                .ok_or_else(|| {
+                    crate::error::XetError::ParseError(
+                        "Xorb sequence entry byte length overflow".to_string(),
+                    )
+                })?;
+            let entries_start = reader.stream_position()?;
+            Self::ensure_record_fits("xorb sequence entries", entries_start, entries_len, end)?;
+
+            for _ in 0..header.num_entries {
+                entries.push(XorbChunkSequenceEntry::deserialize(reader)?);
+            }
+            headers.push(header);
+        }
+
+        Ok((headers, entries))
+    }
+
+    fn validate_section_bounds(
+        name: &str,
+        start: u64,
+        end: u64,
+        footer_start: u64,
+    ) -> XetResult<()> {
+        if start < SHARD_HEADER_SIZE || end < start || end > footer_start {
+            return Err(crate::error::XetError::ParseError(format!(
+                "Invalid {} section bounds: {}..{} (footer at {})",
+                name, start, end, footer_start
+            )));
+        }
+        Ok(())
+    }
+
+    fn ensure_record_fits(name: &str, start: u64, len: u64, end: u64) -> XetResult<()> {
+        let record_end = start.checked_add(len).ok_or_else(|| {
+            crate::error::XetError::ParseError(format!("{} end offset overflow", name))
+        })?;
+        if record_end > end {
+            return Err(crate::error::XetError::ParseError(format!(
+                "Truncated {} at offset {}: needs {} bytes before section end {}",
+                name, start, len, end
+            )));
+        }
+        Ok(())
+    }
+
+    fn hash_reader<R: Read + Seek>(reader: &mut R, file_len: u64) -> XetResult<String> {
+        use crate::util::StreamingHasher;
+
+        reader.seek(SeekFrom::Start(0))?;
+        let mut hasher = StreamingHasher::new();
+        let mut remaining = file_len;
+        let mut buffer = [0u8; 64 * 1024];
+        while remaining > 0 {
+            let requested = usize::try_from(remaining.min(buffer.len() as u64)).map_err(|_| {
+                crate::error::XetError::ParseError(
+                    "Shard read size does not fit in usize".to_string(),
+                )
+            })?;
+            let read = reader.read(&mut buffer[..requested])?;
+            if read == 0 {
+                return Err(crate::error::XetError::IoError(
+                    std::io::ErrorKind::UnexpectedEof.into(),
+                ));
+            }
+            hasher.update(&buffer[..read]);
+            remaining -= u64::try_from(read).map_err(|_| {
+                crate::error::XetError::ParseError(
+                    "Shard read size does not fit in u64".to_string(),
+                )
+            })?;
         }
         Ok(hasher.finalize().to_hex())
     }
+}
 
-    /// Compute hash of the shard (using the raw data)
-    pub fn compute_hash(&self) -> String {
-        use crate::hash::compute_data_hash;
-        let hash = compute_data_hash(&self.raw_data);
-        hash.to_hex()
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::format::shard_builder::{FileSegment, ShardBuilder, XorbChunkBuildEntry};
+    use crate::hash::compute_data_hash;
+    use tempfile::tempdir;
+
+    fn test_hash(value: u8) -> MerkleHash {
+        let mut bytes = [0u8; 32];
+        bytes[0] = value;
+        MerkleHash::from(bytes)
     }
 
-    /// Get file hashes contained in this shard
-    pub fn file_hashes(&self) -> &[MerkleHash] {
-        &self.file_hashes
+    fn valid_shard() -> Vec<u8> {
+        let xorb_hash = test_hash(1);
+        let mut builder = ShardBuilder::new();
+        let xorb_index = builder
+            .add_xorb_with_raw_chunk_hashes(
+                xorb_hash,
+                32,
+                24,
+                vec![XorbChunkBuildEntry {
+                    chunk_hash: test_hash(2),
+                    chunk_byte_range_start: 0,
+                    unpacked_segment_bytes: 32,
+                }],
+                vec![test_hash(3)],
+            )
+            .unwrap();
+        builder.add_file(
+            test_hash(4),
+            vec![FileSegment {
+                xorb_hash,
+                xorb_index,
+                unpacked_segment_bytes: 32,
+                chunk_index_start: 0,
+                chunk_index_end: 1,
+            }],
+        );
+        builder.build().unwrap()
     }
 
-    /// Get chunk-to-xorb mappings
-    pub fn chunk_mappings(&self) -> &[(MerkleHash, MerkleHash, u32)] {
-        &self.chunk_mappings
+    fn overwrite_u64(data: &mut [u8], offset: usize, value: u64) {
+        data[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+    }
+
+    #[test]
+    fn parse_from_file_matches_in_memory_parse_and_hash() {
+        let data = valid_shard();
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("shard");
+        std::fs::write(&path, &data).unwrap();
+
+        let memory = MDBShardFile::parse(&data).unwrap();
+        let disk = MDBShardFile::parse_from_file(&path).unwrap();
+
+        assert_eq!(disk, memory);
+        assert_eq!(disk.compute_hash(), compute_data_hash(&data).to_hex());
+        assert_eq!(
+            MDBShardFile::compute_hash_from_file(&path).unwrap(),
+            disk.compute_hash()
+        );
+    }
+
+    #[test]
+    fn rejects_footer_offset_that_does_not_match_physical_layout() {
+        let mut data = valid_shard();
+        let footer_start = data.len() - SHARD_FOOTER_SIZE as usize;
+        overwrite_u64(&mut data, footer_start + 200, 1);
+
+        let error = MDBShardFile::parse(&data).unwrap_err();
+        assert!(error.to_string().contains("Invalid footer offset"));
+    }
+
+    #[test]
+    fn rejects_section_offset_beyond_footer() {
+        let mut data = valid_shard();
+        let footer_start = data.len() - SHARD_FOOTER_SIZE as usize;
+        overwrite_u64(
+            &mut data,
+            footer_start + 8,
+            u64::try_from(footer_start + 1).unwrap(),
+        );
+
+        let error = MDBShardFile::parse(&data).unwrap_err();
+        assert!(error.to_string().contains("File section must start"));
+    }
+
+    #[test]
+    fn rejects_chunk_lookup_count_overflow() {
+        let mut data = valid_shard();
+        let footer_start = data.len() - SHARD_FOOTER_SIZE as usize;
+        overwrite_u64(&mut data, footer_start + 64, u64::MAX);
+
+        let error = MDBShardFile::parse(&data).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Chunk lookup byte length overflow")
+        );
+    }
+
+    #[test]
+    fn rejects_truncated_file_sequence_entries() {
+        let mut data = valid_shard();
+        let file_num_entries_offset = SHARD_HEADER_SIZE as usize + 36;
+        data[file_num_entries_offset..file_num_entries_offset + 4]
+            .copy_from_slice(&2_u32.to_le_bytes());
+
+        let error = MDBShardFile::parse(&data).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Truncated file sequence entries")
+        );
     }
 }

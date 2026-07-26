@@ -141,8 +141,6 @@ impl MetadataIndex {
         storage: Arc<Box<dyn crate::storage::StorageBackend>>,
         temp_dir: std::path::PathBuf,
     ) -> Result<usize, String> {
-        use crate::format::shard::MDBShardFile;
-
         let shard_keys = storage
             .list_objects("shards/")
             .await
@@ -162,41 +160,38 @@ impl MetadataIndex {
                 let key = shard_key.clone();
 
                 let handle = tokio::spawn(async move {
-                    let shard_data = match storage_clone.get(&key).await {
-                        Ok(data) => data,
+                    let shard = match crate::shard_io::parse_shard_from_storage(
+                        &**storage_clone,
+                        &key,
+                        &temp_dir_clone,
+                    )
+                    .await
+                    {
+                        Ok(shard) => shard,
                         Err(e) => {
-                            tracing::warn!("Failed to fetch shard {}: {}", key, e);
+                            tracing::warn!("Failed to fetch or parse shard {}: {}", key, e);
                             return None;
                         }
                     };
 
-                    // Parse shard and extract mappings
-                    match MDBShardFile::parse(&shard_data) {
-                        Ok(shard) => {
-                            // Extract shard_id from key (shards/{shard_id})
-                            let shard_id = key.strip_prefix("shards/").unwrap_or(&key).to_string();
+                    // Extract shard_id from key (shards/{shard_id})
+                    let shard_id = key.strip_prefix("shards/").unwrap_or(&key).to_string();
 
-                            match crate::shard_validation::validate_shard_for_index(
-                                &shard_id,
-                                &shard,
-                                &**storage_clone,
-                                &temp_dir_clone,
-                            )
-                            .await
-                            {
-                                Ok(registration) => Some(registration),
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "Skipping unverified shard {} during rebuild: {}",
-                                        shard_id,
-                                        e
-                                    );
-                                    None
-                                }
-                            }
-                        }
+                    match crate::shard_validation::validate_shard_for_index(
+                        &shard_id,
+                        &shard,
+                        &**storage_clone,
+                        &temp_dir_clone,
+                    )
+                    .await
+                    {
+                        Ok(registration) => Some(registration),
                         Err(e) => {
-                            tracing::warn!("Failed to parse shard {}: {}", key, e);
+                            tracing::warn!(
+                                "Skipping unverified shard {} during rebuild: {}",
+                                shard_id,
+                                e
+                            );
                             None
                         }
                     }

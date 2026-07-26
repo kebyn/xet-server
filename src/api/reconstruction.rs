@@ -69,17 +69,16 @@ struct XorbFetchInfo {
 pub async fn fetch_and_parse_shard(
     shard_id: &str,
     storage: &dyn StorageBackend,
+    temp_dir: &std::path::Path,
 ) -> Result<MDBShardFile, String> {
     let shard_key = format!("shards/{}", shard_id);
-    let shard_data = storage
-        .get(&shard_key)
+    let shard = crate::shard_io::parse_shard_from_storage(storage, &shard_key, temp_dir)
         .await
         .map_err(|e| format!("Failed to fetch shard {}: {}", shard_id, e))?;
 
     GLOBAL_METRICS.record_storage_operation();
 
-    MDBShardFile::parse(&shard_data)
-        .map_err(|e| format!("Failed to parse shard {}: {}", shard_id, e))
+    Ok(shard)
 }
 
 /// Get file reconstruction information (V1 format)
@@ -88,7 +87,7 @@ pub async fn get_reconstruction_v1(
     path: web::Path<String>,
     index: web::Data<MetadataIndex>,
     storage: web::Data<Box<dyn StorageBackend>>,
-    _config: web::Data<ServerConfig>,
+    config: web::Data<ServerConfig>,
     auth: web::Data<AuthVerifier>,
     req: actix_web::HttpRequest,
 ) -> HttpResponse {
@@ -150,7 +149,8 @@ pub async fn get_reconstruction_v1(
     let mut first_candidate_error: Option<String> = None;
     'candidate: for file_ref in file_refs {
         // Fetch and parse shard using shared helper
-        let shard = match fetch_and_parse_shard(&file_ref.shard_id, &***storage).await {
+        let temp_dir = config.storage.resolve_reconstruction_temp_dir();
+        let shard = match fetch_and_parse_shard(&file_ref.shard_id, &***storage, &temp_dir).await {
             Ok(s) => s,
             Err(e) => {
                 if first_candidate_error.is_none() {
@@ -255,7 +255,7 @@ pub async fn get_reconstruction(
     path: web::Path<String>,
     index: web::Data<MetadataIndex>,
     storage: web::Data<Box<dyn StorageBackend>>,
-    _config: web::Data<ServerConfig>,
+    config: web::Data<ServerConfig>,
     auth: web::Data<AuthVerifier>,
     req: actix_web::HttpRequest,
 ) -> HttpResponse {
@@ -317,7 +317,8 @@ pub async fn get_reconstruction(
     let mut first_candidate_error: Option<String> = None;
     for file_ref in file_refs {
         // Fetch and parse shard using shared helper
-        let shard = match fetch_and_parse_shard(&file_ref.shard_id, &***storage).await {
+        let temp_dir = config.storage.resolve_reconstruction_temp_dir();
+        let shard = match fetch_and_parse_shard(&file_ref.shard_id, &***storage, &temp_dir).await {
             Ok(s) => s,
             Err(e) => {
                 if first_candidate_error.is_none() {

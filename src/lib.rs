@@ -48,6 +48,7 @@ pub mod middleware;
 pub mod reconstruction_io;
 pub mod reconstruction_plan;
 pub mod server;
+pub mod shard_io;
 pub mod shard_validation;
 pub mod storage;
 pub mod types;

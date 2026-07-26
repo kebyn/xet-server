@@ -131,7 +131,7 @@ async fn reconstruct_single_file_ref_to_temp(
     let mut total_size = 0u64;
     let mut xorb_cache: HashMap<MerkleHash, TempPathGuard> = HashMap::new();
 
-    let shard = fetch_shard(&file_ref.shard_id, storage).await?;
+    let shard = fetch_shard(&file_ref.shard_id, storage, temp_dir).await?;
     let plan = build_file_chunk_plan(&shard, target_hash, Some(file_ref.file_index))
         .map_err(|e| ReconstructionError::Integrity(e.to_string()))?;
 
@@ -227,15 +227,34 @@ async fn reconstruct_single_file_ref_to_temp(
 async fn fetch_shard(
     shard_id: &str,
     storage: &dyn StorageBackend,
+    temp_dir: &Path,
 ) -> Result<MDBShardFile, ReconstructionError> {
     let key = format!("shards/{}", shard_id);
-    let shard_data = storage
-        .get(&key)
+    crate::shard_io::parse_shard_from_storage(storage, &key, temp_dir)
         .await
-        .map_err(|e| map_storage_error(&key, e))?;
-    MDBShardFile::parse(&shard_data).map_err(|e| {
-        ReconstructionError::Parse(format!("failed to parse shard {}: {}", shard_id, e))
-    })
+        .map_err(|error| match error {
+            crate::shard_io::ShardIoError::Storage { source, .. } => {
+                map_storage_error(&key, source)
+            }
+            crate::shard_io::ShardIoError::Parse { source, .. } => {
+                if matches!(
+                    &source,
+                    crate::error::XetError::IoError(io_error)
+                        if io_error.kind() == std::io::ErrorKind::NotFound
+                ) {
+                    ReconstructionError::Stale(format!("missing {}", key))
+                } else {
+                    ReconstructionError::Parse(format!(
+                        "failed to parse shard {}: {}",
+                        shard_id, source
+                    ))
+                }
+            }
+            crate::shard_io::ShardIoError::TempIo(message) => ReconstructionError::TempIo(message),
+            crate::shard_io::ShardIoError::ParseTask { message, .. } => {
+                ReconstructionError::Parse(message)
+            }
+        })
 }
 
 fn cached_xorb_guard<'a>(

@@ -13,6 +13,7 @@ use crate::config::ServerConfig;
 use crate::format::shard::MDBShardFile;
 use crate::index::MetadataIndex;
 use crate::metrics::GLOBAL_METRICS;
+use crate::shard_io::parse_shard_from_storage;
 use crate::shard_validation::validate_shard_for_index;
 use crate::storage::StorageBackend;
 use crate::util::{StreamingHasher, TempFile};
@@ -105,25 +106,8 @@ pub async fn upload_shard(
         }));
     }
 
-    // C1 fix: Read and fully parse the shard BEFORE storing (put_from_path moves the file).
-    // The full parse validates format AND provides file_hashes/chunk_mappings for index registration.
-    // (Previously used parse_header_footer_from_file which returned empty data sections,
-    // causing register_shard to be a no-op — uploaded shards were unusable for reconstruction.)
-    let temp_path_for_read = temp_file.path().to_path_buf();
-    let shard_data = match std::fs::read(&temp_path_for_read) {
-        Ok(data) => data,
-        Err(e) => {
-            error!("Failed to read shard for indexing: {}", e);
-            GLOBAL_METRICS.record_request(500);
-            GLOBAL_METRICS.record_error();
-            GLOBAL_METRICS.record_latency(start);
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Failed to read shard data: {}", e)
-            }));
-        }
-    };
-
-    let shard = match MDBShardFile::parse(&shard_data) {
+    // Fully validate the shard from disk before put_from_path transfers ownership.
+    let shard = match MDBShardFile::parse_from_file(temp_file.path()) {
         Ok(s) => s,
         Err(e) => {
             error!("Failed to parse shard for indexing: {}", e);
@@ -154,10 +138,27 @@ pub async fn upload_shard(
     };
 
     if already_exists {
-        let stored_shard_data = match storage.get(&shard_key).await {
-            Ok(data) => data,
+        let validation_temp_dir = config.storage.resolve_reconstruction_temp_dir();
+        let stored_shard = match parse_shard_from_storage(
+            storage.get_ref().as_ref(),
+            &shard_key,
+            &validation_temp_dir,
+        )
+        .await
+        {
+            Ok(shard) => shard,
             Err(e) => {
-                error!("Failed to read existing shard {}: {}", shard_id, e);
+                error!("Failed to read or parse existing shard {}: {}", shard_id, e);
+                if matches!(&e, crate::shard_io::ShardIoError::Parse { source, .. }
+                    if !matches!(source, crate::error::XetError::IoError(_)))
+                {
+                    GLOBAL_METRICS.record_request(400);
+                    GLOBAL_METRICS.record_latency(start);
+                    return HttpResponse::BadRequest().json(serde_json::json!({
+                        "error": format!("Invalid existing shard format: {}", e)
+                    }));
+                }
+
                 GLOBAL_METRICS.record_request(500);
                 GLOBAL_METRICS.record_error();
                 GLOBAL_METRICS.record_latency(start);
@@ -166,7 +167,7 @@ pub async fn upload_shard(
                 }));
             }
         };
-        let stored_shard_id = crate::hash::compute_data_hash(&stored_shard_data).to_hex();
+        let stored_shard_id = stored_shard.compute_hash();
         if stored_shard_id != shard_id {
             error!(
                 "Existing shard {} has mismatched stored content hash {}",
@@ -178,18 +179,6 @@ pub async fn upload_shard(
                 "error": "Existing shard content does not match requested shard id"
             }));
         }
-        let stored_shard = match MDBShardFile::parse(&stored_shard_data) {
-            Ok(shard) => shard,
-            Err(e) => {
-                error!("Failed to parse existing shard {}: {}", shard_id, e);
-                GLOBAL_METRICS.record_request(400);
-                GLOBAL_METRICS.record_latency(start);
-                return HttpResponse::BadRequest().json(serde_json::json!({
-                    "error": format!("Invalid existing shard format: {}", e)
-                }));
-            }
-        };
-        let validation_temp_dir = config.storage.resolve_reconstruction_temp_dir();
         let registration = match validate_shard_for_index(
             &shard_id,
             &stored_shard,
