@@ -109,3 +109,66 @@ fn test_try_from_file_or_env_rejects_invalid_numeric_values_without_fallback() {
         drop(scoped);
     }
 }
+
+#[test]
+fn test_try_from_file_or_env_rejects_zero_cas_limits_and_timeouts() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let _config_file = ScopedEnv::remove("HUB_CONFIG_FILE");
+    let _public_base_url = ScopedEnv::remove("HUB_PUBLIC_BASE_URL");
+    let _cas_base_url = ScopedEnv::remove("CAS_BASE_URL");
+
+    for key in [
+        "HUB_CAS_TIMEOUT_SECS",
+        "HUB_MAX_DOWNLOAD_SIZE",
+        "HUB_CAS_HEALTH_CHECK_TIMEOUT_SECS",
+    ] {
+        let scoped = ScopedEnv::set(key, "0");
+        let err = HubConfig::try_from_file_or_env().expect_err("zero value should be rejected");
+        assert!(err.contains(key), "unexpected error for {key}: {err}");
+        drop(scoped);
+    }
+}
+
+#[test]
+fn test_try_from_file_or_env_rejects_inconsistent_size_limits() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let _config_file = ScopedEnv::remove("HUB_CONFIG_FILE");
+    let _public_base_url = ScopedEnv::remove("HUB_PUBLIC_BASE_URL");
+    let _cas_base_url = ScopedEnv::remove("CAS_BASE_URL");
+
+    {
+        let _inline = ScopedEnv::set("HUB_INLINE_THRESHOLD", "1025");
+        let _upload = ScopedEnv::set("HUB_MAX_UPLOAD_SIZE", "1024");
+        let _download = ScopedEnv::set("HUB_MAX_DOWNLOAD_SIZE", "1024");
+        let err = HubConfig::try_from_file_or_env()
+            .expect_err("inline threshold above upload limit should be rejected");
+        assert!(err.contains("HUB_INLINE_THRESHOLD"));
+    }
+    {
+        let _inline = ScopedEnv::set("HUB_INLINE_THRESHOLD", "1024");
+        let _upload = ScopedEnv::set("HUB_MAX_UPLOAD_SIZE", "2048");
+        let _download = ScopedEnv::set("HUB_MAX_DOWNLOAD_SIZE", "1024");
+        let err = HubConfig::try_from_file_or_env()
+            .expect_err("download limit below upload limit should be rejected");
+        assert!(err.contains("HUB_MAX_DOWNLOAD_SIZE"));
+    }
+}
+
+#[test]
+fn test_try_from_file_or_env_requires_http_urls() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let _config_file = ScopedEnv::remove("HUB_CONFIG_FILE");
+
+    {
+        let _url = ScopedEnv::set("HUB_PUBLIC_BASE_URL", "ftp://example.com");
+        let err = HubConfig::try_from_file_or_env().expect_err("FTP Hub URL should be rejected");
+        assert!(err.contains("unsupported scheme"));
+    }
+    {
+        let _public_base_url = ScopedEnv::remove("HUB_PUBLIC_BASE_URL");
+        let _url = ScopedEnv::set("CAS_BASE_URL", "ftp://example.com");
+        let err = HubConfig::try_from_file_or_env().expect_err("FTP CAS URL should be rejected");
+        assert!(err.contains("CAS_BASE_URL"));
+        assert!(err.contains("unsupported scheme"));
+    }
+}

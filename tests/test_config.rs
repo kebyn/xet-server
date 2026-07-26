@@ -159,6 +159,87 @@ fn test_try_from_env_rejects_invalid_index_rebuild_strict_bool() {
 }
 
 #[test]
+fn test_try_from_env_rejects_ambiguous_boolean_values() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let _public_base_url = ScopedEnv::remove("XET_PUBLIC_BASE_URL");
+
+    for key in [
+        "XET_VERIFY_DOWNLOAD_INTEGRITY",
+        "XET_CONVERSION_ENABLED",
+        "XET_DELETE_RAW_AFTER_CONVERSION",
+    ] {
+        let scoped = ScopedEnv::set(key, "yes");
+        let err = ServerConfig::try_from_env().expect_err("ambiguous boolean should be rejected");
+        assert!(err.contains(key), "unexpected error for {key}: {err}");
+        assert!(err.contains("valid boolean"));
+        drop(scoped);
+    }
+}
+
+#[test]
+fn test_try_from_env_rejects_invalid_storage_and_conversion_settings() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let _public_base_url = ScopedEnv::remove("XET_PUBLIC_BASE_URL");
+
+    {
+        let _backend = ScopedEnv::set("XET_STORAGE_BACKEND", "local");
+        let _path = ScopedEnv::set("XET_LOCAL_PATH", "");
+        let err = ServerConfig::try_from_env().expect_err("empty local path should be rejected");
+        assert!(err.contains("XET_LOCAL_PATH"));
+    }
+    {
+        let _backend = ScopedEnv::set("XET_STORAGE_BACKEND", "s3");
+        let _bucket = ScopedEnv::remove("XET_S3_BUCKET");
+        let err = ServerConfig::try_from_env().expect_err("missing S3 bucket should be rejected");
+        assert!(err.contains("XET_S3_BUCKET"));
+    }
+    {
+        let _scheme = ScopedEnv::set("XET_CONVERSION_SCHEME", "gzip");
+        let err =
+            ServerConfig::try_from_env().expect_err("unknown conversion scheme should be rejected");
+        assert!(err.contains("XET_CONVERSION_SCHEME"));
+    }
+}
+
+#[test]
+fn test_try_from_env_rejects_invalid_auth_key_ids() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let _public_base_url = ScopedEnv::remove("XET_PUBLIC_BASE_URL");
+
+    for value in ["", "kid-1,,kid-2", "kid-1,kid-1"] {
+        let scoped = ScopedEnv::set("CAS_TRUSTED_KIDS", value);
+        let err = ServerConfig::try_from_env().expect_err("invalid key IDs should be rejected");
+        assert!(err.contains("CAS_TRUSTED_KIDS"), "unexpected error: {err}");
+        drop(scoped);
+    }
+
+    let _kids = ScopedEnv::set("CAS_TRUSTED_KIDS", "kid-1");
+    let _signing = ScopedEnv::set("CAS_SIGNING_KID", "kid-2");
+    let err = ServerConfig::try_from_env().expect_err("unknown signing key ID should be rejected");
+    assert!(err.contains("CAS_SIGNING_KID"));
+}
+
+#[test]
+fn test_try_from_env_requires_http_urls() {
+    let _guard = ENV_LOCK.lock().unwrap();
+
+    {
+        let _url = ScopedEnv::set("XET_PUBLIC_BASE_URL", "ftp://example.com");
+        let err = ServerConfig::try_from_env().expect_err("FTP public URL should be rejected");
+        assert!(err.contains("unsupported scheme"));
+    }
+    {
+        let _public_base_url = ScopedEnv::remove("XET_PUBLIC_BASE_URL");
+        let _backend = ScopedEnv::set("XET_STORAGE_BACKEND", "s3");
+        let _bucket = ScopedEnv::set("XET_S3_BUCKET", "bucket");
+        let _endpoint = ScopedEnv::set("XET_S3_ENDPOINT", "ftp://example.com");
+        let err = ServerConfig::try_from_env().expect_err("FTP S3 endpoint should be rejected");
+        assert!(err.contains("XET_S3_ENDPOINT"));
+        assert!(err.contains("unsupported scheme"));
+    }
+}
+
+#[test]
 fn test_config_serialization() {
     let config = ServerConfig::default();
     let json = serde_json::to_string(&config).unwrap();

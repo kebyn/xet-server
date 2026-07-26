@@ -193,10 +193,14 @@ impl HubConfig {
     }
 
     /// Validate configuration parameters.
-    /// Validate configuration parameters.
     /// M1 fix: Returns Result instead of panicking for better error handling.
     /// I4 fix: Prevent zero values that would cause service unavailability.
     fn validate(&self) -> Result<(), String> {
+        if let Some(public_base_url) = &self.server.public_base_url {
+            Self::validate_http_url("HUB_PUBLIC_BASE_URL", public_base_url)?;
+        }
+        Self::validate_http_url("CAS_BASE_URL", &self.cas.base_url)?;
+
         if self.server.rate_limit_rpm == 0 {
             return Err(
                 "HUB_RATE_LIMIT_RPM must be > 0 (got 0). This would disable rate limiting."
@@ -229,11 +233,47 @@ impl HubConfig {
                 self.auth.internal_token_ttl_seconds
             );
         }
+        if self.auth.private_key_path.trim().is_empty() {
+            return Err("HUB_PRIVATE_KEY_PATH must not be empty".to_string());
+        }
+        if self.auth.kid.trim().is_empty() {
+            return Err("HUB_KID must not be empty".to_string());
+        }
+        if self.metadata.sqlite_path.trim().is_empty() {
+            return Err("HUB_SQLITE_PATH must not be empty".to_string());
+        }
+        if self.storage.upload_temp_dir.trim().is_empty() {
+            return Err("HUB_UPLOAD_TEMP_DIR must not be empty".to_string());
+        }
         if self.storage.max_upload_size == 0 {
             return Err(
                 "HUB_MAX_UPLOAD_SIZE must be > 0 (got 0). This would prevent all uploads."
                     .to_string(),
             );
+        }
+        if self.storage.inline_threshold_bytes > self.storage.max_upload_size {
+            return Err(format!(
+                "HUB_INLINE_THRESHOLD ({}) must be <= HUB_MAX_UPLOAD_SIZE ({})",
+                self.storage.inline_threshold_bytes, self.storage.max_upload_size
+            ));
+        }
+        if self.cas.internal_timeout_seconds == 0 {
+            return Err(
+                "HUB_CAS_TIMEOUT_SECS must be > 0 (got 0). CAS requests would time out immediately."
+                    .to_string(),
+            );
+        }
+        if self.cas.max_download_size == 0 {
+            return Err(
+                "HUB_MAX_DOWNLOAD_SIZE must be > 0 (got 0). CAS downloads would all fail."
+                    .to_string(),
+            );
+        }
+        if self.cas.max_download_size < self.storage.max_upload_size {
+            return Err(format!(
+                "HUB_MAX_DOWNLOAD_SIZE ({}) must be >= HUB_MAX_UPLOAD_SIZE ({})",
+                self.cas.max_download_size, self.storage.max_upload_size
+            ));
         }
         if self.cas.health_check_timeout_seconds == 0 {
             return Err("HUB_CAS_HEALTH_CHECK_TIMEOUT_SECS must be > 0 (got 0). Health check would never complete.".to_string());
@@ -241,19 +281,21 @@ impl HubConfig {
         Ok(())
     }
 
-    fn validate_url_with_host(name: &str, url: &str) -> Result<(), String> {
+    fn validate_http_url(name: &str, url: &str) -> Result<(), String> {
         let parsed = url::Url::parse(url)
             .map_err(|e| format!("{} '{}' is not a valid URL: {}", name, url, e))?;
         if parsed.host().is_none() {
             return Err(format!("{} '{}' is missing a valid host", name, url));
         }
+        if parsed.scheme() != "http" && parsed.scheme() != "https" {
+            return Err(format!(
+                "{} '{}' uses unsupported scheme '{}'; expected http or https",
+                name,
+                url,
+                parsed.scheme()
+            ));
+        }
         Ok(())
-    }
-
-    fn validate_url(name: &str, url: &str) -> Result<(), String> {
-        url::Url::parse(url)
-            .map(|_| ())
-            .map_err(|e| format!("{} '{}' is not a valid URL: {}", name, url, e))
     }
 
     /// Load configuration from environment variables.
@@ -285,7 +327,7 @@ impl HubConfig {
                 base_url: {
                     let url = env::var("CAS_BASE_URL")
                         .unwrap_or_else(|_| "http://localhost:8081".to_string());
-                    Self::validate_url("CAS_BASE_URL", &url)?;
+                    Self::validate_http_url("CAS_BASE_URL", &url)?;
                     url
                 },
                 internal_timeout_seconds: Self::parse_env("HUB_CAS_TIMEOUT_SECS", 30)?,
@@ -304,7 +346,7 @@ impl HubConfig {
         };
 
         if let Some(ref url) = config.server.public_base_url {
-            Self::validate_url_with_host("HUB_PUBLIC_BASE_URL", url)?;
+            Self::validate_http_url("HUB_PUBLIC_BASE_URL", url)?;
         }
         config.validate()?;
         Ok(config)
@@ -320,16 +362,15 @@ impl HubConfig {
 
     /// M3: Load configuration from a TOML file
     pub fn from_file(path: &str) -> Result<Self, String> {
+        let config = Self::parse_file(path)?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    fn parse_file(path: &str) -> Result<Self, String> {
         let content = std::fs::read_to_string(path)
             .map_err(|e| format!("Failed to read config file {}: {}", path, e))?;
-        let config: Self = toml::from_str(&content)
-            .map_err(|e| format!("Failed to parse config file {}: {}", path, e))?;
-
-        if let Some(ref url) = config.server.public_base_url {
-            Self::validate_url_with_host("public_base_url", url)?;
-        }
-
-        Ok(config)
+        toml::from_str(&content).map_err(|e| format!("Failed to parse config file {}: {}", path, e))
     }
 
     /// M3: Load configuration from file (if path provided) with environment variable overrides.
@@ -337,7 +378,7 @@ impl HubConfig {
     pub fn try_from_file_or_env() -> Result<Self, String> {
         // Start with file-based config if HUB_CONFIG_FILE is set
         let mut config = match env::var("HUB_CONFIG_FILE") {
-            Ok(path) => match Self::from_file(&path) {
+            Ok(path) => match Self::parse_file(&path) {
                 Ok(cfg) => cfg,
                 Err(e) => {
                     return Err(format!(
@@ -357,7 +398,7 @@ impl HubConfig {
             config.server.port = port;
         }
         if let Ok(url) = env::var("HUB_PUBLIC_BASE_URL") {
-            Self::validate_url_with_host("HUB_PUBLIC_BASE_URL", &url)?;
+            Self::validate_http_url("HUB_PUBLIC_BASE_URL", &url)?;
             config.server.public_base_url = Some(url);
         }
         if let Some(rpm) = Self::parse_optional_env("HUB_RATE_LIMIT_RPM")? {
@@ -385,7 +426,7 @@ impl HubConfig {
             config.metadata.db_pool_size = size;
         }
         if let Ok(url) = env::var("CAS_BASE_URL") {
-            Self::validate_url("CAS_BASE_URL", &url)?;
+            Self::validate_http_url("CAS_BASE_URL", &url)?;
             config.cas.base_url = url;
         }
         if let Some(timeout) = Self::parse_optional_env("HUB_CAS_TIMEOUT_SECS")? {

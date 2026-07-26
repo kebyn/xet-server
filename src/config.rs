@@ -69,12 +69,11 @@ impl ServerSettings {
                         ));
                     }
                     if parsed.scheme() != "http" && parsed.scheme() != "https" {
-                        tracing::warn!(
-                            "public_base_url '{}' uses non-HTTP scheme '{}'. \
-                            This may cause issues with client URLs.",
+                        return Err(format!(
+                            "public_base_url '{}' uses unsupported scheme '{}'; expected http or https",
                             url,
                             parsed.scheme()
-                        );
+                        ));
                     }
                 }
                 Err(e) => {
@@ -214,7 +213,7 @@ impl ConversionConfig {
             "none" => crate::format::compression::CompressionScheme::None,
             "lz4" => crate::format::compression::CompressionScheme::LZ4,
             "bg4lz4" => crate::format::compression::CompressionScheme::ByteGrouping4LZ4,
-            _ => crate::format::compression::CompressionScheme::LZ4,
+            _ => unreachable!("conversion scheme must be validated at configuration load time"),
         }
     }
 }
@@ -299,16 +298,107 @@ impl ServerConfig {
                     .to_string(),
             );
         }
-        // M6 fix: Warn on invalid compression_scheme instead of silently falling back to LZ4.
+        match self.storage.backend.as_str() {
+            "local" => {
+                if self
+                    .storage
+                    .local_path
+                    .as_deref()
+                    .is_none_or(|path| path.trim().is_empty())
+                {
+                    return Err(
+                        "XET_LOCAL_PATH must be set and non-empty for local storage".to_string()
+                    );
+                }
+            }
+            "s3" => {
+                if self
+                    .storage
+                    .s3_bucket
+                    .as_deref()
+                    .is_none_or(|bucket| bucket.trim().is_empty())
+                {
+                    return Err(
+                        "XET_S3_BUCKET must be set and non-empty for S3 storage".to_string()
+                    );
+                }
+                if let Some(endpoint) = &self.storage.s3_endpoint {
+                    Self::validate_http_url("XET_S3_ENDPOINT", endpoint)?;
+                }
+            }
+            backend => {
+                return Err(format!(
+                    "XET_STORAGE_BACKEND '{}' is invalid; expected local or s3",
+                    backend
+                ));
+            }
+        }
+        if self
+            .storage
+            .upload_temp_dir
+            .as_deref()
+            .is_some_and(|path| path.trim().is_empty())
+        {
+            return Err("XET_UPLOAD_TEMP_DIR must not be empty".to_string());
+        }
+        if self
+            .storage
+            .reconstruction_temp_dir
+            .as_deref()
+            .is_some_and(|path| path.trim().is_empty())
+        {
+            return Err("XET_RECONSTRUCTION_TEMP_DIR must not be empty".to_string());
+        }
+
+        if self.auth.public_key_path.trim().is_empty() {
+            return Err("CAS_PUBLIC_KEY_PATH must not be empty".to_string());
+        }
+        if self.auth.trusted_kids.is_empty() {
+            return Err("CAS_TRUSTED_KIDS must contain at least one key ID".to_string());
+        }
+        let mut unique_kids = std::collections::HashSet::new();
+        for kid in &self.auth.trusted_kids {
+            if kid.trim().is_empty() {
+                return Err("CAS_TRUSTED_KIDS must not contain empty key IDs".to_string());
+            }
+            if !unique_kids.insert(kid) {
+                return Err(format!(
+                    "CAS_TRUSTED_KIDS contains duplicate key ID '{}'",
+                    kid
+                ));
+            }
+        }
+        if self
+            .auth
+            .private_key_path
+            .as_deref()
+            .is_some_and(|path| path.trim().is_empty())
+        {
+            return Err("CAS_PRIVATE_KEY_PATH must not be empty when set".to_string());
+        }
+        if let Some(signing_kid) = &self.auth.signing_kid {
+            if signing_kid.trim().is_empty() {
+                return Err("CAS_SIGNING_KID must not be empty when set".to_string());
+            }
+            if !unique_kids.contains(signing_kid) {
+                return Err(format!(
+                    "CAS_SIGNING_KID '{}' is not present in CAS_TRUSTED_KIDS",
+                    signing_kid
+                ));
+            }
+        }
+
         match self.conversion.compression_scheme.to_lowercase().as_str() {
             "none" | "lz4" | "bg4lz4" => {}
             invalid => {
-                tracing::warn!(
-                    "XET_CONVERSION_SCHEME '{}' is not a valid compression scheme. \
-                     Falling back to LZ4. Valid values: none, lz4, bg4lz4",
+                return Err(format!(
+                    "XET_CONVERSION_SCHEME '{}' is invalid; expected none, lz4, or bg4lz4",
                     invalid
-                );
+                ));
             }
+        }
+        if self.conversion.max_conversion_size == 0 {
+            return Err("XET_MAX_CONVERSION_SIZE must be > 0".to_string());
         }
         // I13 fix: Validate min_conversion_size <= max_conversion_size
         if self.conversion.min_conversion_size > self.conversion.max_conversion_size {
@@ -316,6 +406,23 @@ impl ServerConfig {
                 "XET_MIN_CONVERSION_SIZE ({}) must be <= XET_MAX_CONVERSION_SIZE ({}). \
                  Current values would prevent all conversions from triggering.",
                 self.conversion.min_conversion_size, self.conversion.max_conversion_size
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_http_url(name: &str, value: &str) -> Result<(), String> {
+        let parsed = url::Url::parse(value)
+            .map_err(|error| format!("{} '{}' is not a valid URL: {}", name, value, error))?;
+        if parsed.host().is_none() {
+            return Err(format!("{} '{}' is missing a valid host", name, value));
+        }
+        if parsed.scheme() != "http" && parsed.scheme() != "https" {
+            return Err(format!(
+                "{} '{}' uses unsupported scheme '{}'; expected http or https",
+                name,
+                value,
+                parsed.scheme()
             ));
         }
         Ok(())
@@ -334,13 +441,13 @@ impl ServerConfig {
         let s3_bucket = std::env::var("XET_S3_BUCKET").ok();
         let s3_region = std::env::var("XET_S3_REGION").ok();
         let s3_endpoint = std::env::var("XET_S3_ENDPOINT").ok();
-        let local_path = std::env::var("XET_LOCAL_PATH").ok();
+        let local_path = std::env::var("XET_LOCAL_PATH")
+            .ok()
+            .or_else(|| (backend == "local").then(|| "./data".to_string()));
         let upload_temp_dir = std::env::var("XET_UPLOAD_TEMP_DIR").ok();
         let reconstruction_temp_dir = std::env::var("XET_RECONSTRUCTION_TEMP_DIR").ok();
-        let verify_download_integrity = std::env::var("XET_VERIFY_DOWNLOAD_INTEGRITY")
-            .ok()
-            .map(|v| v.to_lowercase() == "true" || v == "1")
-            .unwrap_or(false);
+        let verify_download_integrity =
+            Self::parse_bool_env("XET_VERIFY_DOWNLOAD_INTEGRITY", false)?;
 
         // CAS-specific auth configuration
         // M2 fix: Use /etc/xet instead of /tmp for better security
@@ -358,16 +465,10 @@ impl ServerConfig {
         let signing_kid = std::env::var("CAS_SIGNING_KID").ok();
 
         // Conversion pipeline configuration
-        let conversion_enabled = std::env::var("XET_CONVERSION_ENABLED")
-            .ok()
-            .map(|v| v.to_lowercase() != "false" && v != "0")
-            .unwrap_or(true);
+        let conversion_enabled = Self::parse_bool_env("XET_CONVERSION_ENABLED", true)?;
         let conversion_scheme =
             std::env::var("XET_CONVERSION_SCHEME").unwrap_or_else(|_| "lz4".to_string());
-        let delete_raw = std::env::var("XET_DELETE_RAW_AFTER_CONVERSION")
-            .ok()
-            .map(|v| v.to_lowercase() != "false" && v != "0")
-            .unwrap_or(true);
+        let delete_raw = Self::parse_bool_env("XET_DELETE_RAW_AFTER_CONVERSION", true)?;
         let min_conversion_size = Self::parse_env("XET_MIN_CONVERSION_SIZE", 65536)?;
         let max_conversion_size = Self::parse_env("XET_MAX_CONVERSION_SIZE", 512 * 1024 * 1024)?;
 
