@@ -33,7 +33,9 @@ use aws_sdk_s3::error::ProvideErrorMetadata;
 use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 use aws_sdk_s3::{Client, Config};
 use bytes::Bytes;
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -43,18 +45,150 @@ const MULTIPART_THRESHOLD: u64 = 5 * 1024 * 1024;
 
 /// Size of each multipart upload part.
 /// 8MB balances upload parallelism potential with API call overhead.
-const PART_SIZE: usize = 8 * 1024 * 1024;
+const PART_SIZE: u64 = 8 * 1024 * 1024;
+const MAX_MULTIPART_PARTS: i32 = 10_000;
+const MAX_S3_OBJECT_SIZE: u64 = 5 * 1024 * 1024 * 1024 * 1024;
+
+#[derive(Default)]
+struct ActiveMultipartUploads {
+    /// Maps upload ID to object key. Upload IDs are unique even when multiple
+    /// clients concurrently write the same content-addressed key.
+    uploads: Mutex<HashMap<String, String>>,
+}
+
+impl ActiveMultipartUploads {
+    fn register(&self, upload_id: String, key: String) {
+        self.lock().insert(upload_id, key);
+    }
+
+    fn remove(&self, upload_id: &str) -> Option<String> {
+        self.lock().remove(upload_id)
+    }
+
+    fn drain(&self) -> Vec<(String, String)> {
+        self.lock().drain().collect()
+    }
+
+    fn len(&self) -> usize {
+        self.lock().len()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, String>> {
+        self.uploads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+struct ActiveUploadGuard {
+    client: Client,
+    bucket: String,
+    key: String,
+    upload_id: String,
+    active_uploads: Arc<ActiveMultipartUploads>,
+    armed: bool,
+}
+
+impl ActiveUploadGuard {
+    fn new(
+        client: Client,
+        bucket: String,
+        key: String,
+        upload_id: String,
+        active_uploads: Arc<ActiveMultipartUploads>,
+    ) -> Self {
+        active_uploads.register(upload_id.clone(), key.clone());
+        Self {
+            client,
+            bucket,
+            key,
+            upload_id,
+            active_uploads,
+            armed: true,
+        }
+    }
+
+    async fn abort(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let abort_result = self
+            .client
+            .abort_multipart_upload()
+            .bucket(&self.bucket)
+            .key(&self.key)
+            .upload_id(&self.upload_id)
+            .send()
+            .await;
+        if let Err(error) = abort_result {
+            tracing::warn!(
+                key = %self.key,
+                upload_id = %self.upload_id,
+                error = %error,
+                "Failed to abort multipart upload; retaining it for cleanup retry"
+            );
+        } else {
+            self.disarm();
+        }
+    }
+
+    fn disarm(&mut self) {
+        if self.armed {
+            self.active_uploads.remove(&self.upload_id);
+            self.armed = false;
+        }
+    }
+}
+
+impl Drop for ActiveUploadGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            // Keep the registry entry so S3Storage::drop or a graceful
+            // abort_all_active_uploads call can still attempt cleanup.
+            return;
+        };
+        let Some(key) = self.active_uploads.remove(&self.upload_id) else {
+            return;
+        };
+
+        let client = self.client.clone();
+        let bucket = self.bucket.clone();
+        let upload_id = self.upload_id.clone();
+        let active_uploads = self.active_uploads.clone();
+        handle.spawn(async move {
+            if let Err(error) = client
+                .abort_multipart_upload()
+                .bucket(&bucket)
+                .key(&key)
+                .upload_id(&upload_id)
+                .send()
+                .await
+            {
+                tracing::warn!(
+                    key = %key,
+                    upload_id = %upload_id,
+                    error = %error,
+                    "Failed to abort cancelled multipart upload"
+                );
+                active_uploads.register(upload_id, key);
+            }
+        });
+    }
+}
 
 pub struct S3Storage {
     client: Client,
     bucket: String,
     /// Tracks in-flight multipart uploads for shutdown-time cleanup.
-    /// Maps object key → upload_id. When the storage backend is dropped,
+    /// Maps upload_id → object key. When the storage backend is dropped,
     /// any remaining entries are aborted to prevent orphaned parts from
     /// accumulating storage costs.
-    /// I3 fix: Uses Mutex<HashMap> instead of external state to ensure
-    /// abort-on-drop semantics even if the server is killed abruptly.
-    active_uploads: std::sync::Mutex<std::collections::HashMap<String, String>>,
+    /// Uses a process-local registry so graceful shutdown and future
+    /// cancellation can attempt to abort every unique upload.
+    active_uploads: Arc<ActiveMultipartUploads>,
 }
 
 impl S3Storage {
@@ -103,14 +237,14 @@ impl S3Storage {
         Ok(Self {
             client,
             bucket: bucket.to_string(),
-            active_uploads: std::sync::Mutex::new(std::collections::HashMap::new()),
+            active_uploads: Arc::new(ActiveMultipartUploads::default()),
         })
     }
 
     /// Upload a file using S3 multipart upload API.
     ///
-    /// Memory usage: O(PART_SIZE) = 8MB, regardless of file size.
-    /// The file is read in PART_SIZE chunks and each chunk is uploaded as a part.
+    /// Memory usage is one multipart part. Parts start at 8 MiB and scale only
+    /// when necessary to stay within S3's 10,000-part limit.
     ///
     /// On any error, the in-progress multipart upload is aborted to avoid
     /// leaving orphaned parts that incur storage costs.
@@ -120,6 +254,8 @@ impl S3Storage {
     /// uploads are still in flight (e.g., server shutdown), the Drop impl aborts
     /// them to prevent orphaned parts from accumulating costs.
     async fn multipart_upload(&self, key: &str, path: &Path, file_size: u64) -> StorageResult<()> {
+        let part_size = multipart_part_size(file_size)?;
+
         // 1. Initiate multipart upload
         let create_output = self
             .client
@@ -141,32 +277,25 @@ impl S3Storage {
             })?
             .to_string();
 
-        // Register the upload so Drop can abort it on shutdown
-        if let Ok(mut guard) = self.active_uploads.lock() {
-            guard.insert(key.to_string(), upload_id.clone());
-        }
+        // Register by unique upload ID. The per-upload guard also aborts if
+        // this future is cancelled before completion.
+        let mut upload_guard = ActiveUploadGuard::new(
+            self.client.clone(),
+            self.bucket.clone(),
+            key.to_string(),
+            upload_id.clone(),
+            self.active_uploads.clone(),
+        );
 
         // 2. Upload parts — if any part fails, abort the entire upload
-        let upload_result = self.upload_parts(key, &upload_id, path, file_size).await;
+        let upload_result = self
+            .upload_parts(key, &upload_id, path, file_size, part_size)
+            .await;
 
         let parts = match upload_result {
             Ok(parts) => parts,
             Err(e) => {
-                // Abort the multipart upload to clean up orphaned parts.
-                // Best-effort: ignore abort errors since we're already returning
-                // the original upload error.
-                let _ = self
-                    .client
-                    .abort_multipart_upload()
-                    .bucket(&self.bucket)
-                    .key(key)
-                    .upload_id(&upload_id)
-                    .send()
-                    .await;
-                // Unregister regardless of abort success
-                if let Ok(mut guard) = self.active_uploads.lock() {
-                    guard.remove(key);
-                }
+                upload_guard.abort().await;
                 return Err(e);
             }
         };
@@ -188,36 +317,11 @@ impl S3Storage {
 
         match complete_result {
             Ok(_) => {
-                // Unregister after successful completion
-                if let Ok(mut guard) = self.active_uploads.lock() {
-                    guard.remove(key);
-                }
+                upload_guard.disarm();
                 Ok(())
             }
             Err(e) => {
-                // Best-effort abort on complete failure.
-                // Note: tokio::spawn may not execute if the runtime is shutting down,
-                // potentially leaving orphaned parts. Production S3 deployments should
-                // configure a lifecycle rule with AbortIncompleteMultipartUpload to
-                // automatically clean up stale multipart uploads after a timeout.
-                // The Drop impl on S3Storage provides a second line of defense.
-                let client = self.client.clone();
-                let bucket = self.bucket.clone();
-                let key_clone = key.to_string();
-                let uid = upload_id.clone();
-                tokio::spawn(async move {
-                    let _ = client
-                        .abort_multipart_upload()
-                        .bucket(&bucket)
-                        .key(&key_clone)
-                        .upload_id(&uid)
-                        .send()
-                        .await;
-                });
-                // Unregister — abort is in flight
-                if let Ok(mut guard) = self.active_uploads.lock() {
-                    guard.remove(key);
-                }
+                upload_guard.abort().await;
                 Err(StorageError::Internal(format!(
                     "S3 complete_multipart_upload failed: {}",
                     e
@@ -234,28 +338,31 @@ impl S3Storage {
     /// I3 fix: Provides shutdown-time cleanup for multipart uploads that would
     /// otherwise leave orphaned parts accumulating storage costs.
     pub async fn abort_all_active_uploads(&self) {
-        let uploads: Vec<(String, String)> = {
-            let mut guard = match self.active_uploads.lock() {
-                Ok(g) => g,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            guard.drain().collect()
-        };
+        let uploads = self.active_uploads.drain();
 
-        for (key, upload_id) in uploads {
+        for (upload_id, key) in uploads {
             tracing::info!(
                 key = %key,
                 upload_id = %upload_id,
                 "Aborting in-flight multipart upload during shutdown"
             );
-            let _ = self
+            if let Err(error) = self
                 .client
                 .abort_multipart_upload()
                 .bucket(&self.bucket)
                 .key(&key)
                 .upload_id(&upload_id)
                 .send()
-                .await;
+                .await
+            {
+                tracing::warn!(
+                    key = %key,
+                    upload_id = %upload_id,
+                    error = %error,
+                    "Failed to abort multipart upload during shutdown; retaining for retry"
+                );
+                self.active_uploads.register(upload_id, key);
+            }
         }
     }
 
@@ -263,14 +370,15 @@ impl S3Storage {
     /// Returns the list of completed parts (part_number + e_tag) for the
     /// complete_multipart_upload call.
     ///
-    /// Peak memory: O(PART_SIZE) = 8MB. Each iteration allocates exactly one
-    /// part-sized buffer which is moved into the ByteStream for upload.
+    /// Peak memory is one calculated part. Each iteration allocates exactly one
+    /// buffer which is moved into the ByteStream for upload.
     async fn upload_parts(
         &self,
         key: &str,
         upload_id: &str,
         path: &Path,
         file_size: u64,
+        part_size: u64,
     ) -> StorageResult<Vec<CompletedPart>> {
         let mut file = File::open(path).await.map_err(|e| {
             StorageError::Internal(format!("Failed to open file for multipart upload: {}", e))
@@ -281,8 +389,20 @@ impl S3Storage {
         let mut offset: u64 = 0;
 
         while offset < file_size {
-            let remaining = (file_size - offset) as usize;
-            let to_read = std::cmp::min(PART_SIZE, remaining);
+            if part_number > MAX_MULTIPART_PARTS {
+                return Err(StorageError::InvalidArgument(format!(
+                    "Multipart upload requires more than {} parts",
+                    MAX_MULTIPART_PARTS
+                )));
+            }
+            let remaining = file_size.checked_sub(offset).ok_or_else(|| {
+                StorageError::Internal("Multipart upload offset exceeded file size".to_string())
+            })?;
+            let to_read = usize::try_from(remaining.min(part_size)).map_err(|_| {
+                StorageError::InvalidArgument(
+                    "Multipart read size does not fit in usize".to_string(),
+                )
+            })?;
 
             // Allocate exactly one buffer per part — moved into ByteStream,
             // so no separate reusable buffer (which would double peak RAM).
@@ -295,9 +415,20 @@ impl S3Storage {
                     StorageError::Internal(format!("Failed to read upload file: {}", e))
                 })?;
                 if n == 0 {
+                    let read_offset = offset
+                        .checked_add(u64::try_from(read_total).map_err(|_| {
+                            StorageError::Internal(
+                                "Multipart read offset does not fit in u64".to_string(),
+                            )
+                        })?)
+                        .ok_or_else(|| {
+                            StorageError::Internal(
+                                "Multipart read offset overflowed u64".to_string(),
+                            )
+                        })?;
                     return Err(StorageError::Internal(format!(
                         "Unexpected EOF at offset {} (expected {} more bytes)",
-                        offset + read_total as u64,
+                        read_offset,
                         to_read - read_total
                     )));
                 }
@@ -326,8 +457,16 @@ impl S3Storage {
                 .build();
 
             parts.push(completed_part);
-            part_number += 1;
-            offset += to_read as u64;
+            part_number = part_number.checked_add(1).ok_or_else(|| {
+                StorageError::Internal("Multipart part number overflowed i32".to_string())
+            })?;
+            offset = offset
+                .checked_add(u64::try_from(to_read).map_err(|_| {
+                    StorageError::Internal("Multipart read size does not fit in u64".to_string())
+                })?)
+                .ok_or_else(|| {
+                    StorageError::Internal("Multipart upload offset overflowed u64".to_string())
+                })?;
         }
 
         if parts.is_empty() {
@@ -340,33 +479,43 @@ impl S3Storage {
     }
 }
 
+fn multipart_part_size(file_size: u64) -> StorageResult<u64> {
+    if file_size > MAX_S3_OBJECT_SIZE {
+        return Err(StorageError::InvalidArgument(format!(
+            "File size {} exceeds the S3 object limit of {} bytes",
+            file_size, MAX_S3_OBJECT_SIZE
+        )));
+    }
+
+    let part_limit = u64::try_from(MAX_MULTIPART_PARTS).map_err(|_| {
+        StorageError::Internal("Multipart part limit does not fit in u64".to_string())
+    })?;
+    let required_size = file_size / part_limit + u64::from(file_size % part_limit != 0);
+    Ok(PART_SIZE.max(required_size))
+}
+
 /// I3 fix: On drop, abort any in-flight multipart uploads to prevent orphaned parts
 /// from accumulating storage costs.
 ///
-/// This is a safety net for cases where the server is shut down abruptly (e.g., SIGKILL)
-/// while multipart uploads are in progress. Under normal graceful shutdown, callers
+/// This is a best-effort safety net for runtime-driven shutdown while multipart
+/// uploads are in progress. Under normal graceful shutdown, callers
 /// should invoke `abort_all_active_uploads()` explicitly before dropping the backend.
 ///
-/// Note: Drop is synchronous, so we spawn a blocking task that attempts to run the
-/// abort asynchronously. If the tokio runtime is already shut down, the aborts may
+/// Note: Drop is synchronous, so it spawns an asynchronous abort task. If the
+/// tokio runtime is already shut down, the aborts may
 /// not execute — in that case, the S3 lifecycle rule (AbortIncompleteMultipartUpload)
 /// is the final line of defense.
 impl Drop for S3Storage {
     fn drop(&mut self) {
-        let uploads: Vec<(String, String)> = {
-            let mut guard = match self.active_uploads.lock() {
-                Ok(g) => g,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            if guard.is_empty() {
-                return;
-            }
-            tracing::warn!(
-                count = guard.len(),
-                "S3Storage dropped with in-flight multipart uploads; attempting cleanup"
-            );
-            guard.drain().collect()
-        };
+        let count = self.active_uploads.len();
+        if count == 0 {
+            return;
+        }
+        tracing::warn!(
+            count,
+            "S3Storage dropped with in-flight multipart uploads; attempting cleanup"
+        );
+        let uploads = self.active_uploads.drain();
 
         let client = self.client.clone();
         let bucket = self.bucket.clone();
@@ -374,7 +523,7 @@ impl Drop for S3Storage {
         // Try to spawn the cleanup on the current tokio runtime
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
-                for (key, upload_id) in uploads {
+                for (upload_id, key) in uploads {
                     tracing::info!(
                         key = %key,
                         upload_id = %upload_id,
@@ -392,7 +541,7 @@ impl Drop for S3Storage {
         } else {
             // Runtime is gone — log a warning. S3 lifecycle rule is the last resort.
             tracing::error!(
-                count = uploads.len(),
+                count,
                 "Cannot abort in-flight multipart uploads: tokio runtime is shut down. \
                  Configure S3 lifecycle rule AbortIncompleteMultipartUpload to clean up."
             );
@@ -417,7 +566,7 @@ impl StorageBackend for S3Storage {
             .put_object()
             .bucket(&self.bucket)
             .key(key)
-            .body(data.to_vec().into())
+            .body(data.into())
             .send()
             .await
             .map_err(|e| StorageError::Internal(format!("S3 put failed: {}", e)))?;
@@ -428,8 +577,8 @@ impl StorageBackend for S3Storage {
     /// Store an object from a file on disk.
     ///
     /// For files < 5MB: uses simple put_object.
-    /// For files >= 5MB: uses multipart upload, reading the file in 8MB chunks
-    /// so peak memory usage is O(PART_SIZE) regardless of file size.
+    /// For files >= 5MB: uses multipart upload with a calculated part size, so
+    /// peak memory is one part and the request stays within S3's 10,000-part limit.
     async fn put_from_path(&self, key: &str, path: &Path) -> StorageResult<()> {
         let file_size = tokio::fs::metadata(path)
             .await
@@ -550,14 +699,14 @@ impl StorageBackend for S3Storage {
         }
 
         // Atomic rename from temp to final destination
-        tokio::fs::rename(&temp_dest, dest).await.map_err(|e| {
-            let _ = std::fs::remove_file(&temp_dest);
-            StorageError::Internal(format!(
+        if let Err(error) = tokio::fs::rename(&temp_dest, dest).await {
+            let _ = tokio::fs::remove_file(&temp_dest).await;
+            return Err(StorageError::Internal(format!(
                 "Failed to rename temp file to {}: {}",
                 dest.display(),
-                e
-            ))
-        })?;
+                error
+            )));
+        }
 
         Ok(())
     }
@@ -640,9 +789,45 @@ impl StorageBackend for S3Storage {
                 }
             })?;
 
-        // Get content length from HEAD response
-        let size = result.content_length().unwrap_or(0) as u64;
+        let content_length = result.content_length().ok_or_else(|| {
+            StorageError::Internal("S3 HEAD response omitted Content-Length".to_string())
+        })?;
+        u64::try_from(content_length).map_err(|_| {
+            StorageError::Internal(format!(
+                "S3 HEAD returned a negative Content-Length: {}",
+                content_length
+            ))
+        })
+    }
+}
 
-        Ok(size)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn active_uploads_keep_concurrent_uploads_for_the_same_key_distinct() {
+        let uploads = ActiveMultipartUploads::default();
+        uploads.register("upload-a".to_string(), "same-key".to_string());
+        uploads.register("upload-b".to_string(), "same-key".to_string());
+
+        assert_eq!(uploads.len(), 2);
+        assert_eq!(uploads.remove("upload-a").as_deref(), Some("same-key"));
+        assert_eq!(uploads.len(), 1);
+
+        assert_eq!(
+            uploads.drain(),
+            vec![("upload-b".to_string(), "same-key".to_string())]
+        );
+    }
+
+    #[test]
+    fn multipart_part_size_scales_and_enforces_s3_object_limit() {
+        assert_eq!(multipart_part_size(PART_SIZE).unwrap(), PART_SIZE);
+        let large_file = PART_SIZE * u64::try_from(MAX_MULTIPART_PARTS).unwrap() + 1;
+        assert!(multipart_part_size(large_file).unwrap() > PART_SIZE);
+
+        let error = multipart_part_size(MAX_S3_OBJECT_SIZE + 1).unwrap_err();
+        assert!(matches!(error, StorageError::InvalidArgument(_)));
     }
 }

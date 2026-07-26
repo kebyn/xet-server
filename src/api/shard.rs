@@ -231,11 +231,13 @@ pub async fn upload_shard(
         }
     };
 
-    // Move temp file to final storage only after validation succeeds.
-    let temp_path = temp_file.into_path();
-    if let Err(e) = storage.put_from_path(&shard_key, &temp_path).await {
+    // Store only after validation succeeds. TempFile cleans remote-upload
+    // sources and error paths; local storage may consume the path by rename.
+    if let Err(e) = temp_file
+        .store(storage.get_ref().as_ref(), &shard_key)
+        .await
+    {
         error!("Failed to store shard: {}", e);
-        let _ = std::fs::remove_file(&temp_path);
         GLOBAL_METRICS.record_request(500);
         GLOBAL_METRICS.record_error();
         GLOBAL_METRICS.record_latency(start);

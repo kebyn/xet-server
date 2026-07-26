@@ -75,7 +75,7 @@ pub(super) async fn serve_verified_xet_reconstruction(
 
 struct GuardedFileStream<S> {
     inner: S,
-    _guard: crate::xorb_reader::TempPathGuard,
+    _guard: crate::util::TempPathGuard,
 }
 
 impl<S> Stream for GuardedFileStream<S>

@@ -1,7 +1,7 @@
 //! RAII temporary file for streaming uploads.
 //!
 //! Ensures cleanup on all error paths: when the `TempFile` is dropped without
-//! being persisted, the underlying file is removed from disk.
+//! being stored, the underlying file is removed from disk.
 
 use std::path::{Path, PathBuf};
 use tokio::fs;
@@ -14,16 +14,13 @@ use crate::storage::{StorageError, StorageResult};
 /// Usage:
 /// 1. `TempFile::create(dir)` — creates a temp file in `dir`
 /// 2. `write_all()` — stream data into the file
-/// 3. `sync_all()` — fsync before persist
-/// 4. `persist(dest)` — atomic rename to final location (consumes self)
+/// 3. `sync_all()` — fsync before storage
+/// 4. `store(storage, key)` — transfer bytes and clean the source path
 ///
-/// If dropped without `persist()`, the temp file is removed.
+/// If dropped without `store()`, the temp file is removed.
 pub struct TempFile {
     path: PathBuf,
     file: Option<fs::File>,
-    /// M1 fix: Flag to prevent Drop cleanup when ownership is transferred via into_path().
-    /// Safer than mem::forget which would skip all Drop logic for any future fields.
-    consumed: bool,
 }
 
 impl TempFile {
@@ -55,7 +52,6 @@ impl TempFile {
         Ok(Self {
             path,
             file: Some(file),
-            consumed: false,
         })
     }
 
@@ -67,7 +63,7 @@ impl TempFile {
     /// Write data to the temp file.
     pub async fn write_all(&mut self, data: &[u8]) -> StorageResult<()> {
         let file = self.file.as_mut().ok_or_else(|| {
-            StorageError::Internal("TempFile already persisted or consumed".to_string())
+            StorageError::Internal("TempFile already closed for storage".to_string())
         })?;
         file.write_all(data)
             .await
@@ -75,10 +71,10 @@ impl TempFile {
     }
 
     /// Flush and fsync the temp file to disk.
-    /// Must be called before `persist()` to ensure data durability.
+    /// Must be called before `store()` to ensure data durability.
     pub async fn sync_all(&mut self) -> StorageResult<()> {
         let file = self.file.as_mut().ok_or_else(|| {
-            StorageError::Internal("TempFile already persisted or consumed".to_string())
+            StorageError::Internal("TempFile already closed for storage".to_string())
         })?;
         file.flush()
             .await
@@ -88,23 +84,23 @@ impl TempFile {
             .map_err(|e| StorageError::Internal(format!("Failed to fsync temp file: {}", e)))
     }
 
-    /// Consume the TempFile and return its path, without cleanup.
-    /// The caller takes responsibility for the file.
-    /// M1 fix: Use `consumed` flag instead of mem::forget for safer ownership transfer.
-    pub fn into_path(mut self) -> PathBuf {
-        let path = self.path.clone();
+    /// Close and store the temporary file while retaining cleanup ownership.
+    ///
+    /// Local storage may move the source path; remote storage normally leaves it
+    /// in place. In both cases Drop performs a best-effort cleanup after the
+    /// storage operation completes or is cancelled.
+    pub async fn store(
+        mut self,
+        storage: &dyn crate::storage::StorageBackend,
+        key: &str,
+    ) -> StorageResult<()> {
         self.file.take();
-        self.consumed = true;
-        path
+        storage.put_from_path(key, &self.path).await
     }
 }
 
 impl Drop for TempFile {
     fn drop(&mut self) {
-        if self.consumed {
-            return;
-        }
-
         // Close file handle if still open
         self.file.take();
 
@@ -129,7 +125,39 @@ impl Drop for TempFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use bytes::Bytes;
     use tempfile::tempdir;
+
+    struct CopyingStorage {
+        destination: PathBuf,
+    }
+
+    #[async_trait]
+    impl crate::storage::StorageBackend for CopyingStorage {
+        async fn put(&self, _key: &str, _data: Bytes) -> StorageResult<()> {
+            Ok(())
+        }
+
+        async fn put_from_path(&self, _key: &str, path: &Path) -> StorageResult<()> {
+            tokio::fs::copy(path, &self.destination)
+                .await
+                .map(|_| ())
+                .map_err(|error| StorageError::Internal(error.to_string()))
+        }
+
+        async fn get(&self, _key: &str) -> StorageResult<Bytes> {
+            Ok(Bytes::new())
+        }
+
+        async fn exists(&self, _key: &str) -> StorageResult<bool> {
+            Ok(false)
+        }
+
+        async fn delete(&self, _key: &str) -> StorageResult<()> {
+            Ok(())
+        }
+    }
 
     #[tokio::test]
     async fn test_temp_file_create_and_cleanup() {
@@ -148,14 +176,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_temp_file_into_path_persists() {
+    async fn test_store_cleans_source_when_backend_only_copies() {
         let dir = tempdir().unwrap();
+        let destination = dir.path().join("stored");
+        let storage = CopyingStorage {
+            destination: destination.clone(),
+        };
         let mut tf = TempFile::create(dir.path()).await.unwrap();
         tf.write_all(b"persist me").await.unwrap();
-        let path = tf.into_path();
-        assert!(path.exists(), "File should persist after into_path");
-        // Clean up manually
-        let _ = std::fs::remove_file(&path);
+        tf.sync_all().await.unwrap();
+        let source = tf.path().to_path_buf();
+
+        tf.store(&storage, "object").await.unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            !source.exists(),
+            "source file should be cleaned after store"
+        );
+        assert_eq!(tokio::fs::read(destination).await.unwrap(), b"persist me");
     }
 
     #[tokio::test]
@@ -165,10 +204,9 @@ mod tests {
         tf.write_all(b"hello ").await.unwrap();
         tf.write_all(b"world").await.unwrap();
         tf.sync_all().await.unwrap();
-        let path = tf.into_path();
+        let path = tf.path().to_path_buf();
 
         let contents = tokio::fs::read_to_string(&path).await.unwrap();
         assert_eq!(contents, "hello world");
-        let _ = std::fs::remove_file(&path);
     }
 }

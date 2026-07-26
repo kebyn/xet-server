@@ -10,8 +10,8 @@ use crate::index::{VerifiedChunkMapping, VerifiedFileMapping, VerifiedShardRegis
 use crate::reconstruction_plan::build_file_chunk_plan;
 use crate::storage::StorageBackend;
 use crate::types::MerkleHash;
-use crate::util::StreamingHasher;
-use crate::xorb_reader::{TempPathGuard, extract_chunk_verified_from_file};
+use crate::util::{StreamingHasher, TempPathGuard};
+use crate::xorb_reader::extract_chunk_verified_from_file;
 
 struct ValidatedXorb {
     temp_guard: TempPathGuard,

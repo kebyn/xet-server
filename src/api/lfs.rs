@@ -246,13 +246,13 @@ pub async fn upload_lfs_object(
         }));
     }
 
-    // Move temp file to final storage location (zero-copy rename for local storage)
-    let temp_path = temp_file.into_path();
-    if let Err(e) = storage.put_from_path(&object_key, &temp_path).await {
+    // Local storage may rename the file; remote storage uploads it and leaves
+    // source cleanup to TempFile's RAII ownership.
+    if let Err(e) = temp_file
+        .store(storage.get_ref().as_ref(), &object_key)
+        .await
+    {
         error!("Failed to store object: {}", e);
-        // M1 fix: Use async I/O to avoid blocking the async runtime on file cleanup.
-        // Previously used std::fs::remove_file which blocks the tokio worker thread.
-        let _ = tokio::fs::remove_file(&temp_path).await;
         GLOBAL_METRICS.record_request(500);
         GLOBAL_METRICS.record_error();
         GLOBAL_METRICS.record_latency(start);

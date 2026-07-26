@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use crate::error::XetError;
 use crate::format::shard::MDBShardFile;
 use crate::storage::{StorageBackend, StorageError};
-use crate::xorb_reader::TempPathGuard;
+use crate::util::TempPathGuard;
 
 #[derive(Debug)]
 pub enum ShardIoError {

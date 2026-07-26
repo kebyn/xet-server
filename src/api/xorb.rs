@@ -195,11 +195,10 @@ pub async fn upload_xorb(
         });
     }
 
-    // Move temp file to final storage (zero-copy rename for local storage)
-    let temp_path = temp_file.into_path();
-    if let Err(e) = storage.put_from_path(&xorb_key, &temp_path).await {
+    // Local storage may rename the file; remote storage uploads it and leaves
+    // source cleanup to TempFile's RAII ownership.
+    if let Err(e) = temp_file.store(storage.get_ref().as_ref(), &xorb_key).await {
         error!("Failed to store xorb: {}", e);
-        let _ = tokio::fs::remove_file(&temp_path).await;
         GLOBAL_METRICS.record_request(500);
         GLOBAL_METRICS.record_error();
         GLOBAL_METRICS.record_latency(start);

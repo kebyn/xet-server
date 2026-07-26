@@ -20,50 +20,6 @@ pub fn max_compressed_len_for_chunk(
     }
 }
 
-#[derive(Debug)]
-pub struct TempPathGuard {
-    path: Option<std::path::PathBuf>,
-}
-
-impl TempPathGuard {
-    pub fn new(path: std::path::PathBuf) -> Self {
-        Self { path: Some(path) }
-    }
-
-    pub fn try_path(&self) -> std::result::Result<&std::path::Path, String> {
-        self.path
-            .as_deref()
-            .ok_or_else(|| "temp path already cleaned".to_string())
-    }
-
-    pub fn path(&self) -> &std::path::Path {
-        self.path
-            .as_deref()
-            .unwrap_or_else(|| std::path::Path::new(""))
-    }
-
-    pub async fn cleanup(mut self) {
-        if let Some(path) = self.path.take() {
-            let _ = tokio::fs::remove_file(path).await;
-        }
-    }
-}
-
-impl Drop for TempPathGuard {
-    fn drop(&mut self) {
-        let Some(path) = self.path.take() else {
-            return;
-        };
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn_blocking(move || {
-                let _ = std::fs::remove_file(path);
-            });
-        } else {
-            let _ = std::fs::remove_file(path);
-        }
-    }
-}
-
 /// Read one chunk from a xorb file at `chunk_offset_bytes`, verify header+compressed
 /// bytes against `expected_hash`, then decompress it.
 ///
@@ -153,21 +109,4 @@ pub async fn extract_chunk_verified_from_file(
     )
     .map_err(|e| format!("Failed to decompress chunk: {}", e))?;
     Ok(bytes::Bytes::from(decompressed))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_temp_path_guard_try_path_reports_cleaned_guard() {
-        let mut guard = TempPathGuard::new(std::path::PathBuf::from("xorb.tmp"));
-        guard.path = None;
-
-        let err = guard
-            .try_path()
-            .expect_err("cleaned guard should return an error");
-
-        assert!(err.contains("cleaned"));
-    }
 }

@@ -34,6 +34,9 @@ pub trait StorageBackend: Send + Sync {
     async fn put(&self, key: &str, data: Bytes) -> StorageResult<()>;
 
     /// Store an object from a file on disk.
+    ///
+    /// Implementations may move the source path or leave it intact. The caller
+    /// retains cleanup ownership and must tolerate either behavior.
     /// Default implementation reads the entire file into RAM and delegates to `put()`.
     ///
     /// **Performance warning**: this default defeats the purpose of streaming uploads.
