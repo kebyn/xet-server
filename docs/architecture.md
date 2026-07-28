@@ -221,6 +221,8 @@ src/
 
 CAS 启动时会将索引状态置为 `rebuilding`，重建成功后置为 `ready` 并记录 shard 数；重建失败时置为 `failed`。默认情况下进程会继续启动但 `/ready` 返回 `503`，便于编排系统等待或摘除实例；设置 `XET_INDEX_REBUILD_STRICT=true` 时，重建失败会让 CAS 直接启动失败。
 
+Shard I/O 不把完整对象复制到内存：本地文件原地解析，S3/其他远端对象流式下载到带 RAII 清理的临时文件；解析器以 64 KiB 哈希缓冲加解析后的 metadata 工作，并在分配前验证物理文件长度、section offset、entry count、checked arithmetic 和截断。启动重建以 10 个 shard 为一批进行有界并发解析与内容验证，因此峰值受单批解析 metadata、xorb 验证和临时文件控制，而不会随 shard 原始字节总量直接放大。
+
 ### 3. 存储后端
 
 **本地存储** (`storage/local.rs`)：
@@ -248,8 +250,9 @@ CAS 启动时会将索引状态置为 `rebuilding`，重建成功后置为 `read
 
 **S3 存储** (`storage/s3.rs`)：
 - 使用 S3/MinIO 对象存储
-- 支持 multipart 上传（大文件）
-- 优化的传输策略
+- 5 MiB 及以上对象使用流式 multipart 上传；part size 从 8 MiB 起并按对象大小扩展，以遵守 10,000-part/5 TiB 限制
+- 每个 multipart 用唯一 upload ID 跟踪，因此同一 content-addressed key 的并发上传不会覆盖清理状态
+- 错误、future cancellation 和 graceful shutdown 会 best-effort abort；进程崩溃或 runtime 已退出时仍依赖 bucket 的 `AbortIncompleteMultipartUpload` lifecycle rule 最终清理
 
 **配置**：
 ```bash
@@ -282,7 +285,7 @@ export XET_UPLOAD_TEMP_DIR=/fast-ssd/xet-uploads  # 可选，默认为 {XET_LOCA
 - `XET_S3_REGION`: S3 区域（可选，默认 us-east-1）
 - `XET_S3_ENDPOINT`: S3 端点 URL（可选，默认 AWS S3）
 - `XET_LOCAL_PATH`: 本地存储路径（本地后端必需）
-- `XET_UPLOAD_TEMP_DIR`: 上传临时目录（可选，本地存储默认为 `{XET_LOCAL_PATH}/.tmp`，S3 存储默认为 `/tmp/xet-uploads`）
+- `XET_UPLOAD_TEMP_DIR`: 上传临时目录（可选，本地存储默认为 `{XET_LOCAL_PATH}/.tmp`，S3 存储默认为 `/var/tmp/xet-uploads`）
 - `XET_VERIFY_DOWNLOAD_INTEGRITY`: 启用下载时 SHA-256 完整性校验（可选，默认 false）
 
 ### 4. 认证系统
@@ -325,16 +328,20 @@ export HUB_TOKEN_TTL_SECONDS=3600                          # CAS 令牌有效期
 
 **CAS Server 配置**：
 ```bash
-export CAS_PUBLIC_KEY_PATH=/etc/xet/hub-public-key.pem    # Hub 公钥（用于验证）
-export CAS_TRUSTED_KIDS=hub-key-1,backup-key-1            # 受信任的密钥 ID 列表
+export CAS_PUBLIC_KEYS=hub-key-1=/etc/xet/hub-key-1-public.pem,hub-key-2=/etc/xet/hub-key-2-public.pem
+export CAS_TRUSTED_KIDS=hub-key-1,hub-key-2                # keyring allowlist
+export CAS_PRIVATE_KEY_PATH=/etc/xet/hub-key-1-private.pem
+export CAS_SIGNING_KID=hub-key-1
 ```
 
 **配置说明**：
 - `HUB_PRIVATE_KEY_PATH`: Hub 的 Ed25519 私钥路径，用于签发 CAS 令牌
 - `HUB_KID`: Hub 的密钥 ID，嵌入到签发的 JWT 中
 - `HUB_TOKEN_TTL_SECONDS`: CAS 令牌有效期（默认 3600 秒 = 1 小时）
-- `CAS_PUBLIC_KEY_PATH`: Hub 的公钥路径，CAS 用于验证令牌签名
-- `CAS_TRUSTED_KIDS`: 受信任的密钥 ID 列表（逗号分隔），用于支持密钥轮换
+- `CAS_PUBLIC_KEYS`: 有序 `kid=公钥路径` keyring。CAS 根据 JWT header 的 `kid` 只选择对应公钥验签
+- `CAS_TRUSTED_KIDS`: keyring allowlist；只允许已配置映射，未设置时默认 keyring 全部 kid
+- `CAS_PUBLIC_KEY_PATH`: 仅在未设置 keyring 时使用的单公钥兼容入口；多个 trusted kid 仍共享同一公钥，不是真正的多公钥轮换
+- `CAS_SIGNING_KID`: 未设置时选择 keyring 顺序中第一个受信任映射；配置私钥后必须与该 kid 的公钥匹配，否则启动失败
 - 默认 trusted kid 为 `hub-key-1`，应与 Hub 的 `HUB_KID` 配置保持一致
 
 **认证流程**：
@@ -388,9 +395,9 @@ export CAS_TRUSTED_KIDS=hub-key-1,backup-key-1            # 受信任的密钥 I
 
 ### 性能考虑
 
-- **流式处理**：转换过程使用流式读取（1MB block size），内存使用限制为 O(block_size + max_chunk_size)
-- **无文件大小限制**：支持任意大小的文件转换，不受内存限制
-- `XET_MAX_CONVERSION_SIZE` 用于防止超大文件导致转换时间过长
+- **流式输入**：转换过程以 1 MiB block 读取，不额外保留完整原始 blob
+- **输出仍有界累计**：`XorbBuilder` 在完成前保留序列化后的压缩 chunks，finalize 时构建完整 xorb；xorb/shard metadata 也随 chunk 数量增长
+- `XET_MAX_CONVERSION_SIZE` 用于限制峰值内存、转换时间、临时磁盘和 xorb/shard 构建工作
 - 建议生产环境保持 `XET_DELETE_RAW_AFTER_CONVERSION=true` 以节省 50% 存储空间
 - 转换是异步进行的，不会阻塞上传请求
 
@@ -515,8 +522,8 @@ export CAS_TRUSTED_KIDS=hub-key-1,backup-key-1            # 受信任的密钥 I
 │ Hub API          │
 │                  │
 │ • 解析 NDJSON   │
-│ • 提取文件       │
-│ • 分类（inline/LFS）
+│ • 保持 operation 顺序
+│ • 复制父 snapshot 后应用变更
 └────┬─────────────┘
      │
      │ 3a. 小文件 (≤1MB): 内联存储（regular 模式）
@@ -539,6 +546,9 @@ export CAS_TRUSTED_KIDS=hub-key-1,backup-key-1            # 受信任的密钥 I
 
 **说明**：
 - Hub 端只进行两分类：小文件内联存储（regular），大文件走 LFS 路径（lfs）
+- Commit header 必须是第一个非空 operation 且只能出现一次；非首个 commit 的 `parentRevision` 必须匹配当前 HEAD
+- file/LFS/delete operation 按请求顺序执行，同一路径最后一次操作生效；未修改的父条目复制到新 commit，使每个 revision 都是完整文件树 snapshot
+- LFS OID 必须是无 `sha256:` 前缀的 64 字符十六进制值；Hub 使用 CAS `HEAD /internal/blob/{oid}` 返回的必需 `X-Blob-Size` 验证声明大小
 - Xet 格式转换是 CAS 端的后处理步骤，通过转换管道（conversion pipeline）自动完成
 - 转换管道将 LFS blob 转换为 xorb+shard 格式，实现全局 chunk 级去重
 
@@ -845,6 +855,12 @@ LFS 对象是原始文件的直接存储，使用 SHA-256 哈希标识。
 - **CAS content-capability authorization**：CAS 公共对象 API 只校验 token 类型和 scope，不校验 `repo_id`、`repo_type`、`revision` 是否与对象归属匹配。持有有效 CAS token 和内容 hash 的客户端具备对应内容能力。
 - **Hub LFS proxy boundary**：Hub 的 LFS batch 和 `/lfs/objects/{oid}` 代理使用短期 `proxy_xxx` token 绑定 OID 与 operation，但不校验 OID 是否属于 URL 中的 repo。带 repo 的 Git LFS 路由和裸 `/objects/batch` 路由共享同一能力模型。
 - **Internal service authorization**：Hub → CAS 内部调用使用 `internal_xxx` token，并要求 `sub=hub-service`、`scope=internal`、`token_type=internal`。该 token 只用于 `/internal/*` 和 `/metrics` 等内部端点。
+
+### Error Boundaries
+
+- Hub/CAS service 层和服务端日志保留 SQL、文件路径、S3 endpoint/bucket、parser 细节与 CAS upstream 状态，便于运维诊断。
+- 这些基础设施详情不跨 HTTP trust boundary：Hub 500 固定返回 `Internal server error`，CAS 故障固定返回通用 502 `Upstream CAS request failed`；CAS 普通 JSON API 的 500 固定返回 `{"error":"Internal server error"}`，HEAD 保持空 body。
+- 可由调用者修正的 4xx 继续返回路径校验、hash mismatch、对象不存在、size mismatch 或 metadata conflict 等业务信息。CAS upstream 4xx 可以保留状态码，但 Hub 不转发 upstream body。
 
 ### 3. 数据安全
 

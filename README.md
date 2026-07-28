@@ -126,7 +126,7 @@ export XET_STORAGE_BACKEND=local
 export XET_LOCAL_PATH=/data/xet-storage
 
 # 认证设置
-export CAS_PUBLIC_KEY_PATH=/path/to/public_key.pem
+export CAS_PUBLIC_KEYS=hub-key-1=/path/to/public_key.pem
 export CAS_TRUSTED_KIDS=hub-key-1
 ```
 
@@ -271,6 +271,14 @@ CAS 对象访问是 content-capability based：持有有效 CAS token 的客户�
 
 详细文档：[Hub API Reference](docs/api/hub-api.md)
 
+### 协议与运行保证
+
+- Commit API 的 `header` 必须是第一个非空 NDJSON operation 且只能出现一次；后续 file/LFS/delete operation 保持请求顺序。同一路径以后出现的 operation 为准。
+- 每个 commit 是完整文件树 snapshot：复制父 commit 未修改条目后再应用本次变化；非首个 commit 必须提交与当前 HEAD 一致的 `parentRevision`。
+- Commit API 的 LFS `oid` 是不带 `sha256:` 前缀的 64 字符十六进制值。Hub 通过 CAS `HEAD /internal/blob/{oid}` 的必需 `X-Blob-Size` 校验声明大小；对象不存在或大小不一致返回 422。
+- Shard 从本地文件或远端临时文件有界解析，不保留整份原始字节副本；启动重建最多 10 个 shard 一批。S3 multipart 以唯一 upload ID 跟踪并在错误、取消和 shutdown 时 best-effort abort，bucket lifecycle rule 仍是进程崩溃时的最终兜底。
+- 内部 SQL、路径、S3 配置和 CAS upstream body 只写服务端日志。Hub 对客户端返回稳定通用的 500/502 文案，CAS 的普通 500 JSON 为 `{"error":"Internal server error"}`。
+
 ## ⚙️ 配置参考
 
 ### CAS Server 环境变量
@@ -318,18 +326,21 @@ CAS 对象访问是 content-capability based：持有有效 CAS token 的客户�
 >   }'
 > ```
 >
-> 如果不配置此规则，进程崩溃或网络中断会导致孤立的 multipart 上传，持续产生存储费用。
+> 进程会按唯一 upload ID 跟踪并在错误、请求取消或正常 shutdown 时 best-effort abort；如果进程崩溃、runtime 已退出或 abort 自身失败，仍可能遗留 multipart。因此 lifecycle rule 不可省略。
 
 | 变量名 | 描述 | 默认值 |
 |--------|------|--------|
-| `CAS_PUBLIC_KEY_PATH` | Ed25519 公钥路径 | `/etc/xet/public-key.pem` |
-| `CAS_TRUSTED_KIDS` | 受信任的密钥 ID 列表 | `hub-key-1` |
+| `CAS_PUBLIC_KEYS` | 有序 `kid=/path/to/public.pem` keyring | 空（使用单公钥兼容模式） |
+| `CAS_PUBLIC_KEY_PATH` | 兼容模式的单 Ed25519 公钥路径 | `/etc/xet/public-key.pem` |
+| `CAS_TRUSTED_KIDS` | key ID allowlist | keyring 全部 kid；兼容模式 `hub-key-1` |
 | `CAS_PRIVATE_KEY_PATH` | Ed25519 私钥路径（生成 LFS proxy token） | 空（兼容模式；生产环境应配置） |
-| `CAS_SIGNING_KID` | Proxy token 签名使用的 Key ID | 空（默认用 `CAS_TRUSTED_KIDS` 第一个） |
+| `CAS_SIGNING_KID` | Proxy token 签名使用的 Key ID | 空（keyring 中首个受信任映射） |
+
+`CAS_PUBLIC_KEYS=kid1=/path/old-public.pem,kid2=/path/new-public.pem` 建立真正的 `kid` 到公钥映射；`CAS_TRUSTED_KIDS` 只是 allowlist。未设置 keyring 时才使用旧 `CAS_PUBLIC_KEY_PATH`，并将同一公钥映射给所有 trusted kids。配置 `CAS_PRIVATE_KEY_PATH` 后，私钥必须与 `CAS_SIGNING_KID` 对应公钥匹配，否则 CAS 启动失败。
 
 `CAS_PRIVATE_KEY_PATH` 未配置时，CAS Batch API 会把调用者的 `xet_xxx` token 放入 LFS action header，而不是签发短期、单 OID、单 operation 的 `proxy_xxx` token。这会扩大 action token 泄露后的影响范围；生产环境应配置该私钥。
 
-`/health` 只表示 HTTP server 存活；`/ready` 用于负载均衡和编排系统的 readiness probe。CAS `/ready` 会检查存储后端和 MetadataIndex 重建状态，Hub `/ready` 会检查 SQLite 和 CAS `/ready`。显式设置的数值或布尔环境变量如果解析失败，服务会启动失败，不会静默回退默认值。
+`/health` 只表示 HTTP server 存活；`/ready` 用于负载均衡和编排系统的 readiness probe。CAS `/ready` 会检查存储后端和 MetadataIndex 重建状态，Hub `/ready` 会检查 SQLite 和 CAS `/ready`。显式设置的数值或布尔环境变量如果解析失败，服务会启动失败，不会静默回退默认值；布尔值只接受 `true`/`false`/`1`/`0`，生效的 URL 只接受带 host 的 HTTP(S)，上传/下载上限、TTL、rate、pool 等零值与不一致的跨字段限制会被拒绝。
 
 ### Hub API 环境变量
 

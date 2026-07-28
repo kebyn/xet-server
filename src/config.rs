@@ -173,7 +173,8 @@ pub struct AuthConfig {
     /// (acceptable for development/testing, not recommended for production).
     pub private_key_path: Option<String>,
     /// Kid to use when signing proxy tokens. Must match public key.
-    /// Defaults to first entry in trusted_kids.
+    /// Defaults to the first trusted keyring mapping, or to the first trusted
+    /// kid when using the legacy single-public-key mode.
     pub signing_kid: Option<String>,
 }
 

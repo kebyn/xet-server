@@ -347,12 +347,19 @@ Content-Type: application/x-ndjson
 ```
 {"key":"header","value":{"summary":"Add model files"}}
 {"key":"file","value":{"path":"config.json","content":"eyJtb2RlbF90eXBlIjoicXdlbiJ9"}}
-{"key":"lfsFile","value":{"path":"model.safetensors","oid":"sha256:abc123...","size":104857600}}
+{"key":"lfsFile","value":{"path":"model.safetensors","oid":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","size":104857600}}
 ```
+
+Commit API 的 NDJSON 有以下顺序和快照语义：
+
+- `header` 必须是第一个非空 operation，且整个请求中必须恰好出现一次；空行会被忽略。
+- `file`、`lfsFile` 和 `deletedEntry` 按请求中的原始顺序执行。同一路径出现多次时，后面的 operation 覆盖前面的结果。
+- 每个 commit 保存完整文件树快照：先复制当前 HEAD 的所有父条目，再按顺序应用本次修改和删除；请求中未提及的父条目会保留到新 commit。
+- 非首个 commit 必须在 header 中提供与当前 HEAD 完全一致的 `parentRevision`。不一致或遗漏会返回 `409 Conflict`，最终比较在 SQLite transaction 中原子执行。
 
 **NDJSON 操作类型**：
 
-1. **Header**（必需，第一行）：
+1. **Header**（必需，第一个非空 operation，且只能出现一次）：
    ```json
    {
      "key": "header",
@@ -386,14 +393,15 @@ Content-Type: application/x-ndjson
      "key": "lfsFile",
      "value": {
        "path": "model.safetensors",
-       "oid": "sha256:abc123...",
+       "oid": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
        "size": 104857600
      }
    }
    ```
    - `path`: 文件路径（必需）
-   - `oid`: LFS 对象 ID（SHA256 哈希，必需）
-   - `size`: 文件大小（字节，必需）
+   - `oid`: LFS 对象 ID（64 个十六进制字符，且不带 `sha256:` 前缀）
+   - `size`: 文件大小（字节，必需，且必须能表示为 SQLite 有符号 64 位整数）
+   - Hub 会通过 CAS `HEAD /internal/blob/{oid}` 的 `X-Blob-Size` 响应头验证对象存在且实际大小与声明值一致。对象不存在或大小不一致返回 `422 Unprocessable Entity`；CAS 响应缺少或包含非法的 `X-Blob-Size` 时返回脱敏的 `502 Bad Gateway`。
 
 4. **DeletedEntry**（删除文件）：
    ```json
@@ -433,7 +441,7 @@ cat <<EOF | curl -X POST "http://localhost:8080/api/models/my-org/my-model/commi
   -H "Content-Type: application/x-ndjson" \
   --data-binary @-
 {"key":"header","value":{"summary":"Add model"}}
-{"key":"lfsFile","value":{"path":"model.safetensors","oid":"sha256:abc123...","size":104857600}}
+{"key":"lfsFile","value":{"path":"model.safetensors","oid":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","size":104857600}}
 EOF
 
 # 删除文件
@@ -603,7 +611,7 @@ Authorization: Bearer hf_xxx
 **响应**：
 ```json
 {
-  "accessToken": "xet_eyJhbGciOiJFZDI1NTE5Iiwia2lkIjoiaHViLWtleS0xIiwidHlwIjoiSldUIn0...",
+  "accessToken": "xet_<example>...",
   "exp": 1718320300,
   "casUrl": "http://localhost:8081"
 }
@@ -857,13 +865,24 @@ Authorization: Bearer proxy_xxx
 
 ```json
 {
-  "error": {
-    "type": "error_type",
-    "message": "Human-readable error message",
-    "code": "error_code"
-  }
+  "error": "Human-readable error message",
+  "error_type": "ValidationError"
 }
 ```
+
+业务 4xx 响应会保留可操作的校验或冲突信息。内部数据库、文件系统、密钥或临时文件错误只写入服务端日志；客户端收到稳定的 500 响应：
+
+```json
+{"error":"Internal server error","error_type":"InternalError"}
+```
+
+CAS 网络故障、非法响应或上游 5xx 对客户端统一为 502，且不会回显 CAS URL 或 upstream body：
+
+```json
+{"error":"Upstream CAS request failed","error_type":"BadGateway"}
+```
+
+部分 commit/LFS 端点为兼容既有契约会使用 `CasError` 作为 502 的 `error_type`；稳定保证是状态码和通用 `error` 文案。CAS 返回的 4xx 状态会保留，但响应正文仍会脱敏。
 
 ### 常见错误
 
@@ -876,7 +895,8 @@ Authorization: Bearer proxy_xxx
 | 409 | `conflict` | 资源冲突（已存在） |
 | 413 | `payload_too_large` | 请求体过大 |
 | 422 | `unprocessable_entity` | 无法处理的实体 |
-| 500 | `internal_error` | 服务器内部错误 |
+| 500 | `InternalError` | 服务器内部错误；详细原因仅记录在服务端日志 |
+| 502 | `BadGateway` / `CasError` | CAS 请求失败；不返回 CAS URL 或 upstream body |
 
 ---
 

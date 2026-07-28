@@ -11,6 +11,8 @@ Xet Server 由两个独立的服务组成，每个服务都有自己的配置：
 
 所有配置通过**环境变量**进行管理。显式设置的数值或布尔环境变量必须能被正确解析；如果设置了非法值，服务会在启动时返回配置错误并退出，不会静默回退到默认值。未设置环境变量时才使用默认值。
 
+启动校验是严格的：CAS 布尔值只接受 `true`/`false`/`1`/`0`；`XET_CONVERSION_SCHEME` 只接受 `none`、`lz4` 或 `bg4lz4`（大小写不敏感）；所有显式数值必须能解析，速率、TTL、pool size、上传/下载上限等要求大于零。`XET_PUBLIC_BASE_URL`、生效的 `XET_S3_ENDPOINT`、`HUB_PUBLIC_BASE_URL` 和 `CAS_BASE_URL` 必须是带有效 host 的 HTTP(S) URL。跨字段约束也会校验，例如 `XET_MIN_CONVERSION_SIZE <= XET_MAX_CONVERSION_SIZE`、`HUB_INLINE_THRESHOLD <= HUB_MAX_UPLOAD_SIZE <= HUB_MAX_DOWNLOAD_SIZE`。
+
 ---
 
 ## CAS Server 配置
@@ -55,7 +57,7 @@ export XET_INDEX_REBUILD_STRICT=true
 | `XET_STORAGE_BACKEND` | 存储后端类型 | `local` | 否 |
 | `XET_LOCAL_PATH` | 本地存储路径 | `./data` | 是* |
 | `XET_S3_BUCKET` | S3 存储桶名称 | - | 是** |
-| `XET_S3_REGION` | S3 区域 | - | 否 |
+| `XET_S3_REGION` | S3 区域 | `us-east-1` | 否 |
 | `XET_S3_ENDPOINT` | S3 端点 URL | - | 否 |
 | `XET_UPLOAD_TEMP_DIR` | 流式上传临时文件目录 | 自动 | 否 |
 | `XET_RECONSTRUCTION_TEMP_DIR` | 文件重构时 xorb 下载的临时目录 | `{OS_temp}/xet-reconstruction` | 否 |
@@ -86,22 +88,29 @@ export XET_S3_ENDPOINT=https://s3.amazonaws.com
 
 | 环境变量 | 描述 | 默认值 | 必需 |
 |---------|------|--------|------|
-| `CAS_PUBLIC_KEY_PATH` | Ed25519 公钥路径 | `/etc/xet/public-key.pem` | 是 |
-| `CAS_TRUSTED_KIDS` | 受信任的密钥 ID 列表 | `hub-key-1` | 是 |
+| `CAS_PUBLIC_KEYS` | 有序 `kid=/path/to/public.pem` keyring，逗号分隔 | 空（兼容模式） | 否 |
+| `CAS_PUBLIC_KEY_PATH` | 兼容模式的单 Ed25519 公钥路径 | `/etc/xet/public-key.pem` | keyring 未配置时是 |
+| `CAS_TRUSTED_KIDS` | 接受的 key ID allowlist | keyring 全部 kid；兼容模式 `hub-key-1` | 否（自动派生） |
 | `CAS_PRIVATE_KEY_PATH` | Ed25519 私钥路径，用于 Batch API 签发 proxy token | 空（兼容模式） | 否* |
-| `CAS_SIGNING_KID` | Proxy token 签名使用的 Key ID | 空（默认用 `CAS_TRUSTED_KIDS` 第一个） | 否 |
+| `CAS_SIGNING_KID` | Proxy token 签名使用的 Key ID | 空（按确定性 keyring 顺序选择） | 否 |
 
 **说明**：
-- `CAS_PUBLIC_KEY_PATH` 指向 Hub 的公钥文件（PEM 格式）
-- `CAS_TRUSTED_KIDS` 是逗号分隔的密钥 ID 列表，用于密钥轮换
+- `CAS_PUBLIC_KEYS=kid1=/path/old-public.pem,kid2=/path/new-public.pem` 建立真实的 `kid`→公钥映射。CAS 按 JWT header 的 `kid` 选择唯一公钥，不会用其他 key 试验验签。
+- `CAS_TRUSTED_KIDS` 是 keyring 的 allowlist；未显式设置时默认使用 keyring 全部 kid，显式设置时只能引用已配置映射。空值、重复 kid、未知映射和未知 token kid 都会被拒绝。
+- `CAS_PUBLIC_KEYS` 未设置时保留 `CAS_PUBLIC_KEY_PATH` 单公钥兼容入口，并把该单公钥映射给所有 trusted kids；该模式不等于真正的多公钥轮换。
 - 默认 trusted kid 为 `hub-key-1`，应与 Hub 的 `HUB_KID` 配置保持一致
+- 未设置 `CAS_SIGNING_KID` 时，keyring 模式选择 `CAS_PUBLIC_KEYS` 顺序中第一个位于 allowlist 的 key；兼容模式选择 `CAS_TRUSTED_KIDS` 第一个值。若配置 `CAS_PRIVATE_KEY_PATH`，其公钥必须与 signing kid 的映射完全匹配，否则启动失败。
 - **`CAS_PRIVATE_KEY_PATH`**：生产环境安全基线建议配置。设置后，Batch API 会签发短期 proxy token（5分钟有效期），绑定单个 OID 和 operation。未配置时，Batch API 会兼容回退到直接传递调用者的 `xet_xxx` token；该 token 的权限和 TTL 大于单个 LFS action，可能出现在客户端缓存、代理或日志中，泄露后的影响范围更大。
 
 **示例**：
 ```bash
-export CAS_PUBLIC_KEY_PATH=/etc/xet/hub-public-key.pem
+export CAS_PUBLIC_KEYS=hub-key-1=/etc/xet/hub-key-1-public.pem,hub-key-2=/etc/xet/hub-key-2-public.pem
 export CAS_TRUSTED_KIDS=hub-key-1,hub-key-2
+export CAS_PRIVATE_KEY_PATH=/etc/xet/hub-key-1-private.pem
+export CAS_SIGNING_KID=hub-key-1
 ```
+
+**安全轮换顺序**：先把 old/new 两个真实公钥加入 `CAS_PUBLIC_KEYS` 和 allowlist 并重启 CAS；再同时切换 Hub 的私钥与 `HUB_KID`。CAS 若签发 proxy token，则同时切换匹配的新 `CAS_PRIVATE_KEY_PATH` 与 `CAS_SIGNING_KID`。等待所有旧 token 的最大 TTL 过期后，才能移除 old 映射并再次重启。
 
 ### 转换管道设置
 
@@ -119,7 +128,8 @@ export CAS_TRUSTED_KIDS=hub-key-1,hub-key-2
   - `none`: 不压缩
   - `lz4`: LZ4 压缩（推荐，平衡速度和压缩率）
   - `bg4lz4`: ByteGrouping4LZ4 压缩（更高压缩率，但速度较慢）
-- 转换过程会加载整个文件到内存进行 CDC 分块，因此 `XET_MAX_CONVERSION_SIZE` 用于防止大文件导致 OOM
+- 转换过程按 1 MiB block 流式读取并增量 CDC 分块，不会额外保留完整原始 blob；但 `XorbBuilder` 会累计序列化后的压缩 chunks，并在 finalize 时构建完整 xorb 输出，metadata 也随 chunk 数增长
+- `XET_MAX_CONVERSION_SIZE` 用于约束上述内存、转换耗时、临时磁盘和 xorb/shard 构建工作
 - 建议生产环境保持 `XET_DELETE_RAW_AFTER_CONVERSION=true` 以节省 50% 存储空间
 
 **示例**：
@@ -354,8 +364,10 @@ export XET_MAX_BODY_SIZE_MB=4096
 export XET_STORAGE_BACKEND=local
 export XET_LOCAL_PATH=/data/xet-storage
 export XET_UPLOAD_TEMP_DIR=/fast-ssd/xet-uploads
-export CAS_PUBLIC_KEY_PATH=/etc/xet/hub-public-key.pem
+export CAS_PUBLIC_KEYS=hub-key-1=/etc/xet/hub-key-1-public.pem,hub-key-2=/etc/xet/hub-key-2-public.pem
 export CAS_TRUSTED_KIDS=hub-key-1,hub-key-2
+export CAS_PRIVATE_KEY_PATH=/etc/xet/hub-key-1-private.pem
+export CAS_SIGNING_KID=hub-key-1
 
 # Hub API
 export HUB_HOST=0.0.0.0
@@ -399,9 +411,11 @@ export HUB_PORT=8080
 >
 > **为什么需要配置？**
 > - 大文件（≥5MB）使用 multipart 上传
-> - 如果进程崩溃或网络中断，multipart 上传会保持未完成状态
+> - 每个 multipart 以唯一 upload ID 跟踪；并发写同一 object key 不会互相覆盖清理状态
+> - 正常错误、future cancellation 和 graceful shutdown 会 best-effort 调用 abort；part size 会按对象大小扩展，以遵守 S3 10,000-part 和 5 TiB 限制
+> - 进程崩溃、runtime 已退出或 abort 请求本身失败时，multipart 上传仍可能保持未完成状态
 > - 未完成的 multipart 上传会产生持续的存储费用
-> - 这些孤立的上传不会被自动清理
+> - 因此 lifecycle rule 是不可省略的最终兜底，而不是进程内清理的替代品
 >
 > **配置步骤：**
 > 1. 在 AWS S3 控制台编辑存储桶的 Lifecycle 规则
@@ -547,7 +561,9 @@ export HUB_UPLOAD_TEMP_DIR=/fast-ssd/hub-uploads
 ### 2. 内存使用
 
 **CAS Server**：
-- `XET_MAX_BODY_SIZE_MB` 直接控制每个请求的内存使用
+- `XET_MAX_BODY_SIZE_MB` 控制 xorb/shard/LFS 流式上传的累计字节上限，不代表等量内容会常驻内存
+- 非上传 JSON/Bytes 请求体由独立的 10 MiB `PayloadConfig` 限制
+- shard 从文件解析，内存为解析后 metadata 加 64 KiB 哈希缓冲；启动重建最多 10 个 shard 一批并发处理
 - 默认 2048MB（2GB）足够大多数用例
 - 如果内存有限，可以降低此值
 
@@ -708,6 +724,8 @@ curl http://localhost:8080/ready
 ```
 
 `/health` 是 liveness probe，只表示进程仍可响应 HTTP 请求；`/ready` 是 readiness probe。CAS `/ready` 会检查存储后端和索引状态，响应体包含 `checks.storage`、`checks.index`，索引就绪时还包含 `index_shard_count`。Hub `/ready` 会检查 SQLite 和 CAS `/ready`，响应体包含 `checks.database`、`checks.cas`。任一检查失败时 `/ready` 返回 `503`。
+
+运行时基础设施错误的详细 SQL、文件路径、S3 endpoint/bucket 和 CAS upstream body 只写服务端日志。Hub 对客户端使用稳定的 `500 {"error":"Internal server error","error_type":"InternalError"}` 或 `502 {"error":"Upstream CAS request failed",...}`；CAS 普通 JSON API 的 500 使用 `{"error":"Internal server error"}`，HEAD 端点保持空 body。
 
 ---
 

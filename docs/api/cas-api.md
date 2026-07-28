@@ -163,6 +163,8 @@ Content-Type: application/octet-stream
 
 Shard 上传会在 shard 进入可发现索引前验证所有引用的 xorbs 以及声明的 file/chunk 映射。语法上有效但引用缺失 xorb、chunk hash 不匹配，或声明的 file hash 与重构内容不匹配的 shard 会被拒绝，并且不会注册到 metadata index 中用于重构或全局去重。
 
+Shard 不会被整文件读入并保留副本：本地后端直接从文件解析，远端后端流式下载到自动清理的临时文件；解析器以 64 KiB 哈希缓冲区加解析后的 metadata 工作，并在分配前校验文件长度、section offset、entry count、整数溢出和截断。启动重建以最多 10 个 shard 为一批并发解析和验证，避免 shard 文件大小造成成倍的常驻内存放大。
+
 **响应**：
 - `200 OK`: 上传成功
 - `400 Bad Request`: Shard 格式无效或内容验证失败（缺失 xorb、chunk hash 不匹配、file hash 不匹配）
@@ -490,13 +492,19 @@ Authorization: Bearer internal_xxx (sub=hub-service, scope=internal, token_type=
 ```
 
 **响应**：
-- `200 OK`: Blob 存在
+- `200 OK`: Blob 存在，并返回必需的 `X-Blob-Size: <u64>` 响应头
 - `404 Not Found`: Blob 不存在
+
+`X-Storage-State` 为 `raw_only` 或 `xet_only`。`raw_only` 的 `X-Blob-Size` 来自存储后端实际对象大小；`xet_only` 的大小来自已验证 shard 重构出的原始 chunk 总字节数，并同时返回 `X-File-Id`。Hub Commit API 将 `X-Blob-Size` 作为 LFS 声明大小校验的强制契约。
 
 **示例**：
 ```bash
-curl -I "http://localhost:8081/internal/state/abc123..." \
-  -H "Authorization: Bearer xet_xxx"
+curl -I "http://localhost:8081/internal/blob/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" \
+  -H "Authorization: Bearer internal_xxx"
+
+# HTTP/1.1 200 OK
+# X-Storage-State: raw_only
+# X-Blob-Size: 104857600
 ```
 
 ---
@@ -600,14 +608,20 @@ curl "http://localhost:8081/metrics"
 
 ### 错误格式
 
+大多数 CAS JSON API 使用扁平错误结构：
+
 ```json
 {
-  "error": {
-    "type": "error_type",
-    "message": "Human-readable error message",
-    "code": "error_code"
-  }
+  "error": "Human-readable error message"
 }
+```
+
+Git LFS batch 兼容端点可能按协议使用 `message` 或 per-object `error` 结构；`HEAD` 响应不包含正文。
+
+可由客户端修正的 4xx 会返回稳定的输入校验信息。存储路径、S3 bucket/endpoint、parser 内部细节和其他基础设施错误只记录在服务端日志；普通 CAS API 的 500 正文固定为：
+
+```json
+{"error":"Internal server error"}
 ```
 
 ### 常见错误
@@ -621,7 +635,7 @@ curl "http://localhost:8081/metrics"
 | 403 | `insufficient_scope` | 权限不足 |
 | 404 | `not_found` | 资源不存在 |
 | 413 | `payload_too_large` | 请求体过大 |
-| 500 | `internal_error` | 服务器内部错误 |
+| 500 | `internal_error` | 服务器内部错误；详细原因仅记录在服务端日志 |
 | 503 | `service_unavailable` | 服务暂不可用 |
 
 ---

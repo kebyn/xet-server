@@ -136,3 +136,108 @@ fn historical_internal_scope_plan_is_marked_superseded() {
         "historical Hub API spec must not preserve obsolete repository-scoped CAS object wording without correction"
     );
 }
+
+#[test]
+fn docs_pin_commit_snapshot_and_blob_size_contracts() {
+    let hub_api = repo_file("docs/api/hub-api.md");
+    assert!(
+        hub_api.contains("且不带 `sha256:` 前缀"),
+        "Commit API docs must describe the exact LFS OID wire format"
+    );
+    assert!(
+        !hub_api.contains("\"oid\":\"sha256:"),
+        "Commit API JSON examples must not use Git LFS pointer syntax"
+    );
+    assert!(
+        hub_api.contains("第一个非空 operation") && hub_api.contains("必须恰好出现一次"),
+        "Commit API docs must require exactly one leading header"
+    );
+    assert!(
+        hub_api.contains("按请求中的原始顺序执行") && hub_api.contains("完整文件树快照"),
+        "Commit API docs must pin operation ordering and snapshot semantics"
+    );
+    assert!(
+        hub_api.contains("X-Blob-Size") && hub_api.contains("422 Unprocessable Entity"),
+        "Commit API docs must describe CAS size verification"
+    );
+
+    let cas_api = repo_file("docs/api/cas-api.md");
+    assert!(
+        cas_api.contains("必需的 `X-Blob-Size: <u64>`")
+            && cas_api.contains("raw_only")
+            && cas_api.contains("xet_only"),
+        "CAS HEAD docs must describe verified raw and reconstructed sizes"
+    );
+
+    let integration_guide = repo_file("HF_XET_INTEGRATION_GUIDE.md");
+    assert!(
+        !integration_guide.contains("\"oid\":\"sha256:"),
+        "integration examples must use the Commit API OID format"
+    );
+}
+
+#[test]
+fn docs_describe_real_keyring_rotation_and_legacy_mode() {
+    let configuration = repo_file("docs/configuration.md");
+    for phrase in [
+        "CAS_PUBLIC_KEYS=kid1=/path/old-public.pem,kid2=/path/new-public.pem",
+        "keyring 的 allowlist",
+        "单公钥兼容入口",
+        "必须与 signing kid 的映射完全匹配",
+        "等待所有旧 token 的最大 TTL 过期",
+    ] {
+        assert!(
+            configuration.contains(phrase),
+            "configuration docs must preserve keyring guarantee: {phrase}"
+        );
+    }
+
+    let authentication = repo_file("docs/api/authentication.md");
+    assert!(
+        authentication.contains("JWT header")
+            && authentication.contains("映射的公钥验签")
+            && authentication.contains("不提供真正的多公钥轮换")
+            && authentication.contains("CAS_SIGNING_KID=new-key"),
+        "authentication docs must distinguish exact key selection from legacy compatibility"
+    );
+}
+
+#[test]
+fn docs_pin_resource_config_and_error_boundaries() {
+    let configuration = repo_file("docs/configuration.md");
+    assert!(
+        configuration.contains("只接受 `true`/`false`/`1`/`0`")
+            && configuration.contains("必须是带有效 host 的 HTTP(S) URL")
+            && configuration
+                .contains("HUB_INLINE_THRESHOLD <= HUB_MAX_UPLOAD_SIZE <= HUB_MAX_DOWNLOAD_SIZE"),
+        "configuration docs must describe fail-fast parsing and cross-field validation"
+    );
+    assert!(
+        configuration.contains("唯一 upload ID")
+            && configuration.contains("lifecycle rule 是不可省略的最终兜底"),
+        "S3 docs must describe cancellation cleanup and lifecycle fallback"
+    );
+    assert!(
+        !configuration.contains("转换过程会加载整个文件到内存"),
+        "conversion docs must not describe the removed whole-file buffering"
+    );
+
+    let cas_api = repo_file("docs/api/cas-api.md");
+    assert!(
+        cas_api.contains("64 KiB 哈希缓冲区") && cas_api.contains("最多 10 个 shard 为一批"),
+        "CAS docs must describe bounded shard parsing and rebuild concurrency"
+    );
+    assert!(
+        cas_api.contains("{\"error\":\"Internal server error\"}"),
+        "CAS docs must pin the sanitized 500 response"
+    );
+
+    let hub_api = repo_file("docs/api/hub-api.md");
+    assert!(
+        hub_api.contains("{\"error\":\"Internal server error\",\"error_type\":\"InternalError\"}")
+            && hub_api.contains(
+                "{\"error\":\"Upstream CAS request failed\",\"error_type\":\"BadGateway\"}"
+            ),
+        "Hub docs must pin sanitized 500 and 502 responses"
+    );
+}

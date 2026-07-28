@@ -15,7 +15,8 @@ use crate::types::MerkleHash;
 pub use converting_oids::ConvertingOids;
 
 /// Block size for streaming reads during conversion (1 MB).
-/// Memory usage is bounded to this + max_chunk_size (128 KB).
+/// Source-read buffering is bounded to this plus the current chunk; total
+/// conversion memory also includes accumulated serialized xorb output.
 const CONVERSION_BLOCK_SIZE: usize = 1024 * 1024;
 
 /// RAII guard that deletes a file path when dropped.
@@ -114,9 +115,11 @@ impl ConversionPipeline {
     /// Convert a raw blob to xorb/shard format.
     /// `oid` is the SHA-256 OID used as the file_id in MetadataIndex.
     ///
-    /// Streaming implementation: reads the blob in blocks and processes chunks
-    /// incrementally. Memory usage is bounded to O(block_size + max_chunk_size)
-    /// regardless of blob size, eliminating the previous 500MB OOM risk.
+    /// Reads the source blob in blocks and chunks it incrementally, avoiding a
+    /// second full raw-blob buffer. `XorbBuilder` still retains serialized,
+    /// compressed chunks until the xorb is finalized, so peak memory scales with
+    /// compressed output plus metadata and is bounded operationally by
+    /// `max_conversion_size`.
     pub async fn convert(&self, oid: &str) -> Result<ConversionResult, ConversionError> {
         if !self.config.enabled {
             return Err(ConversionError::Disabled);
@@ -152,7 +155,9 @@ impl ConversionPipeline {
 
         use tokio::io::AsyncReadExt;
 
-        // 3. Stream through file, chunking and building xorb incrementally.
+        // 3. Stream through the source file and chunk/compress incrementally.
+        //    XorbBuilder retains the serialized chunks until build(), so this
+        //    avoids buffering the raw source but does not make output memory O(1).
         //    - Read block_size bytes at a time
         //    - Feed to StreamingChunker which emits complete chunks
         //    - For each complete chunk: hash it, dedup-check, add to xorb builder

@@ -57,7 +57,7 @@ Token created successfully!
 Username: admin
 Scope: read write
 Token name: admin-token
-Token (keep this secret): hf_a1b2c3d4e5f678901234567890123456
+Token (keep this secret): hf_<example>
 ```
 
 **验证机制**：
@@ -68,7 +68,7 @@ Token (keep this secret): hf_a1b2c3d4e5f678901234567890123456
 
 **示例**：
 ```
-hf_a1b2c3d4e5f678901234567890123456
+hf_<example>
 ```
 
 ### CAS Tokens (`xet_xxx`)
@@ -120,7 +120,7 @@ hf_a1b2c3d4e5f678901234567890123456
 
 **示例**：
 ```
-xet_eyJhbGciOiJFZDI1NTE5Iiwia2lkIjoiaHViLWtleS0xIiwidHlwIjoiSldUIn0.eyJzdWIiOiJhZG1pbiIsInNjb3BlIjoicmVhZCIsInJlcG9faWQiOiJteS1vcmcvbXktbW9kZWwiLCJyZXBvX3R5cGUiOiJtb2RlbCIsInJldmlzaW9uIjoibWFpbiIsImV4cCI6MTcxODMyMDAwMCwiaWF0IjoxNzE4MzE2NDAwLCJraWQiOiJodWIta2V5LTEiLCJ0b2tlbl90eXBlIjoidXNlciJ9.signature
+xet_<example>.eyJzdWIiOiJhZG1pbiIsInNjb3BlIjoicmVhZCIsInJlcG9faWQiOiJteS1vcmcvbXktbW9kZWwiLCJyZXBvX3R5cGUiOiJtb2RlbCIsInJldmlzaW9uIjoibWFpbiIsImV4cCI6MTcxODMyMDAwMCwiaWF0IjoxNzE4MzE2NDAwLCJraWQiOiJodWIta2V5LTEiLCJ0b2tlbl90eXBlIjoidXNlciJ9.signature
 ```
 
 ### Proxy Tokens (`proxy_xxx`)
@@ -285,15 +285,16 @@ export HUB_KID=hub-key-1
 
 **CAS Server（验证端）**：
 ```bash
-export CAS_PUBLIC_KEY_PATH=/path/to/public_key.pem
-export CAS_TRUSTED_KIDS=hub-key-1,backup-key-1
+export CAS_PUBLIC_KEYS=hub-key-1=/path/to/hub-key-1-public.pem,hub-key-2=/path/to/hub-key-2-public.pem
+export CAS_TRUSTED_KIDS=hub-key-1,hub-key-2
 ```
 
 **配置说明**：
-- `CAS_PUBLIC_KEY_PATH`：指向 Hub 的公钥文件（PEM 格式），用于验证 CAS token 签名
-- `CAS_TRUSTED_KIDS`：受信任的密钥 ID 列表（逗号分隔），用于支持密钥轮换
+- `CAS_PUBLIC_KEYS`：有序的 `kid=/path/to/public.pem` 映射列表。CAS 先从未验证 JWT header 读取 `kid`，再只使用该 `kid` 映射的公钥验签；这是实际多密钥轮换模式。
+- `CAS_TRUSTED_KIDS`：允许加载和接受的 `kid` allowlist。keyring 模式未显式设置时默认包含 `CAS_PUBLIC_KEYS` 的全部 key；显式设置时可以选取其中的子集。
+- `CAS_PUBLIC_KEY_PATH`：旧版单公钥兼容入口，仅在未设置 `CAS_PUBLIC_KEYS` 时使用。此模式会把同一把公钥映射给每个 trusted kid，因此允许多个 `kid` 但不提供真正的多公钥轮换。
 - 默认 trusted kid 为 `hub-key-1`，应与 Hub 的 `HUB_KID` 配置保持一致
-- 多个 kid 允许同时信任多个密钥，便于无缝轮换
+- 空映射、重复 `kid`、allowlist 中不存在的 key 或未知 token `kid` 都会被拒绝；配置错误会让服务启动失败。
 
 ### CAS Server 认证配置
 
@@ -301,18 +302,21 @@ CAS Server 需要配置公钥来验证 Hub 签发的 CAS token：
 
 | 环境变量 | 描述 | 默认值 | 必需 |
 |---------|------|--------|------|
-| `CAS_PUBLIC_KEY_PATH` | Ed25519 公钥路径 | `/etc/xet/public-key.pem` | 是 |
-| `CAS_TRUSTED_KIDS` | 受信任的密钥 ID 列表 | `hub-key-1` | 是 |
+| `CAS_PUBLIC_KEYS` | 有序的 `kid=公钥路径` keyring，逗号分隔 | 空（使用兼容模式） | 否 |
+| `CAS_PUBLIC_KEY_PATH` | 兼容模式的单 Ed25519 公钥路径 | `/etc/xet/public-key.pem` | keyring 未配置时是 |
+| `CAS_TRUSTED_KIDS` | 受信任的 key ID allowlist | keyring 全部 kid；兼容模式 `hub-key-1` | 否（自动派生） |
 | `CAS_PRIVATE_KEY_PATH` | Ed25519 私钥路径，用于 CAS batch 签发 LFS proxy token | 空（兼容模式） | 否 |
-| `CAS_SIGNING_KID` | Proxy token 签名使用的 Key ID | 空（默认用 `CAS_TRUSTED_KIDS` 第一个） | 否 |
+| `CAS_SIGNING_KID` | Proxy token 签名使用的 Key ID | 空（见下方确定性顺序） | 否 |
 
 **验证流程**：
 1. CAS 接收到 `xet_xxx` / `proxy_xxx` / `internal_xxx` token
 2. 解析 JWT，提取 `kid`（密钥 ID）
-3. 检查 `kid` 是否在 `CAS_TRUSTED_KIDS` 列表中
-4. 使用 `CAS_PUBLIC_KEY_PATH` 指定的公钥验证 Ed25519 签名
+3. 检查 `kid` 是否在 `CAS_TRUSTED_KIDS` allowlist 中
+4. keyring 模式使用 `CAS_PUBLIC_KEYS` 中该 `kid` 对应的公钥；兼容模式使用 `CAS_PUBLIC_KEY_PATH`
 5. 验证 `exp`（过期时间）是否已过期
 6. 检查 `scope` 是否匹配所需权限
+
+未设置 `CAS_SIGNING_KID` 时，兼容模式选择 `CAS_TRUSTED_KIDS` 第一个值；keyring 模式选择 `CAS_PUBLIC_KEYS` 顺序中第一个同时位于 allowlist 的 key。配置 `CAS_PRIVATE_KEY_PATH` 后，其公钥必须与所选 signing kid 的公钥完全匹配，否则 CAS 拒绝启动。
 
 **CAS 直连 batch action token**：客户端直接调用 CAS Batch API 时，配置 `CAS_PRIVATE_KEY_PATH` 后，CAS 可签发短期、单 OID、单 operation 的 `proxy_xxx` action token。未配置时会兼容回退为调用者的 `xet_xxx` token，权限和 TTL 通常大于单个 LFS action；生产环境应配置该私钥以降低 token 泄露后的影响范围。通过 Hub LFS proxy 调用时，Hub 会先用短期 `xet_xxx` user token 调用 CAS batch，再重写 action URL 并使用 Hub 私钥签发 `proxy_xxx`。
 
@@ -321,20 +325,23 @@ CAS Server 需要配置公钥来验证 Hub 签发的 CAS token：
 **示例配置**：
 ```bash
 # 生产环境
-export CAS_PUBLIC_KEY_PATH=/etc/xet/hub-public-key.pem
+export CAS_PUBLIC_KEYS=hub-key-1=/etc/xet/hub-key-1-public.pem,hub-key-2=/etc/xet/hub-key-2-public.pem
 export CAS_TRUSTED_KIDS=hub-key-1,hub-key-2
+export CAS_PRIVATE_KEY_PATH=/etc/xet/hub-key-1-private.pem
+export CAS_SIGNING_KID=hub-key-1
 
-# 开发环境（使用默认值）
-# CAS_TRUSTED_KIDS 默认为 hub-key-1，与 Hub 默认配置一致
+# 旧版单公钥兼容模式
+export CAS_PUBLIC_KEY_PATH=/etc/xet/hub-public-key.pem
+export CAS_TRUSTED_KIDS=hub-key-1
 ```
 
 ### 密钥轮换
 
-1. 生成新密钥对
-2. 在 CAS 中添加新公钥：`CAS_TRUSTED_KIDS=old-key,new-key`
-3. 在 Hub 中切换到新密钥：`HUB_KID=new-key`
-4. 等待所有旧令牌过期（默认 1 小时）
-5. 从 CAS 中移除旧公钥
+1. 生成新密钥对，并先把 old/new 两个真实公钥部署为 `CAS_PUBLIC_KEYS=old-key=...,new-key=...`；allowlist 同时包含两者，重启 CAS。
+2. 将 Hub 的 `HUB_PRIVATE_KEY_PATH` 和 `HUB_KID` 一起切换到 `new-key`，重启 Hub。此时 CAS 同时接受尚未过期的 old token 和新 token。
+3. 如果 CAS 自己签发 LFS proxy token，也将 `CAS_PRIVATE_KEY_PATH` 与 `CAS_SIGNING_KID=new-key` 一起切换并重启 CAS；私钥/映射公钥不匹配会在启动时失败。
+4. 等待所有旧 user/internal/proxy token 的最大 TTL 过期。
+5. 从 `CAS_TRUSTED_KIDS` 和 `CAS_PUBLIC_KEYS` 移除 old key，再重启 CAS。不要只增加 trusted kid 而仍使用单个 `CAS_PUBLIC_KEY_PATH`，那不会建立真正的 kid→公钥轮换。
 
 ## 数据库结构
 
@@ -457,13 +464,11 @@ nginx/caddy → CAS Server (HTTP :8081)
 
 ```json
 {
-  "error": {
-    "type": "authentication_error",
-    "message": "Invalid token",
-    "code": "invalid_token"
-  }
+  "error": "Invalid token"
 }
 ```
+
+Hub 认证 API 还会返回 `error_type` 字段。内部认证/数据库故障不会回显路径或 SQL，Hub 的 500 固定使用 `{"error":"Internal server error","error_type":"InternalError"}`。
 
 ## API 参考
 
@@ -513,7 +518,7 @@ curl "$HF_ENDPOINT/api/models/my-org/my-model/xet-write-token/main" \
 
 **排查步骤**：
 1. 检查 CAS 的公钥是否与 Hub 的私钥匹配
-2. 验证 `kid` 是否在 `CAS_TRUSTED_KIDS` 列表中
+2. 验证 `kid` 是否在 `CAS_TRUSTED_KIDS` allowlist 中，并确认 `CAS_PUBLIC_KEYS` 存在该 kid 的真实公钥映射
 3. 检查密钥文件路径是否正确
 4. 确认密钥文件格式（PEM）
 

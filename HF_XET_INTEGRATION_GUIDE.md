@@ -87,7 +87,7 @@ export HUB_SQLITE_PATH=/data/hub-metadata.db
   --scope "read write" \
   --db hub.db
 
-# 输出: hf_a1b2c3d4e5f678901234567890123456
+# 输出: hf_<example>
 ```
 
 #### 创建仓库
@@ -120,9 +120,11 @@ cat <<EOF | curl -X POST "$HF_ENDPOINT/api/models/my-org/my-model/commit/main" \
   -H "Content-Type: application/x-ndjson" \
   --data-binary @-
 {"key":"header","value":{"summary":"Upload model"}}
-{"key":"lfsFile","value":{"path":"model.safetensors","oid":"sha256:abc123...","size":100663296}}
+{"key":"lfsFile","value":{"path":"model.safetensors","oid":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","size":100663296}}
 EOF
 ```
+
+Commit API 的 LFS `oid` 必须是 64 个十六进制字符且不带 `sha256:` 前缀；`size` 必须与 CAS `X-Blob-Size` 报告的实际对象大小一致。`header` 必须是第一个非空 NDJSON operation 且只能出现一次，后续 operation 按请求顺序执行。每次 commit 都生成完整文件树 snapshot，因此未修改的父条目会自动保留；非首个 commit 需要在 header 中提交当前 `parentRevision`。
 
 #### 下载文件
 
@@ -226,9 +228,11 @@ export XET_STORAGE_BACKEND=local
 export XET_LOCAL_PATH=/data/xet-storage
 
 # 认证（可选，用于生产环境）
-export CAS_PUBLIC_KEY_PATH=/path/to/public_key.pem
+export CAS_PUBLIC_KEYS=hub-key-1=/path/to/public_key.pem
 export CAS_TRUSTED_KIDS=hub-key-1
 ```
+
+轮换时把 old/new 公钥同时配置为 `CAS_PUBLIC_KEYS=old-key=/path/old.pem,new-key=/path/new.pem`，再用 `CAS_TRUSTED_KIDS` 作为 allowlist。旧 `CAS_PUBLIC_KEY_PATH` 仅是单公钥兼容入口，把多个 trusted kid 指向同一公钥，不能替代真正的 keyring。
 
 ### 使用示例
 
@@ -392,7 +396,7 @@ curl "$HF_ENDPOINT/api/models/$TARGET_REPO/tree/main" \
 
 **限制**：HF CLI 的增量上传功能可能有限制。
 
-**建议**：对于大文件，使用 Git LFS 或 Commit API 的 NDJSON 流式上传。
+**建议**：大文件字节先通过 Git LFS 流式上传，再用 Commit API 的 `lfsFile` NDJSON operation 提交元数据；不要把大文件内容放进内联 `file` operation。
 
 ## 📚 API 参考
 
