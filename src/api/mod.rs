@@ -9,3 +9,5 @@ pub mod lfs;
 pub mod reconstruction;
 pub mod shard;
 pub mod xorb;
+
+pub(crate) const INTERNAL_ERROR_MESSAGE: &str = "Internal server error";

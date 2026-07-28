@@ -53,7 +53,7 @@ pub async fn upload_shard(
             GLOBAL_METRICS.record_error();
             GLOBAL_METRICS.record_latency(start);
             return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Failed to create temp file: {}", e)
+                "error": crate::api::INTERNAL_ERROR_MESSAGE
             }));
         }
     };
@@ -70,7 +70,7 @@ pub async fn upload_shard(
                 GLOBAL_METRICS.record_request(400);
                 GLOBAL_METRICS.record_latency(start);
                 return HttpResponse::BadRequest().json(serde_json::json!({
-                    "error": format!("Upload stream error: {}", e)
+                    "error": "Invalid upload stream"
                 }));
             }
         };
@@ -91,7 +91,7 @@ pub async fn upload_shard(
             GLOBAL_METRICS.record_error();
             GLOBAL_METRICS.record_latency(start);
             return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Failed to write upload data: {}", e)
+                "error": crate::api::INTERNAL_ERROR_MESSAGE
             }));
         }
     }
@@ -102,7 +102,7 @@ pub async fn upload_shard(
         GLOBAL_METRICS.record_error();
         GLOBAL_METRICS.record_latency(start);
         return HttpResponse::InternalServerError().json(serde_json::json!({
-            "error": format!("Failed to sync upload data: {}", e)
+            "error": crate::api::INTERNAL_ERROR_MESSAGE
         }));
     }
 
@@ -114,7 +114,7 @@ pub async fn upload_shard(
             GLOBAL_METRICS.record_request(400);
             GLOBAL_METRICS.record_latency(start);
             return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": format!("Invalid shard format (full parse failed): {}", e)
+                "error": "Invalid shard format"
             }));
         }
     };
@@ -132,7 +132,7 @@ pub async fn upload_shard(
             GLOBAL_METRICS.record_error();
             GLOBAL_METRICS.record_latency(start);
             return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Storage error: {}", e)
+                "error": crate::api::INTERNAL_ERROR_MESSAGE
             }));
         }
     };
@@ -155,7 +155,7 @@ pub async fn upload_shard(
                     GLOBAL_METRICS.record_request(400);
                     GLOBAL_METRICS.record_latency(start);
                     return HttpResponse::BadRequest().json(serde_json::json!({
-                        "error": format!("Invalid existing shard format: {}", e)
+                        "error": "Invalid existing shard format"
                     }));
                 }
 
@@ -163,7 +163,7 @@ pub async fn upload_shard(
                 GLOBAL_METRICS.record_error();
                 GLOBAL_METRICS.record_latency(start);
                 return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": format!("Storage error: {}", e)
+                    "error": crate::api::INTERNAL_ERROR_MESSAGE
                 }));
             }
         };
@@ -196,7 +196,7 @@ pub async fn upload_shard(
                 GLOBAL_METRICS.record_request(400);
                 GLOBAL_METRICS.record_latency(start);
                 return HttpResponse::BadRequest().json(serde_json::json!({
-                    "error": format!("Shard validation failed: {}", e)
+                    "error": "Shard validation failed"
                 }));
             }
         };
@@ -236,7 +236,7 @@ pub async fn upload_shard(
             GLOBAL_METRICS.record_request(400);
             GLOBAL_METRICS.record_latency(start);
             return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": format!("Shard validation failed: {}", e)
+                "error": "Shard validation failed"
             }));
         }
     };
@@ -252,7 +252,7 @@ pub async fn upload_shard(
         GLOBAL_METRICS.record_error();
         GLOBAL_METRICS.record_latency(start);
         return HttpResponse::InternalServerError().json(serde_json::json!({
-            "error": format!("Storage error: {}", e)
+            "error": crate::api::INTERNAL_ERROR_MESSAGE
         }));
     }
 

@@ -131,7 +131,7 @@ pub async fn upload_lfs_object(
         GLOBAL_METRICS.record_error();
         GLOBAL_METRICS.record_latency(start);
         return HttpResponse::InsufficientStorage().json(serde_json::json!({
-            "error": format!("Insufficient disk space: {}", e)
+            "error": "Insufficient storage"
         }));
     }
 
@@ -145,7 +145,7 @@ pub async fn upload_lfs_object(
             GLOBAL_METRICS.record_error();
             GLOBAL_METRICS.record_latency(start);
             return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Internal storage error"
+                "error": crate::api::INTERNAL_ERROR_MESSAGE
             }));
         }
     };
@@ -163,7 +163,7 @@ pub async fn upload_lfs_object(
                 GLOBAL_METRICS.record_latency(start);
                 // temp_file auto-cleaned by Drop
                 return HttpResponse::BadRequest().json(serde_json::json!({
-                    "error": format!("Upload stream error: {}", e)
+                    "error": "Invalid upload stream"
                 }));
             }
         };
@@ -184,7 +184,7 @@ pub async fn upload_lfs_object(
             GLOBAL_METRICS.record_error();
             GLOBAL_METRICS.record_latency(start);
             return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Failed to write upload data: {}", e)
+                "error": crate::api::INTERNAL_ERROR_MESSAGE
             }));
         }
     }
@@ -196,7 +196,7 @@ pub async fn upload_lfs_object(
         GLOBAL_METRICS.record_error();
         GLOBAL_METRICS.record_latency(start);
         return HttpResponse::InternalServerError().json(serde_json::json!({
-            "error": format!("Failed to sync upload data: {}", e)
+            "error": crate::api::INTERNAL_ERROR_MESSAGE
         }));
     }
 
@@ -231,7 +231,7 @@ pub async fn upload_lfs_object(
             GLOBAL_METRICS.record_error();
             GLOBAL_METRICS.record_latency(start);
             return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Storage error: {}", e)
+                "error": crate::api::INTERNAL_ERROR_MESSAGE
             }));
         }
     };
@@ -257,7 +257,7 @@ pub async fn upload_lfs_object(
         GLOBAL_METRICS.record_error();
         GLOBAL_METRICS.record_latency(start);
         return HttpResponse::InternalServerError().json(serde_json::json!({
-            "error": format!("Storage error: {}", e)
+            "error": crate::api::INTERNAL_ERROR_MESSAGE
         }));
     }
 
@@ -380,10 +380,12 @@ pub async fn download_lfs_object(
         }
         Ok(false) => {}
         Err(e) => {
+            error!("Failed to check raw LFS object {}: {}", oid, e);
             GLOBAL_METRICS.record_request(500);
+            GLOBAL_METRICS.record_error();
             GLOBAL_METRICS.record_latency(start);
             return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Storage error: {}", e)
+                "error": crate::api::INTERNAL_ERROR_MESSAGE
             }));
         }
     }

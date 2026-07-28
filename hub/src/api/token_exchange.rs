@@ -1,6 +1,7 @@
 use crate::auth::extract::{AuthRead, AuthUser, AuthWrite};
 use crate::auth::token_store::TokenInfo;
 use crate::auth::xet_signer::XetSigner;
+use crate::error::internal_error_response;
 use crate::metadata::{MetadataStore, RepoType};
 use crate::services::token_exchange::{
     ExchangeScope, TokenExchangeRequest, TokenExchangeService, TokenExchangeServiceError,
@@ -38,7 +39,7 @@ fn token_exchange_error_response(err: TokenExchangeServiceError) -> HttpResponse
             HttpResponse::NotFound().json(error_json(msg, "NotFoundError"))
         }
         TokenExchangeServiceError::Internal(msg) => {
-            HttpResponse::InternalServerError().json(error_json(msg, "InternalError"))
+            internal_error_response("Token exchange failed", msg)
         }
     }
 }

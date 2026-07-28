@@ -4,6 +4,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::auth::token_store::{TokenInfo, TokenStore};
+use crate::error::internal_error_response;
 
 /// Return whether a token scope string grants the required scope.
 ///
@@ -115,15 +116,7 @@ impl actix_web::ResponseError for AuthError {
                     "error_type": "AuthorizationError"
                 }))
             }
-            // M1 fix: Return generic error message to client; log details server-side only.
-            // Prevents leaking internal implementation details (DB paths, SQL errors, etc.)
-            AuthError::Internal(e) => {
-                tracing::error!("Internal authentication error: {}", e);
-                HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": "Internal authentication error",
-                    "error_type": "InternalError"
-                }))
-            }
+            AuthError::Internal(e) => internal_error_response("Authentication failed", e),
         }
     }
 }
@@ -251,6 +244,31 @@ mod tests {
 
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), actix_web::http::StatusCode::UNAUTHORIZED);
+    }
+
+    #[actix_web::test]
+    async fn test_auth_internal_error_is_sanitized() {
+        let app = test::init_service(App::new().route(
+            "/test",
+            web::get().to(|_auth: AuthUser<AuthAny>| async { "ok" }),
+        ))
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri("/test")
+            .insert_header(("Authorization", "Bearer hf_invalid"))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            actix_web::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["error"], crate::error::INTERNAL_ERROR_MESSAGE);
+        assert_eq!(body["error_type"], "InternalError");
+        assert!(!body.to_string().contains("TokenStore"));
     }
 
     #[actix_web::test]

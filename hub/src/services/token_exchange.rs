@@ -70,7 +70,7 @@ impl TokenExchangeService {
 
         let revision = self
             .resolve_exchange_revision(repo.id, request.revision)
-            .await;
+            .await?;
         let repo_id = format!("{}/{}", request.namespace, request.repo_name);
         let (access_token, exp) = self
             .xet_signer
@@ -105,14 +105,19 @@ impl TokenExchangeService {
             })
     }
 
-    async fn resolve_exchange_revision(&self, repo_id: i64, revision: &str) -> String {
+    async fn resolve_exchange_revision(
+        &self,
+        repo_id: i64,
+        revision: &str,
+    ) -> Result<String, TokenExchangeServiceError> {
         if revision == "main" || revision.is_empty() {
             match self.metadata.get_head(repo_id).await {
-                Ok(Some(head)) => head,
-                Ok(None) | Err(_) => "main".to_string(),
+                Ok(Some(head)) => Ok(head),
+                Ok(None) => Ok("main".to_string()),
+                Err(error) => Err(TokenExchangeServiceError::Internal(error.to_string())),
             }
         } else {
-            revision.to_string()
+            Ok(revision.to_string())
         }
     }
 }
@@ -133,6 +138,7 @@ mod tests {
 
     use crate::auth::xet_signer::XetSigner;
     use crate::metadata::{MetadataStore, RepoType, Revision, SqliteMetadataStore};
+    use crate::sqlite_pool::connect_in_memory_hub_sqlite_pool;
 
     use super::{
         ExchangeScope, TokenExchangeRequest, TokenExchangeService, TokenExchangeServiceError,
@@ -274,5 +280,35 @@ mod tests {
                 "Repository not found: missing/repo/model".to_string()
             )
         );
+    }
+
+    #[tokio::test]
+    async fn token_exchange_propagates_head_query_failures() {
+        let pool = connect_in_memory_hub_sqlite_pool().await.unwrap();
+        let metadata = Arc::new(SqliteMetadataStore::with_pool(pool.clone()).await.unwrap());
+        metadata
+            .create_repo("owner", "repo", RepoType::Model, false)
+            .await
+            .unwrap();
+        sqlx::query("DROP TABLE heads")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let service = TokenExchangeService::new(metadata, signer());
+
+        let error = service
+            .exchange(TokenExchangeRequest {
+                user_id: "owner-id",
+                username: "owner",
+                namespace: "owner",
+                repo_name: "repo",
+                revision: "main",
+                required_scope: ExchangeScope::Read,
+                repo_type: RepoType::Model,
+            })
+            .await
+            .expect_err("HEAD database failures must abort token exchange");
+
+        assert!(matches!(error, TokenExchangeServiceError::Internal(_)));
     }
 }

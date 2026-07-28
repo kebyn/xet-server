@@ -80,7 +80,12 @@ impl RepoService {
                 .metadata
                 .get_repo(namespace, name, repo_type)
                 .await
-                .map_err(|_| RepoServiceError::Conflict("Repo already exists".to_string())),
+                .map_err(|error| match error {
+                    MetadataError::RepoNotFound(_) => {
+                        RepoServiceError::Conflict("Repo already exists".to_string())
+                    }
+                    _ => RepoServiceError::Internal(error.to_string()),
+                }),
             Err(err) => Err(RepoServiceError::Internal(err.to_string())),
         }
     }
@@ -133,7 +138,12 @@ impl RepoService {
             .metadata
             .get_repo(namespace, repo_name, repo_type)
             .await
-            .map_err(|_| RepoServiceError::NotFound("Repository not found".to_string()))?;
+            .map_err(|error| match error {
+                MetadataError::RepoNotFound(_) => {
+                    RepoServiceError::NotFound("Repository not found".to_string())
+                }
+                _ => RepoServiceError::Internal(error.to_string()),
+            })?;
 
         if !can_access_repo(&repo, username) {
             return Err(RepoServiceError::NotFound(
@@ -146,14 +156,18 @@ impl RepoService {
                 repo,
                 revision: rev,
             }),
-            Err(_) if revision == "main" => {
-                let head_sha = self.metadata.get_head(repo.id).await.ok().flatten();
+            Err(MetadataError::RevisionNotFound(_)) if revision == "main" => {
+                let head_sha = self
+                    .metadata
+                    .get_head(repo.id)
+                    .await
+                    .map_err(|error| RepoServiceError::Internal(error.to_string()))?;
                 Ok(RepoServiceResult::EmptyMainRevision { repo, head_sha })
             }
-            Err(_) => Err(RepoServiceError::RevisionNotFound(format!(
-                "Revision not found: {}",
-                revision
-            ))),
+            Err(MetadataError::RevisionNotFound(_)) => Err(RepoServiceError::RevisionNotFound(
+                format!("Revision not found: {}", revision),
+            )),
+            Err(error) => Err(RepoServiceError::Internal(error.to_string())),
         }
     }
 
@@ -228,6 +242,7 @@ mod tests {
     use std::sync::Arc;
 
     use crate::metadata::{MetadataStore, RepoType, SqliteMetadataStore};
+    use crate::sqlite_pool::connect_in_memory_hub_sqlite_pool;
 
     use super::{RepoService, RepoServiceError, RepoServiceResult};
 
@@ -333,5 +348,28 @@ mod tests {
         assert_eq!(repo.namespace, "owner");
         assert_eq!(repo.name, "repo");
         assert_eq!(head_sha, None);
+    }
+
+    #[tokio::test]
+    async fn main_revision_propagates_head_query_failures() {
+        let pool = connect_in_memory_hub_sqlite_pool().await.unwrap();
+        let metadata = Arc::new(SqliteMetadataStore::with_pool(pool.clone()).await.unwrap());
+        metadata
+            .create_repo("owner", "repo", RepoType::Model, false)
+            .await
+            .unwrap();
+        sqlx::query("DROP TABLE heads")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let service = RepoService::new(metadata);
+
+        let error = service
+            .get_revision("owner", "owner", "repo", "main", RepoType::Model)
+            .await
+            .err()
+            .expect("HEAD database failures must not produce an empty main revision");
+
+        assert!(matches!(error, RepoServiceError::Internal(_)));
     }
 }

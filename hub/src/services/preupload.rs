@@ -60,7 +60,7 @@ impl PreuploadService {
                 .metadata
                 .is_namespace_member(request.username, request.namespace)
                 .await
-                .unwrap_or(false);
+                .map_err(|error| PreuploadServiceError::Internal(error.to_string()))?;
             if !has_access {
                 return Err(PreuploadServiceError::Forbidden(format!(
                     "User '{}' cannot access namespace '{}'",

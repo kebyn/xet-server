@@ -2,6 +2,7 @@ use crate::auth::token_store::TokenStore;
 use crate::auth::xet_signer::XetSigner;
 use crate::cas_client::CasClient;
 use crate::config::HubConfig;
+use crate::error::{CAS_ERROR_MESSAGE, bad_gateway_error_response, internal_error_response};
 use crate::lfs_proxy::streaming::MaxBytesStream;
 use crate::lfs_proxy::tokens::{extract_proxy_token, extract_token};
 use crate::services::lfs_batch::{
@@ -130,10 +131,10 @@ fn lfs_batch_error_response(err: LfsBatchServiceError) -> HttpResponse {
             HttpResponse::Forbidden().json(error_json(message, "AuthorizationError"))
         }
         LfsBatchServiceError::BadGateway(message) => {
-            HttpResponse::BadGateway().json(error_json(message, "BadGateway"))
+            bad_gateway_error_response("LFS batch CAS request failed", message, "BadGateway")
         }
         LfsBatchServiceError::Internal(message) => {
-            HttpResponse::InternalServerError().json(error_json(message, "InternalError"))
+            internal_error_response("LFS batch request failed", message)
         }
     }
 }
@@ -153,34 +154,19 @@ fn lfs_object_guard_error_response(err: LfsObjectGuardError) -> HttpResponse {
 
 fn lfs_upload_store_error_response(err: LfsUploadStoreError, temp_dir: &str) -> HttpResponse {
     match err {
-        LfsUploadStoreError::CreateTempDir(message) => {
-            tracing::error!("Failed to create temp dir {}: {}", temp_dir, message);
-            HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Failed to initialize upload",
-                "error_type": "InternalError"
-            }))
-        }
+        LfsUploadStoreError::CreateTempDir(message) => internal_error_response(
+            "Failed to initialize LFS upload temp directory",
+            format_args!("{}: {}", temp_dir, message),
+        ),
         LfsUploadStoreError::CreateTempFile(message) => {
-            tracing::error!("Failed to create temp file: {}", message);
-            HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Failed to create temporary file",
-                "error_type": "InternalError"
-            }))
+            internal_error_response("Failed to create LFS upload temp file", message)
         }
         LfsUploadStoreError::PrepareTempFile(message) => {
-            tracing::error!("Failed to detach temp file ownership: {}", message);
-            HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Failed to prepare upload storage",
-                "error_type": "InternalError"
-            }))
+            internal_error_response("Failed to prepare LFS upload temp file", message)
         }
         LfsUploadStoreError::OpenTempFile(message)
         | LfsUploadStoreError::WriteTempFile(message) => {
-            tracing::error!("Failed to write temp upload file: {}", message);
-            HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Failed to write upload data",
-                "error_type": "InternalError"
-            }))
+            internal_error_response("Failed to write LFS upload temp file", message)
         }
         LfsUploadStoreError::ReadPayload(message) => {
             tracing::error!("Error reading payload: {}", message);
@@ -197,11 +183,7 @@ fn lfs_upload_store_error_response(err: LfsUploadStoreError, temp_dir: &str) -> 
             }))
         }
         LfsUploadStoreError::FlushTempFile(message) => {
-            tracing::error!("Failed to flush temp file: {}", message);
-            HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Failed to finalize upload data",
-                "error_type": "InternalError"
-            }))
+            internal_error_response("Failed to flush LFS upload temp file", message)
         }
     }
 }
@@ -226,10 +208,18 @@ fn lfs_upload_service_error_response(
             }))
         }
         LfsUploadServiceError::Cas { status, message } => {
-            let status_code = actix_web::http::StatusCode::from_u16(status)
+            tracing::error!(
+                "CAS rejected LFS upload with status {}: {}",
+                status,
+                message
+            );
+            let mut status_code = actix_web::http::StatusCode::from_u16(status)
                 .unwrap_or(actix_web::http::StatusCode::BAD_GATEWAY);
+            if status_code.is_server_error() {
+                status_code = actix_web::http::StatusCode::BAD_GATEWAY;
+            }
             HttpResponse::build(status_code).json(serde_json::json!({
-                "error": message,
+                "error": CAS_ERROR_MESSAGE,
                 "error_type": "CasError"
             }))
         }
@@ -348,10 +338,7 @@ pub async fn lfs_download(
                     "error_type": "NotFoundError"
                 }))
             }
-            _ => HttpResponse::BadGateway().json(serde_json::json!({
-                "error": e.to_string(),
-                "error_type": "BadGateway"
-            })),
+            _ => bad_gateway_error_response("LFS download from CAS failed", e, "BadGateway"),
         },
     }
 }

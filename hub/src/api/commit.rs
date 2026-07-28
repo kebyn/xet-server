@@ -9,6 +9,7 @@ use crate::commit::id::generate_commit_id;
 use crate::commit::types::MAX_INLINE_SIZE;
 #[cfg(test)]
 use crate::commit::validation::validate_file_path;
+use crate::error::{CAS_ERROR_MESSAGE, bad_gateway_error_response, internal_error_response};
 #[cfg(test)]
 use crate::metadata::Revision;
 use crate::metadata::{MetadataStore, RepoType};
@@ -101,19 +102,23 @@ fn commit_error_response(err: CommitServiceError) -> HttpResponse {
             HttpResponse::UnprocessableEntity().json(error_json(message, "UnprocessableEntity"))
         }
         CommitServiceError::CasUpload { status, message } => {
-            let status_code = actix_web::http::StatusCode::from_u16(status)
+            tracing::error!(
+                "CAS rejected inline file upload with status {}: {}",
+                status,
+                message
+            );
+            let mut status_code = actix_web::http::StatusCode::from_u16(status)
                 .unwrap_or(actix_web::http::StatusCode::BAD_GATEWAY);
-            HttpResponse::build(status_code).json(error_json(
-                format!("Failed to store inline file in CAS: {}", message),
-                "CasError",
-            ))
+            if status_code.is_server_error() {
+                status_code = actix_web::http::StatusCode::BAD_GATEWAY;
+            }
+            HttpResponse::build(status_code)
+                .json(error_json(CAS_ERROR_MESSAGE.to_string(), "CasError"))
         }
         CommitServiceError::BadGateway(message) => {
-            HttpResponse::BadGateway().json(error_json(message, "CasError"))
+            bad_gateway_error_response("Commit CAS verification failed", message, "CasError")
         }
-        CommitServiceError::Internal(message) => {
-            HttpResponse::InternalServerError().json(error_json(message, "InternalError"))
-        }
+        CommitServiceError::Internal(message) => internal_error_response("Commit failed", message),
     }
 }
 
@@ -433,6 +438,39 @@ mod tests {
                 .unwrap()
                 .contains("CAS reports 42")
         );
+    }
+
+    #[actix_web::test]
+    async fn infrastructure_errors_are_sanitized_at_commit_boundary() {
+        for (error, expected_status) in [
+            (
+                CommitServiceError::Internal("sqlite /secret/hub.db failed".to_string()),
+                actix_web::http::StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+            (
+                CommitServiceError::BadGateway(
+                    "CAS http://private-cas:8081 returned credentials".to_string(),
+                ),
+                actix_web::http::StatusCode::BAD_GATEWAY,
+            ),
+            (
+                CommitServiceError::CasUpload {
+                    status: 500,
+                    message: "upstream response exposed a bucket".to_string(),
+                },
+                actix_web::http::StatusCode::BAD_GATEWAY,
+            ),
+        ] {
+            let response = commit_error_response(error);
+            assert_eq!(response.status(), expected_status);
+            let body = actix_web::body::to_bytes(response.into_body())
+                .await
+                .expect("error response body should be readable");
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert!(!body.to_string().contains("secret"));
+            assert!(!body.to_string().contains("private-cas"));
+            assert!(!body.to_string().contains("bucket"));
+        }
     }
 
     // Test commit with invalid LFS OID format (defense-in-depth validation)

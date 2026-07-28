@@ -1,4 +1,5 @@
 use crate::auth::extract::{AuthUser, AuthWrite};
+use crate::error::internal_error_response;
 use crate::metadata::{MetadataStore, RepoType};
 use crate::services::preupload::{
     PreuploadFileInput, PreuploadRequest as ServicePreuploadRequest, PreuploadService,
@@ -55,7 +56,7 @@ fn preupload_service_error_response(err: PreuploadServiceError) -> HttpResponse 
             HttpResponse::NotFound().json(error_json(msg, "NotFoundError"))
         }
         PreuploadServiceError::Internal(msg) => {
-            HttpResponse::InternalServerError().json(error_json(msg, "InternalError"))
+            internal_error_response("Preupload request failed", msg)
         }
     }
 }

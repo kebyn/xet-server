@@ -46,7 +46,7 @@ pub(super) async fn serve_raw_blob(
                     GLOBAL_METRICS.record_latency(start);
                     return RawBlobResult::Error(HttpResponse::InternalServerError().json(
                         serde_json::json!({
-                            "error": format!("Failed to open file: {}", e)
+                            "error": crate::api::INTERNAL_ERROR_MESSAGE
                         }),
                     ));
                 }
@@ -63,7 +63,7 @@ pub(super) async fn serve_raw_blob(
                     GLOBAL_METRICS.record_latency(start);
                     return RawBlobResult::Error(HttpResponse::InternalServerError().json(
                         serde_json::json!({
-                            "error": format!("Failed to get metadata: {}", e)
+                            "error": crate::api::INTERNAL_ERROR_MESSAGE
                         }),
                     ));
                 }
@@ -114,7 +114,7 @@ pub(super) async fn serve_raw_blob(
             GLOBAL_METRICS.record_error();
             GLOBAL_METRICS.record_latency(start);
             RawBlobResult::Error(HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Storage error: {}", e)
+                "error": crate::api::INTERNAL_ERROR_MESSAGE
             })))
         }
     }
@@ -212,7 +212,7 @@ async fn serve_raw_blob_inmemory(
             GLOBAL_METRICS.record_latency(start);
             return RawBlobResult::Error(HttpResponse::InternalServerError().json(
                 serde_json::json!({
-                    "error": format!("Storage error: {}", e)
+                    "error": crate::api::INTERNAL_ERROR_MESSAGE
                 }),
             ));
         }
@@ -237,7 +237,7 @@ async fn serve_raw_blob_inmemory(
             GLOBAL_METRICS.record_latency(start);
             return RawBlobResult::Error(HttpResponse::InternalServerError().json(
                 serde_json::json!({
-                    "error": "Integrity verification failed: stored content does not match OID"
+                    "error": crate::api::INTERNAL_ERROR_MESSAGE
                 }),
             ));
         }

@@ -1,5 +1,6 @@
 use crate::auth::extract::{AuthRead, AuthUser};
 use crate::config::HubConfig;
+use crate::error::internal_error_response;
 use crate::metadata::{MetadataStore, RepoType};
 use crate::services::resolve::{ResolveFileRequest, ResolveService, ResolveServiceError};
 use actix_web::{HttpRequest, HttpResponse, web};
@@ -22,7 +23,7 @@ fn resolve_service_error_response(err: ResolveServiceError) -> HttpResponse {
             HttpResponse::NotFound().json(error_json(msg, "NotFoundError"))
         }
         ResolveServiceError::Internal(msg) => {
-            HttpResponse::InternalServerError().json(error_json(msg, "InternalError"))
+            internal_error_response("Resolve request failed", msg)
         }
     }
 }
@@ -79,12 +80,7 @@ async fn handle_resolve(
                 format!("?token={}", proxy_token)
             }
             Err(e) => {
-                // M3 fix: Return 500 instead of silently generating an invalid URL
-                tracing::error!("Failed to sign proxy token for resolve: {}", e);
-                return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": "Failed to generate download token",
-                    "error_type": "InternalError"
-                }));
+                return internal_error_response("Failed to sign proxy token for resolve", e);
             }
         }
     } else {

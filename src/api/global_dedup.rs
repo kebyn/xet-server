@@ -76,11 +76,12 @@ pub async fn query_chunk_dedup(
                     chunk_index: None,
                 },
                 Err(e) => {
+                    tracing::error!("Failed to check deduplicated xorb {}: {}", xorb_hash, e);
                     GLOBAL_METRICS.record_request(500);
                     GLOBAL_METRICS.record_error();
                     GLOBAL_METRICS.record_latency(start);
                     return HttpResponse::InternalServerError().json(serde_json::json!({
-                        "error": format!("Storage error: {}", e)
+                        "error": crate::api::INTERNAL_ERROR_MESSAGE
                     }));
                 }
             }
@@ -106,9 +107,35 @@ mod tests {
     use crate::config::{AuthConfig, ServerConfig};
     use crate::index::{VerifiedChunkMapping, VerifiedShardRegistration};
     use crate::storage::local::LocalStorage;
+    use crate::storage::{StorageError, StorageResult};
     use actix_web::{App, test, web};
+    use async_trait::async_trait;
+    use bytes::Bytes;
     use std::time::{SystemTime, UNIX_EPOCH};
     use tempfile::tempdir;
+
+    struct FailingExistsStorage;
+
+    #[async_trait]
+    impl StorageBackend for FailingExistsStorage {
+        async fn put(&self, _key: &str, _data: Bytes) -> StorageResult<()> {
+            unreachable!("test only exercises exists")
+        }
+
+        async fn get(&self, _key: &str) -> StorageResult<Bytes> {
+            unreachable!("test only exercises exists")
+        }
+
+        async fn exists(&self, _key: &str) -> StorageResult<bool> {
+            Err(StorageError::Internal(
+                "S3 endpoint http://minio.internal secret-bucket".to_string(),
+            ))
+        }
+
+        async fn delete(&self, _key: &str) -> StorageResult<()> {
+            unreachable!("test only exercises exists")
+        }
+    }
 
     fn create_test_config() -> (KeyPair, AuthVerifier, ServerConfig) {
         let kp = KeyPair::generate();
@@ -308,5 +335,48 @@ mod tests {
 
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), 400);
+    }
+
+    #[actix_web::test]
+    async fn storage_errors_do_not_expose_backend_details() {
+        let (kp, auth, _config) = create_test_config();
+        let token = create_test_token(&kp, "read");
+        let index = MetadataIndex::new();
+        let chunk_hash = "a".repeat(64);
+        index
+            .register_verified_shard(VerifiedShardRegistration {
+                shard_id: "shard".to_string(),
+                files: vec![],
+                chunks: vec![VerifiedChunkMapping {
+                    chunk_hash: chunk_hash.clone(),
+                    xorb_hash: "b".repeat(64),
+                    chunk_index: 0,
+                }],
+            })
+            .unwrap();
+        let storage: Box<dyn StorageBackend> = Box::new(FailingExistsStorage);
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(index))
+                .app_data(web::Data::new(storage))
+                .app_data(web::Data::new(auth))
+                .route(
+                    "/v1/chunks/{prefix}/{hash}",
+                    web::get().to(query_chunk_dedup),
+                ),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri(&format!("/v1/chunks/default/{}", chunk_hash))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request();
+        let response = test::call_service(&app, req).await;
+
+        assert_eq!(response.status(), 500);
+        let body: serde_json::Value = test::read_body_json(response).await;
+        assert_eq!(body["error"], crate::api::INTERNAL_ERROR_MESSAGE);
+        assert!(!body.to_string().contains("minio.internal"));
+        assert!(!body.to_string().contains("secret-bucket"));
     }
 }

@@ -1,4 +1,5 @@
 use crate::auth::extract::{AuthRead, AuthUser, AuthWrite};
+use crate::error::internal_error_response;
 use crate::metadata::{MetadataStore, Repo, RepoType};
 use crate::services::repo::{RepoService, RepoServiceError, RepoServiceResult};
 use actix_web::{HttpResponse, web};
@@ -73,7 +74,7 @@ fn repo_service_error_response(err: RepoServiceError, not_found_type: &str) -> H
             HttpResponse::NotFound().json(error_json(msg, "RevisionNotFoundError"))
         }
         RepoServiceError::Internal(msg) => {
-            HttpResponse::InternalServerError().json(error_json(msg, "InternalError"))
+            internal_error_response("Repository request failed", msg)
         }
     }
 }

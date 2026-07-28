@@ -100,7 +100,7 @@ pub async fn get_blob_state(
             GLOBAL_METRICS.record_error();
             GLOBAL_METRICS.record_latency(start);
             HttpResponse::InternalServerError().json(ErrorResponse {
-                error: "Internal storage error".to_string(),
+                error: crate::api::INTERNAL_ERROR_MESSAGE.to_string(),
             })
         }
     }

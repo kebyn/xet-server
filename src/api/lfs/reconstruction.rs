@@ -32,7 +32,7 @@ pub(super) async fn serve_verified_xet_reconstruction(
                 GLOBAL_METRICS.record_error();
                 GLOBAL_METRICS.record_latency(start);
                 return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": "Failed to reconstruct verified object"
+                    "error": crate::api::INTERNAL_ERROR_MESSAGE
                 }));
             }
         };
@@ -52,7 +52,7 @@ pub(super) async fn serve_verified_xet_reconstruction(
             GLOBAL_METRICS.record_error();
             GLOBAL_METRICS.record_latency(start);
             return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Failed to open reconstructed object"
+                "error": crate::api::INTERNAL_ERROR_MESSAGE
             }));
         }
     };

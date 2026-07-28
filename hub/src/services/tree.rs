@@ -1,7 +1,7 @@
 use std::{collections::HashSet, sync::Arc};
 
 use crate::metadata::{FileEntry, MetadataError, MetadataStore, Repo, RepoType};
-use crate::services::shared::{can_access_repo, resolve_revision_id};
+use crate::services::shared::{ResolveRevisionError, can_access_repo, resolve_revision_id};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TreeServiceError {
@@ -59,7 +59,10 @@ impl TreeService {
 
         let commit_id = resolve_revision_id(self.metadata.as_ref(), repo.id, request.revision)
             .await
-            .map_err(TreeServiceError::NotFound)?;
+            .map_err(|error| match error {
+                ResolveRevisionError::NotFound(message) => TreeServiceError::NotFound(message),
+                ResolveRevisionError::Internal(message) => TreeServiceError::Internal(message),
+            })?;
 
         let entries = self
             .metadata

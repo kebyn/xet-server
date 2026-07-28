@@ -76,7 +76,7 @@ pub async fn upload_xorb(
         GLOBAL_METRICS.record_error();
         GLOBAL_METRICS.record_latency(start);
         return HttpResponse::InsufficientStorage().json(serde_json::json!({
-            "error": format!("Insufficient disk space: {}", e)
+            "error": "Insufficient storage"
         }));
     }
 
@@ -89,7 +89,7 @@ pub async fn upload_xorb(
             GLOBAL_METRICS.record_error();
             GLOBAL_METRICS.record_latency(start);
             return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Failed to create temp file: {}", e)
+                "error": crate::api::INTERNAL_ERROR_MESSAGE
             }));
         }
     };
@@ -105,7 +105,7 @@ pub async fn upload_xorb(
                 GLOBAL_METRICS.record_request(400);
                 GLOBAL_METRICS.record_latency(start);
                 return HttpResponse::BadRequest().json(serde_json::json!({
-                    "error": format!("Upload stream error: {}", e)
+                    "error": "Invalid upload stream"
                 }));
             }
         };
@@ -125,7 +125,7 @@ pub async fn upload_xorb(
             GLOBAL_METRICS.record_error();
             GLOBAL_METRICS.record_latency(start);
             return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Failed to write upload data: {}", e)
+                "error": crate::api::INTERNAL_ERROR_MESSAGE
             }));
         }
     }
@@ -136,7 +136,7 @@ pub async fn upload_xorb(
         GLOBAL_METRICS.record_error();
         GLOBAL_METRICS.record_latency(start);
         return HttpResponse::InternalServerError().json(serde_json::json!({
-            "error": format!("Failed to sync upload data: {}", e)
+            "error": crate::api::INTERNAL_ERROR_MESSAGE
         }));
     }
 
@@ -145,10 +145,15 @@ pub async fn upload_xorb(
     let xorb_info = match crate::format::xorb::verify_xorb_from_file_with_info(&temp_path) {
         Ok(info) => info,
         Err(e) => {
+            error!(
+                "Xorb verification failed for {}: {}",
+                temp_path.display(),
+                e
+            );
             GLOBAL_METRICS.record_request(400);
             GLOBAL_METRICS.record_latency(start);
             return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": format!("Xorb verification failed: {}", e)
+                "error": "Xorb verification failed"
             }));
         }
     };
@@ -180,7 +185,7 @@ pub async fn upload_xorb(
             GLOBAL_METRICS.record_error();
             GLOBAL_METRICS.record_latency(start);
             return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Storage error: {}", e)
+                "error": crate::api::INTERNAL_ERROR_MESSAGE
             }));
         }
     };
@@ -203,7 +208,7 @@ pub async fn upload_xorb(
         GLOBAL_METRICS.record_error();
         GLOBAL_METRICS.record_latency(start);
         return HttpResponse::InternalServerError().json(serde_json::json!({
-            "error": format!("Storage error: {}", e)
+            "error": crate::api::INTERNAL_ERROR_MESSAGE
         }));
     }
 
@@ -276,7 +281,7 @@ pub async fn download_xorb(
                     GLOBAL_METRICS.record_error();
                     GLOBAL_METRICS.record_latency(start);
                     return HttpResponse::InternalServerError().json(serde_json::json!({
-                        "error": format!("Failed to open xorb file: {}", e)
+                        "error": crate::api::INTERNAL_ERROR_MESSAGE
                     }));
                 }
             };
@@ -288,7 +293,7 @@ pub async fn download_xorb(
                     GLOBAL_METRICS.record_error();
                     GLOBAL_METRICS.record_latency(start);
                     return HttpResponse::InternalServerError().json(serde_json::json!({
-                        "error": format!("Failed to get xorb metadata: {}", e)
+                        "error": crate::api::INTERNAL_ERROR_MESSAGE
                     }));
                 }
             };
@@ -325,7 +330,7 @@ pub async fn download_xorb(
             GLOBAL_METRICS.record_error();
             GLOBAL_METRICS.record_latency(start);
             return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Storage error: {}", e)
+                "error": crate::api::INTERNAL_ERROR_MESSAGE
             }));
         }
     }
@@ -349,7 +354,7 @@ pub async fn download_xorb(
             GLOBAL_METRICS.record_error();
             GLOBAL_METRICS.record_latency(start);
             return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Storage error: {}", e)
+                "error": crate::api::INTERNAL_ERROR_MESSAGE
             }));
         }
     };

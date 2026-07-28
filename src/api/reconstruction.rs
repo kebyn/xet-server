@@ -232,7 +232,7 @@ pub async fn get_reconstruction_v1(
             GLOBAL_METRICS.record_error();
             GLOBAL_METRICS.record_latency(start);
             return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Failed to build reconstruction plan"
+                "error": crate::api::INTERNAL_ERROR_MESSAGE
             }));
         }
     };
@@ -399,7 +399,7 @@ pub async fn get_reconstruction(
             GLOBAL_METRICS.record_error();
             GLOBAL_METRICS.record_latency(start);
             return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Failed to build reconstruction plan"
+                "error": crate::api::INTERNAL_ERROR_MESSAGE
             }));
         }
     };
