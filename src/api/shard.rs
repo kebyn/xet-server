@@ -200,7 +200,17 @@ pub async fn upload_shard(
                 }));
             }
         };
-        index.register_verified_shard(registration);
+        if let Err(error) = index.register_verified_shard(registration) {
+            error!(
+                "Metadata index rejected existing shard {}: {}",
+                shard_id, error
+            );
+            GLOBAL_METRICS.record_request(409);
+            GLOBAL_METRICS.record_latency(start);
+            return HttpResponse::Conflict().json(serde_json::json!({
+                "error": format!("Metadata index conflict: {}", error)
+            }));
+        }
 
         GLOBAL_METRICS.record_request(200);
         GLOBAL_METRICS.record_storage_operation();
@@ -248,7 +258,14 @@ pub async fn upload_shard(
 
     let file_count = registration.files.len();
     let chunk_count = registration.chunks.len();
-    index.register_verified_shard(registration);
+    if let Err(error) = index.register_verified_shard(registration) {
+        error!("Metadata index rejected shard {}: {}", shard_id, error);
+        GLOBAL_METRICS.record_request(409);
+        GLOBAL_METRICS.record_latency(start);
+        return HttpResponse::Conflict().json(serde_json::json!({
+            "error": format!("Metadata index conflict: {}", error)
+        }));
+    }
 
     info!(
         "Uploaded shard {} with {} files and {} chunks",

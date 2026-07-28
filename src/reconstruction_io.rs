@@ -410,6 +410,7 @@ mod tests {
             vec![FileShardRef {
                 shard_id,
                 file_index: 1,
+                file_size: raw_b.len() as u64,
             }],
             &*storage,
             dir.path(),
@@ -484,10 +485,12 @@ mod tests {
                 FileShardRef {
                     shard_id: shard_id_a,
                     file_index: 0,
+                    file_size: raw.len() as u64,
                 },
                 FileShardRef {
                     shard_id: shard_id_b,
                     file_index: 0,
+                    file_size: raw.len() as u64,
                 },
             ],
             &*storage,

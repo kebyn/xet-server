@@ -137,6 +137,7 @@ async fn test_internal_get_state_raw() {
 
     let body: serde_json::Value = test::read_body_json(resp).await;
     assert_eq!(body["state"], "raw_only");
+    assert_eq!(body["size"], content.len());
     assert!(body["xet_file_id"].is_null());
     assert!(body["converted_at"].is_null());
 }
@@ -229,6 +230,8 @@ async fn test_internal_head_blob_raw() {
     // Check headers
     let storage_state = resp.headers().get("X-Storage-State").unwrap();
     assert_eq!(storage_state.to_str().unwrap(), "raw_only");
+    let blob_size = resp.headers().get("X-Blob-Size").unwrap();
+    assert_eq!(blob_size.to_str().unwrap(), content.len().to_string());
 }
 
 /// Test that HEAD /internal/blob/{oid} returns X-Storage-State: xet_only for blobs in MetadataIndex.
@@ -246,14 +249,17 @@ async fn test_internal_head_blob_xet() {
 
     // Register a xet_only blob in MetadataIndex
     let oid = "b".repeat(64);
-    index.register_verified_shard(VerifiedShardRegistration {
-        shard_id: "shard-test".to_string(),
-        files: vec![VerifiedFileMapping {
-            file_hash: oid.clone(),
-            file_index: 0,
-        }],
-        chunks: vec![],
-    });
+    index
+        .register_verified_shard(VerifiedShardRegistration {
+            shard_id: "shard-test".to_string(),
+            files: vec![VerifiedFileMapping {
+                file_hash: oid.clone(),
+                file_index: 0,
+                file_size: 123,
+            }],
+            chunks: vec![],
+        })
+        .unwrap();
 
     let app = test::init_service(
         App::new()
@@ -283,6 +289,9 @@ async fn test_internal_head_blob_xet() {
 
     let file_id_header = resp.headers().get("X-File-Id").unwrap();
     assert_eq!(file_id_header.to_str().unwrap(), oid.as_str());
+
+    let blob_size = resp.headers().get("X-Blob-Size").unwrap();
+    assert_eq!(blob_size.to_str().unwrap(), "123");
 }
 
 /// Test that internal endpoints reject tokens without "internal" scope.

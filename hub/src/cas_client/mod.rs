@@ -3,6 +3,30 @@ use crate::error::HubError;
 use serde::Deserialize;
 use std::time::Duration;
 
+const BLOB_SIZE_HEADER: &str = "X-Blob-Size";
+
+fn parse_blob_size(headers: &reqwest::header::HeaderMap) -> Result<u64, HubError> {
+    let value = headers.get(BLOB_SIZE_HEADER).ok_or_else(|| {
+        HubError::CasError(format!(
+            "CAS HEAD response omitted required {} header",
+            BLOB_SIZE_HEADER
+        ))
+    })?;
+    let value = value.to_str().map_err(|_| {
+        HubError::CasError(format!(
+            "CAS HEAD response contained a non-text {} header",
+            BLOB_SIZE_HEADER
+        ))
+    })?;
+
+    value.parse::<u64>().map_err(|_| {
+        HubError::CasError(format!(
+            "CAS HEAD response contained an invalid {} header",
+            BLOB_SIZE_HEADER
+        ))
+    })
+}
+
 /// Error returned by CAS upload operations, preserving HTTP status codes
 /// for proper error propagation to clients.
 #[derive(Debug)]
@@ -62,6 +86,7 @@ impl CasClientTrait for CasClient {
         let status = resp.status().as_u16();
         match status {
             200 => {
+                let size = parse_blob_size(resp.headers())?;
                 let state = resp
                     .headers()
                     .get("X-Storage-State")
@@ -76,7 +101,7 @@ impl CasClientTrait for CasClient {
                 Ok(BlobState {
                     state,
                     xet_file_id: file_id,
-                    size: 0,
+                    size,
                     sha256: oid.to_string(),
                 })
             }
@@ -368,6 +393,7 @@ impl CasClient {
 mod tests {
     use super::*;
     use crate::config::CasSettings;
+    use reqwest::header::{HeaderMap, HeaderValue};
 
     #[test]
     fn test_client_creation() {
@@ -391,5 +417,23 @@ mod tests {
         };
         let client = CasClient::new(&settings).expect("CAS client should be created");
         assert_eq!(client.base_url, "http://localhost:3000");
+    }
+
+    #[test]
+    fn blob_size_header_is_required_and_must_be_a_u64() {
+        let headers = HeaderMap::new();
+        let missing = parse_blob_size(&headers).expect_err("missing size header must fail");
+        assert!(missing.to_string().contains("omitted required X-Blob-Size"));
+
+        let mut headers = HeaderMap::new();
+        headers.insert(BLOB_SIZE_HEADER, HeaderValue::from_static("not-a-size"));
+        let invalid = parse_blob_size(&headers).expect_err("invalid size header must fail");
+        assert!(invalid.to_string().contains("invalid X-Blob-Size"));
+
+        headers.insert(
+            BLOB_SIZE_HEADER,
+            HeaderValue::from_static("18446744073709551615"),
+        );
+        assert_eq!(parse_blob_size(&headers).unwrap(), u64::MAX);
     }
 }

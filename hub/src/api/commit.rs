@@ -193,8 +193,8 @@ mod tests {
 
     /// Mock CAS client for testing without a real CAS server
     struct MockCasClient {
-        /// OIDs that should be considered as existing in CAS
-        existing_oids: std::collections::HashSet<String>,
+        /// OIDs that should be considered as existing in CAS and their verified sizes.
+        blob_sizes: std::collections::HashMap<String, u64>,
         /// Whether uploads should succeed
         allow_uploads: bool,
         /// Optional prefix required for upload tokens.
@@ -204,10 +204,15 @@ mod tests {
     impl MockCasClient {
         fn new() -> Self {
             Self {
-                existing_oids: std::collections::HashSet::new(),
+                blob_sizes: std::collections::HashMap::new(),
                 allow_uploads: true,
                 required_upload_token_prefix: None,
             }
+        }
+
+        fn with_blob(mut self, oid: String, size: u64) -> Self {
+            self.blob_sizes.insert(oid, size);
+            self
         }
 
         fn requiring_upload_token_prefix(mut self, prefix: &'static str) -> Self {
@@ -219,11 +224,11 @@ mod tests {
     #[async_trait::async_trait]
     impl CasClientTrait for MockCasClient {
         async fn head_blob(&self, oid: &str, _internal_token: &str) -> Result<BlobState, HubError> {
-            if self.existing_oids.contains(oid) {
+            if let Some(size) = self.blob_sizes.get(oid) {
                 Ok(BlobState {
                     state: "raw_only".to_string(),
                     xet_file_id: None,
-                    size: 0,
+                    size: *size,
                     sha256: oid.to_string(),
                 })
             } else {
@@ -373,6 +378,60 @@ mod tests {
         assert_eq!(
             resp.status(),
             actix_web::http::StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+
+    #[actix_web::test]
+    async fn test_commit_rejects_lfs_size_mismatch_with_422() {
+        let oid = "b".repeat(64);
+        let mock_cas = MockCasClient::new().with_blob(oid.clone(), 42);
+        let (token_store, metadata, cas_client, signer) = setup_test_env_with_mock(mock_cas).await;
+        let token = token_store
+            .create_token("testuser", "test-token", "write")
+            .await
+            .unwrap();
+        metadata
+            .create_repo("testuser", "my-model", RepoType::Model, false)
+            .await
+            .unwrap();
+
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(token_store.clone()))
+                .app_data(web::Data::new(metadata.clone()))
+                .app_data(web::Data::new(cas_client.clone()))
+                .app_data(web::Data::new(signer.clone()))
+                .route(
+                    "/api/models/{ns}/{repo}/commit/{revision}",
+                    web::post().to(commit_model),
+                ),
+        )
+        .await;
+
+        let body = format!(
+            "{{\"key\":\"header\",\"value\":{{\"summary\":\"Add model\",\"parentRevision\":null}}}}\n\
+             {{\"key\":\"lfsFile\",\"value\":{{\"path\":\"model.bin\",\"oid\":\"{}\",\"size\":41}}}}",
+            oid
+        );
+        let req = actix_test::TestRequest::post()
+            .uri("/api/models/testuser/my-model/commit/main")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .insert_header(("Content-Type", "application/x-ndjson"))
+            .set_payload(body)
+            .to_request();
+
+        let resp = actix_test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            actix_web::http::StatusCode::UNPROCESSABLE_ENTITY
+        );
+        let response: serde_json::Value = actix_test::read_body_json(resp).await;
+        assert_eq!(response["error_type"], "UnprocessableEntity");
+        assert!(
+            response["error"]
+                .as_str()
+                .unwrap()
+                .contains("CAS reports 42")
         );
     }
 

@@ -206,15 +206,17 @@ mod tests {
 
         let index = MetadataIndex::new();
         let chunk_hash = "a".repeat(64);
-        index.register_verified_shard(VerifiedShardRegistration {
-            shard_id: "stale-shard".to_string(),
-            files: vec![],
-            chunks: vec![VerifiedChunkMapping {
-                chunk_hash: chunk_hash.clone(),
-                xorb_hash: "b".repeat(64),
-                chunk_index: 0,
-            }],
-        });
+        index
+            .register_verified_shard(VerifiedShardRegistration {
+                shard_id: "stale-shard".to_string(),
+                files: vec![],
+                chunks: vec![VerifiedChunkMapping {
+                    chunk_hash: chunk_hash.clone(),
+                    xorb_hash: "b".repeat(64),
+                    chunk_index: 0,
+                }],
+            })
+            .unwrap();
 
         let app = test::init_service(
             App::new()

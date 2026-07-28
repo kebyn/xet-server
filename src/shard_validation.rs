@@ -189,6 +189,7 @@ pub async fn validate_shard_for_index(
         let mut sha256 = Sha256::new();
         let mut whole_file_blake3 = StreamingHasher::new();
         let mut raw_chunk_hashes_and_sizes = Vec::with_capacity(plan.chunks.len());
+        let mut file_size = 0u64;
 
         for planned in &plan.chunks {
             let xorb_hash_hex = planned.xorb_hash.to_hex();
@@ -247,7 +248,19 @@ pub async fn validate_shard_for_index(
 
             sha256.update(&raw_chunk);
             whole_file_blake3.update(&raw_chunk);
-            raw_chunk_hashes_and_sizes.push((actual_raw_chunk_hash, raw_chunk.len() as u64));
+            let raw_chunk_size = u64::try_from(raw_chunk.len()).map_err(|_| {
+                format!(
+                    "Reconstructed chunk length does not fit u64 for file {}",
+                    declared_file_hash
+                )
+            })?;
+            file_size = file_size.checked_add(raw_chunk_size).ok_or_else(|| {
+                format!(
+                    "Reconstructed size overflow for file {} at index {}",
+                    declared_file_hash, file_index
+                )
+            })?;
+            raw_chunk_hashes_and_sizes.push((actual_raw_chunk_hash, raw_chunk_size));
             validated_chunks.insert((planned.xorb_hash, planned.xorb_chunk_index));
         }
 
@@ -269,6 +282,7 @@ pub async fn validate_shard_for_index(
         files.push(VerifiedFileMapping {
             file_hash: declared_file_hash_hex,
             file_index,
+            file_size,
         });
     }
 
@@ -448,6 +462,7 @@ mod tests {
         assert_eq!(registration.files.len(), 1);
         assert_eq!(registration.files[0].file_hash, declared_file_hash.to_hex());
         assert_eq!(registration.files[0].file_index, 0);
+        assert_eq!(registration.files[0].file_size, raw_chunk.len() as u64);
         assert_eq!(registration.chunks.len(), 1);
         assert_eq!(registration.chunks[0].chunk_hash, raw_chunk_hash.to_hex());
         assert_eq!(registration.chunks[0].xorb_hash, xorb_hash.to_hex());

@@ -367,9 +367,16 @@ impl ConversionPipeline {
                 files: vec![crate::index::VerifiedFileMapping {
                     file_hash: oid.to_string(),
                     file_index: 0,
+                    file_size: raw_size,
                 }],
                 chunks: verified_chunks,
-            });
+            })
+            .map_err(|error| {
+                ConversionError::BuildError(format!(
+                    "Metadata index rejected converted file: {}",
+                    error
+                ))
+            })?;
 
         // 10. Delete raw blob (if configured)
         if self.config.delete_raw_after_conversion {

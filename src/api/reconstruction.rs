@@ -686,31 +686,35 @@ mod tests {
             )
             .await
             .unwrap();
-        index.register_verified_shard(VerifiedShardRegistration {
-            shard_id,
-            files: vec![
-                VerifiedFileMapping {
-                    file_hash: file_a.to_hex(),
-                    file_index: 0,
-                },
-                VerifiedFileMapping {
-                    file_hash: file_b.to_hex(),
-                    file_index: 1,
-                },
-            ],
-            chunks: vec![
-                VerifiedChunkMapping {
-                    chunk_hash: raw_hashes[0].to_hex(),
-                    xorb_hash: xorb.xorb_hash.to_hex(),
-                    chunk_index: 0,
-                },
-                VerifiedChunkMapping {
-                    chunk_hash: raw_hashes[1].to_hex(),
-                    xorb_hash: xorb.xorb_hash.to_hex(),
-                    chunk_index: 1,
-                },
-            ],
-        });
+        index
+            .register_verified_shard(VerifiedShardRegistration {
+                shard_id,
+                files: vec![
+                    VerifiedFileMapping {
+                        file_hash: file_a.to_hex(),
+                        file_index: 0,
+                        file_size: 3,
+                    },
+                    VerifiedFileMapping {
+                        file_hash: file_b.to_hex(),
+                        file_index: 1,
+                        file_size: 3,
+                    },
+                ],
+                chunks: vec![
+                    VerifiedChunkMapping {
+                        chunk_hash: raw_hashes[0].to_hex(),
+                        xorb_hash: xorb.xorb_hash.to_hex(),
+                        chunk_index: 0,
+                    },
+                    VerifiedChunkMapping {
+                        chunk_hash: raw_hashes[1].to_hex(),
+                        xorb_hash: xorb.xorb_hash.to_hex(),
+                        chunk_index: 1,
+                    },
+                ],
+            })
+            .unwrap();
 
         let app = test::init_service(
             App::new()

@@ -11,7 +11,7 @@ use crate::api::auth::AuthVerifier;
 use crate::api::guard::{AuthNeed, require_auth};
 use crate::index::MetadataIndex;
 use crate::metrics::GLOBAL_METRICS;
-use crate::storage::StorageBackend;
+use crate::storage::{StorageBackend, StorageError};
 
 /// Error response for internal endpoints
 #[derive(Serialize)]
@@ -56,18 +56,10 @@ pub async fn get_blob_state(
     }
 
     // Check MetadataIndex first
-    if index.get_file_refs(&oid).is_some() {
+    if let Some(size) = index.get_file_size(&oid) {
         info!("Internal state query for {}: xet_only", oid);
         GLOBAL_METRICS.record_request(200);
         GLOBAL_METRICS.record_latency(start);
-        // Get actual blob size from storage (M4 fix: log errors instead of silently returning 0)
-        let size = match storage.get_size(&format!("lfs/objects/{}", oid)).await {
-            Ok(s) => s,
-            Err(e) => {
-                warn!("Failed to get size for xet_only blob {}: {}", oid, e);
-                0
-            }
-        };
         return HttpResponse::Ok().json(serde_json::json!({
             "state": "xet_only",
             "xet_file_id": oid,
@@ -79,19 +71,11 @@ pub async fn get_blob_state(
 
     // Check raw blob
     let object_key = format!("lfs/objects/{}", oid);
-    match storage.exists(&object_key).await {
-        Ok(true) => {
+    match storage.get_size(&object_key).await {
+        Ok(size) => {
             info!("Internal state query for {}: raw_only", oid);
             GLOBAL_METRICS.record_request(200);
             GLOBAL_METRICS.record_latency(start);
-            // Get actual blob size from storage (M4 fix: log errors instead of silently returning 0)
-            let size = match storage.get_size(&object_key).await {
-                Ok(s) => s,
-                Err(e) => {
-                    warn!("Failed to get size for raw_only blob {}: {}", oid, e);
-                    0
-                }
-            };
             HttpResponse::Ok().json(serde_json::json!({
                 "state": "raw_only",
                 "xet_file_id": null,
@@ -100,18 +84,18 @@ pub async fn get_blob_state(
                 "converted_at": null
             }))
         }
-        Ok(false) => {
+        Err(StorageError::NotFound(_)) => {
             GLOBAL_METRICS.record_request(404);
             GLOBAL_METRICS.record_latency(start);
             HttpResponse::NotFound().json(ErrorResponse {
                 error: format!("Blob not found: {}", oid),
             })
         }
-        Err(e) => {
+        Err(error) => {
             // I3 fix: Log internal error details but don't leak them to the client.
             // The error message could contain file paths, S3 bucket names, or other
             // infrastructure details that shouldn't be exposed even on internal endpoints.
-            warn!("Storage error checking blob {}: {}", oid, e);
+            warn!("Storage error checking blob {}: {}", oid, error);
             GLOBAL_METRICS.record_request(500);
             GLOBAL_METRICS.record_error();
             GLOBAL_METRICS.record_latency(start);
@@ -125,8 +109,8 @@ pub async fn get_blob_state(
 /// Check if blob is accessible via HEAD request.
 ///
 /// Stateless logic:
-/// - Check MetadataIndex for xet data → X-Storage-State: xet_only
-/// - Check raw blob in storage → X-Storage-State: raw_only
+/// - Check MetadataIndex for xet data → X-Storage-State: xet_only + X-Blob-Size
+/// - Check raw blob in storage → X-Storage-State: raw_only + X-Blob-Size
 /// - Not found → 404
 ///
 /// Requires "internal" scope.
@@ -159,32 +143,36 @@ pub async fn head_blob(
     }
 
     // Check MetadataIndex first
-    if index.get_file_refs(&oid).is_some() {
+    if let Some(size) = index.get_file_size(&oid) {
         GLOBAL_METRICS.record_request(200);
         GLOBAL_METRICS.record_latency(start);
         return HttpResponse::Ok()
             .insert_header(("X-Storage-State", "xet_only"))
             .insert_header(("X-File-Id", oid.as_str()))
+            .insert_header(("X-Blob-Size", size.to_string()))
             .finish();
     }
 
     // Check raw blob
     let object_key = format!("lfs/objects/{}", oid);
-    match storage.exists(&object_key).await {
-        Ok(true) => {
+    match storage.get_size(&object_key).await {
+        Ok(size) => {
             GLOBAL_METRICS.record_request(200);
             GLOBAL_METRICS.record_latency(start);
             HttpResponse::Ok()
                 .insert_header(("X-Storage-State", "raw_only"))
+                .insert_header(("X-Blob-Size", size.to_string()))
                 .finish()
         }
-        Ok(false) => {
+        Err(StorageError::NotFound(_)) => {
             GLOBAL_METRICS.record_request(404);
             GLOBAL_METRICS.record_latency(start);
             HttpResponse::NotFound().finish()
         }
-        Err(_) => {
+        Err(error) => {
+            warn!("Storage error checking blob {}: {}", oid, error);
             GLOBAL_METRICS.record_request(500);
+            GLOBAL_METRICS.record_error();
             GLOBAL_METRICS.record_latency(start);
             HttpResponse::InternalServerError().finish()
         }

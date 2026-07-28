@@ -15,12 +15,26 @@ use std::sync::Arc;
 pub struct FileShardRef {
     pub shard_id: String,
     pub file_index: usize,
+    pub file_size: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedFileMapping {
     pub file_hash: String,
     pub file_index: usize,
+    pub file_size: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum IndexRegistrationError {
+    #[error(
+        "File hash {file_hash} is already registered with size {existing_size}, cannot register size {new_size}"
+    )]
+    FileSizeConflict {
+        file_hash: String,
+        existing_size: u64,
+        new_size: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,15 +71,50 @@ impl MetadataIndex {
     }
 
     /// Register verified shard mappings and update reconstruction/deduplication indexes.
-    pub fn register_verified_shard(&self, registration: VerifiedShardRegistration) {
+    pub fn register_verified_shard(
+        &self,
+        registration: VerifiedShardRegistration,
+    ) -> Result<(), IndexRegistrationError> {
         // Update file-to-shards mapping
         {
             let mut file_map = self.file_to_shards.write();
+            let mut registration_sizes = HashMap::new();
+
+            // Validate all file sizes before mutating either index so a rejected
+            // registration cannot leave a partially applied file mapping.
+            for file in &registration.files {
+                if let Some(existing_size) =
+                    registration_sizes.insert(file.file_hash.clone(), file.file_size)
+                {
+                    if existing_size != file.file_size {
+                        return Err(IndexRegistrationError::FileSizeConflict {
+                            file_hash: file.file_hash.clone(),
+                            existing_size,
+                            new_size: file.file_size,
+                        });
+                    }
+                }
+
+                if let Some(existing_ref) = file_map
+                    .get(&file.file_hash)
+                    .and_then(|references| references.first())
+                {
+                    if existing_ref.file_size != file.file_size {
+                        return Err(IndexRegistrationError::FileSizeConflict {
+                            file_hash: file.file_hash.clone(),
+                            existing_size: existing_ref.file_size,
+                            new_size: file.file_size,
+                        });
+                    }
+                }
+            }
+
             for file in &registration.files {
                 let entry = file_map.entry(file.file_hash.clone()).or_default();
                 let file_ref = FileShardRef {
                     shard_id: registration.shard_id.clone(),
                     file_index: file.file_index,
+                    file_size: file.file_size,
                 };
                 if !entry.contains(&file_ref) {
                     entry.push(file_ref);
@@ -83,12 +132,23 @@ impl MetadataIndex {
                 );
             }
         }
+
+        Ok(())
     }
 
     /// Get verified shard references for a file hash
     pub fn get_file_refs(&self, file_hash: &str) -> Option<Vec<FileShardRef>> {
         let file_map = self.file_to_shards.read();
         file_map.get(file_hash).cloned()
+    }
+
+    /// Get the verified reconstructed size for a file hash.
+    pub fn get_file_size(&self, file_hash: &str) -> Option<u64> {
+        let file_map = self.file_to_shards.read();
+        file_map
+            .get(file_hash)
+            .and_then(|references| references.first())
+            .map(|reference| reference.file_size)
     }
 
     /// Get shard IDs for a file hash
@@ -205,8 +265,15 @@ impl MetadataIndex {
                 match handle.await {
                     Ok(Some(registration)) => {
                         // Register in index (main task only, no concurrent writes)
-                        self.register_verified_shard(registration);
-                        total_count += 1;
+                        let shard_id = registration.shard_id.clone();
+                        match self.register_verified_shard(registration) {
+                            Ok(()) => total_count += 1,
+                            Err(error) => tracing::warn!(
+                                "Skipping shard {} due to an index registration conflict: {}",
+                                shard_id,
+                                error
+                            ),
+                        }
                     }
                     Ok(None) => {
                         // Shard fetch or parse failed, already logged
@@ -298,29 +365,35 @@ mod tests {
     fn test_register_verified_shard_and_query_file_refs() {
         let index = MetadataIndex::new();
 
-        index.register_verified_shard(VerifiedShardRegistration {
-            shard_id: "shard-001".to_string(),
-            files: vec![
-                VerifiedFileMapping {
-                    file_hash: "file-abc".to_string(),
-                    file_index: 0,
-                },
-                VerifiedFileMapping {
-                    file_hash: "file-def".to_string(),
-                    file_index: 1,
-                },
-            ],
-            chunks: vec![VerifiedChunkMapping {
-                chunk_hash: "chunk-1".to_string(),
-                xorb_hash: "xorb-1".to_string(),
-                chunk_index: 0,
-            }],
-        });
+        index
+            .register_verified_shard(VerifiedShardRegistration {
+                shard_id: "shard-001".to_string(),
+                files: vec![
+                    VerifiedFileMapping {
+                        file_hash: "file-abc".to_string(),
+                        file_index: 0,
+                        file_size: 10,
+                    },
+                    VerifiedFileMapping {
+                        file_hash: "file-def".to_string(),
+                        file_index: 1,
+                        file_size: 20,
+                    },
+                ],
+                chunks: vec![VerifiedChunkMapping {
+                    chunk_hash: "chunk-1".to_string(),
+                    xorb_hash: "xorb-1".to_string(),
+                    chunk_index: 0,
+                }],
+            })
+            .unwrap();
 
         let refs = index.get_file_refs("file-def").unwrap();
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].shard_id, "shard-001");
         assert_eq!(refs[0].file_index, 1);
+        assert_eq!(refs[0].file_size, 20);
+        assert_eq!(index.get_file_size("file-def"), Some(20));
 
         assert_eq!(
             index.get_xorb_for_chunk("chunk-1"),
@@ -336,11 +409,12 @@ mod tests {
             files: vec![VerifiedFileMapping {
                 file_hash: "file-abc".to_string(),
                 file_index: 0,
+                file_size: 10,
             }],
             chunks: vec![],
         };
-        index.register_verified_shard(reg.clone());
-        index.register_verified_shard(reg);
+        index.register_verified_shard(reg.clone()).unwrap();
+        index.register_verified_shard(reg).unwrap();
 
         let refs = index.get_file_refs("file-abc").unwrap();
         assert_eq!(refs.len(), 1);
@@ -351,31 +425,35 @@ mod tests {
         let index = MetadataIndex::new();
 
         let shard_id = "shard-001".to_string();
-        index.register_verified_shard(VerifiedShardRegistration {
-            shard_id: shard_id.clone(),
-            files: vec![
-                VerifiedFileMapping {
-                    file_hash: "file-abc".to_string(),
-                    file_index: 0,
-                },
-                VerifiedFileMapping {
-                    file_hash: "file-def".to_string(),
-                    file_index: 1,
-                },
-            ],
-            chunks: vec![
-                VerifiedChunkMapping {
-                    chunk_hash: "chunk-1".to_string(),
-                    xorb_hash: "xorb-1".to_string(),
-                    chunk_index: 0,
-                },
-                VerifiedChunkMapping {
-                    chunk_hash: "chunk-2".to_string(),
-                    xorb_hash: "xorb-1".to_string(),
-                    chunk_index: 1,
-                },
-            ],
-        });
+        index
+            .register_verified_shard(VerifiedShardRegistration {
+                shard_id: shard_id.clone(),
+                files: vec![
+                    VerifiedFileMapping {
+                        file_hash: "file-abc".to_string(),
+                        file_index: 0,
+                        file_size: 10,
+                    },
+                    VerifiedFileMapping {
+                        file_hash: "file-def".to_string(),
+                        file_index: 1,
+                        file_size: 20,
+                    },
+                ],
+                chunks: vec![
+                    VerifiedChunkMapping {
+                        chunk_hash: "chunk-1".to_string(),
+                        xorb_hash: "xorb-1".to_string(),
+                        chunk_index: 0,
+                    },
+                    VerifiedChunkMapping {
+                        chunk_hash: "chunk-2".to_string(),
+                        xorb_hash: "xorb-1".to_string(),
+                        chunk_index: 1,
+                    },
+                ],
+            })
+            .unwrap();
 
         // Verify file-to-shards mapping
         let shards = index.get_shards_for_file("file-abc");
@@ -398,32 +476,38 @@ mod tests {
         let index = MetadataIndex::new();
 
         // Register first shard
-        index.register_verified_shard(VerifiedShardRegistration {
-            shard_id: "shard-001".to_string(),
-            files: vec![VerifiedFileMapping {
-                file_hash: "file-a".to_string(),
-                file_index: 0,
-            }],
-            chunks: vec![VerifiedChunkMapping {
-                chunk_hash: "chunk-1".to_string(),
-                xorb_hash: "xorb-1".to_string(),
-                chunk_index: 0,
-            }],
-        });
+        index
+            .register_verified_shard(VerifiedShardRegistration {
+                shard_id: "shard-001".to_string(),
+                files: vec![VerifiedFileMapping {
+                    file_hash: "file-a".to_string(),
+                    file_index: 0,
+                    file_size: 10,
+                }],
+                chunks: vec![VerifiedChunkMapping {
+                    chunk_hash: "chunk-1".to_string(),
+                    xorb_hash: "xorb-1".to_string(),
+                    chunk_index: 0,
+                }],
+            })
+            .unwrap();
 
         // Register second shard with same file
-        index.register_verified_shard(VerifiedShardRegistration {
-            shard_id: "shard-002".to_string(),
-            files: vec![VerifiedFileMapping {
-                file_hash: "file-a".to_string(),
-                file_index: 0,
-            }],
-            chunks: vec![VerifiedChunkMapping {
-                chunk_hash: "chunk-2".to_string(),
-                xorb_hash: "xorb-2".to_string(),
-                chunk_index: 0,
-            }],
-        });
+        index
+            .register_verified_shard(VerifiedShardRegistration {
+                shard_id: "shard-002".to_string(),
+                files: vec![VerifiedFileMapping {
+                    file_hash: "file-a".to_string(),
+                    file_index: 0,
+                    file_size: 10,
+                }],
+                chunks: vec![VerifiedChunkMapping {
+                    chunk_hash: "chunk-2".to_string(),
+                    xorb_hash: "xorb-2".to_string(),
+                    chunk_index: 0,
+                }],
+            })
+            .unwrap();
 
         // File should be in both shards
         let shards = index.get_shards_for_file("file-a").unwrap();
@@ -433,18 +517,75 @@ mod tests {
     }
 
     #[test]
+    fn test_rejects_conflicting_file_size_without_partial_registration() {
+        let index = MetadataIndex::new();
+        index
+            .register_verified_shard(VerifiedShardRegistration {
+                shard_id: "shard-001".to_string(),
+                files: vec![VerifiedFileMapping {
+                    file_hash: "file-a".to_string(),
+                    file_index: 0,
+                    file_size: 10,
+                }],
+                chunks: vec![VerifiedChunkMapping {
+                    chunk_hash: "chunk-1".to_string(),
+                    xorb_hash: "xorb-1".to_string(),
+                    chunk_index: 0,
+                }],
+            })
+            .unwrap();
+
+        let error = index
+            .register_verified_shard(VerifiedShardRegistration {
+                shard_id: "shard-002".to_string(),
+                files: vec![
+                    VerifiedFileMapping {
+                        file_hash: "file-new".to_string(),
+                        file_index: 0,
+                        file_size: 5,
+                    },
+                    VerifiedFileMapping {
+                        file_hash: "file-a".to_string(),
+                        file_index: 1,
+                        file_size: 11,
+                    },
+                ],
+                chunks: vec![VerifiedChunkMapping {
+                    chunk_hash: "chunk-2".to_string(),
+                    xorb_hash: "xorb-2".to_string(),
+                    chunk_index: 0,
+                }],
+            })
+            .expect_err("same hash with a different verified size must be rejected");
+
+        assert!(matches!(
+            error,
+            IndexRegistrationError::FileSizeConflict {
+                existing_size: 10,
+                new_size: 11,
+                ..
+            }
+        ));
+        assert_eq!(index.get_file_size("file-a"), Some(10));
+        assert!(index.get_file_refs("file-new").is_none());
+        assert!(!index.chunk_exists("chunk-2"));
+    }
+
+    #[test]
     fn test_chunk_exists() {
         let index = MetadataIndex::new();
 
-        index.register_verified_shard(VerifiedShardRegistration {
-            shard_id: "shard-001".to_string(),
-            files: vec![],
-            chunks: vec![VerifiedChunkMapping {
-                chunk_hash: "chunk-1".to_string(),
-                xorb_hash: "xorb-1".to_string(),
-                chunk_index: 0,
-            }],
-        });
+        index
+            .register_verified_shard(VerifiedShardRegistration {
+                shard_id: "shard-001".to_string(),
+                files: vec![],
+                chunks: vec![VerifiedChunkMapping {
+                    chunk_hash: "chunk-1".to_string(),
+                    xorb_hash: "xorb-1".to_string(),
+                    chunk_index: 0,
+                }],
+            })
+            .unwrap();
 
         assert!(index.chunk_exists("chunk-1"));
         assert!(!index.chunk_exists("chunk-2"));

@@ -307,7 +307,13 @@ impl CommitService {
         })?;
 
         match self.cas_client.head_blob(&lfs_op.oid, internal_token).await {
-            Ok(_) => {}
+            Ok(blob_state) if blob_state.size == lfs_op.size => {}
+            Ok(blob_state) => {
+                return Err(CommitServiceError::UnprocessableEntity(format!(
+                    "LFS file size mismatch for {}: commit declares {} bytes, CAS reports {} bytes",
+                    lfs_op.path, lfs_op.size, blob_state.size
+                )));
+            }
             Err(crate::error::HubError::NotFound(_)) => {
                 return Err(CommitServiceError::UnprocessableEntity(format!(
                     "LFS file not found in CAS: {}",
@@ -512,6 +518,31 @@ mod tests {
         ) -> Result<(), CasUploadError> {
             assert!(token.starts_with("xet_"));
             Ok(())
+        }
+    }
+
+    struct SizedBlobCasClient {
+        size: u64,
+    }
+
+    #[async_trait]
+    impl CasClientTrait for SizedBlobCasClient {
+        async fn head_blob(&self, oid: &str, _internal_token: &str) -> Result<BlobState, HubError> {
+            Ok(BlobState {
+                state: "raw_only".to_string(),
+                xet_file_id: None,
+                size: self.size,
+                sha256: oid.to_string(),
+            })
+        }
+
+        async fn proxy_lfs_upload(
+            &self,
+            _oid: &str,
+            _data: bytes::Bytes,
+            _token: &str,
+        ) -> Result<(), CasUploadError> {
+            unreachable!("LFS size tests do not upload inline files")
         }
     }
 
@@ -722,9 +753,9 @@ mod tests {
 
     fn err_message(err: CommitServiceError) -> String {
         match err {
-            CommitServiceError::Validation(message) | CommitServiceError::Internal(message) => {
-                message
-            }
+            CommitServiceError::Validation(message)
+            | CommitServiceError::UnprocessableEntity(message)
+            | CommitServiceError::Internal(message) => message,
             other => panic!("unexpected commit error: {other:?}"),
         }
     }
@@ -893,5 +924,42 @@ mod tests {
 
         assert!(matches!(err, CommitServiceError::Validation(_)));
         assert!(err_message(err).contains("supported metadata range"));
+    }
+
+    #[tokio::test]
+    async fn commit_requires_declared_lfs_size_to_match_cas() {
+        let metadata: Arc<dyn MetadataStore> =
+            Arc::new(SqliteMetadataStore::in_memory().await.unwrap());
+        metadata
+            .create_repo("owner", "size-mismatch", RepoType::Model, false)
+            .await
+            .unwrap();
+        let service = CommitService::new(
+            metadata,
+            Arc::new(SizedBlobCasClient { size: 42 }),
+            signer(),
+        );
+        let body = format!(
+            "{{\"key\":\"header\",\"value\":{{\"summary\":\"mismatch\",\"parentRevision\":null}}}}\n\
+             {{\"key\":\"lfsFile\",\"value\":{{\"path\":\"model.bin\",\"oid\":\"{}\",\"size\":41}}}}",
+            "a".repeat(64)
+        );
+
+        let err = service
+            .commit(CommitRequest {
+                username: "owner",
+                namespace: "owner",
+                repo_name: "size-mismatch",
+                revision: "main",
+                repo_type: RepoType::Model,
+                body: &body,
+            })
+            .await
+            .expect_err("declared and verified LFS sizes must match");
+
+        assert!(matches!(err, CommitServiceError::UnprocessableEntity(_)));
+        let message = err_message(err);
+        assert!(message.contains("commit declares 41"));
+        assert!(message.contains("CAS reports 42"));
     }
 }
