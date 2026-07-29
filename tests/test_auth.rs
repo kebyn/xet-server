@@ -85,7 +85,7 @@ fn test_verify_expired_token() {
         repo_type: "model".to_string(),
         revision: "main".to_string(),
         exp: 1, // Expired
-        iat: 1,
+        iat: 0,
         kid: kid.to_string(),
         token_type: "user".to_string(),
         oid: None,

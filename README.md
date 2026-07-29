@@ -351,9 +351,9 @@ CAS 对象访问是 content-capability based：持有有效 CAS token 的客户�
 | `HUB_PUBLIC_BASE_URL` | 公共访问 URL | `http://{host}:{port}` |
 | `HUB_PRIVATE_KEY_PATH` | Ed25519 私钥路径 | `private_key.pem` |
 | `HUB_KID` | 密钥标识符 | `hub-key-1` |
-| `HUB_TOKEN_TTL_SECONDS` | 令牌有效期（秒） | `3600` |
-| `HUB_PROXY_TOKEN_TTL_SECONDS` | Proxy Token 有效期（秒） | `300` (5分钟) |
-| `HUB_INTERNAL_TOKEN_TTL_SECONDS` | 内部令牌有效期（秒，用于 Hub→CAS internal endpoints/GC） | `86400` (24小时) |
+| `HUB_TOKEN_TTL_SECONDS` | 令牌有效期（秒，范围 `1..=604800`） | `3600` |
+| `HUB_PROXY_TOKEN_TTL_SECONDS` | Proxy Token 有效期（秒，范围 `1..=604800`） | `300` (5分钟) |
+| `HUB_INTERNAL_TOKEN_TTL_SECONDS` | 内部令牌有效期（秒，用于 Hub→CAS internal endpoints，范围 `1..=604800`） | `86400` (24小时) |
 | `HUB_SQLITE_PATH` | 元数据数据库路径 | `hub.db` |
 | `HUB_DB_POOL_SIZE` | SQLite 连接池大小 | `5` |
 | `CAS_BASE_URL` | CAS 服务器 URL | `http://localhost:8081` |

@@ -1,6 +1,7 @@
 use std::sync::Mutex;
 
 use hub_api::config::HubConfig;
+use xet_auth_types::MAX_TOKEN_LIFETIME_SECS;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -125,6 +126,30 @@ fn test_try_from_file_or_env_rejects_zero_cas_limits_and_timeouts() {
         let scoped = ScopedEnv::set(key, "0");
         let err = HubConfig::try_from_file_or_env().expect_err("zero value should be rejected");
         assert!(err.contains(key), "unexpected error for {key}: {err}");
+        drop(scoped);
+    }
+}
+
+#[test]
+fn test_try_from_file_or_env_rejects_token_ttl_above_wire_limit() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let _config_file = ScopedEnv::remove("HUB_CONFIG_FILE");
+    let _public_base_url = ScopedEnv::remove("HUB_PUBLIC_BASE_URL");
+    let _cas_base_url = ScopedEnv::remove("CAS_BASE_URL");
+    let invalid_ttl = (MAX_TOKEN_LIFETIME_SECS + 1).to_string();
+
+    for key in [
+        "HUB_TOKEN_TTL_SECONDS",
+        "HUB_PROXY_TOKEN_TTL_SECONDS",
+        "HUB_INTERNAL_TOKEN_TTL_SECONDS",
+    ] {
+        let scoped = ScopedEnv::set(key, &invalid_ttl);
+        let err = HubConfig::try_from_file_or_env()
+            .expect_err("token TTL above the wire limit should be rejected");
+        assert!(
+            err.contains(key) && err.contains(&MAX_TOKEN_LIFETIME_SECS.to_string()),
+            "unexpected error for {key}: {err}"
+        );
         drop(scoped);
     }
 }

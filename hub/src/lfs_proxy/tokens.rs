@@ -141,7 +141,7 @@ mod tests {
         XetSigner::new(signing_key, "test-key", 3600, 300)
     }
 
-    fn sign_proxy_token_with_type(token_type: &str) -> (String, XetSigner) {
+    fn sign_raw_proxy_token(token_type: &str, scope: &str, operation: &str) -> (String, XetSigner) {
         let signing_key = SigningKey::generate(&mut OsRng);
         let signer = XetSigner::new(signing_key.clone(), "test-key", 3600, 300);
         let now = std::time::SystemTime::now()
@@ -156,7 +156,7 @@ mod tests {
         });
         let claims = serde_json::json!({
             "sub": "testuser",
-            "scope": "lfs-upload",
+            "scope": scope,
             "repo_id": "",
             "repo_type": "",
             "revision": "",
@@ -165,7 +165,7 @@ mod tests {
             "kid": "test-key",
             "token_type": token_type,
             "oid": "abc123def456",
-            "operation": "upload",
+            "operation": operation,
         });
 
         let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap());
@@ -228,16 +228,20 @@ mod tests {
     #[test]
     fn proxy_token_with_wrong_scope_is_rejected() {
         let signer = signer();
-        let (token, _) = signer
-            .sign_proxy_claims_for_test(
-                "testuser",
-                "lfs-upload",
-                "abc123def456",
-                "download",
-                "",
-                "",
-            )
-            .unwrap();
+        assert!(
+            signer
+                .sign_proxy_claims_for_test(
+                    "testuser",
+                    "lfs-upload",
+                    "abc123def456",
+                    "download",
+                    "",
+                    "",
+                )
+                .is_err(),
+            "production signer must reject a scope/operation mismatch"
+        );
+        let (token, signer) = sign_raw_proxy_token("proxy", "lfs-upload", "download");
 
         let result = validate_proxy_token(&token, "abc123def456", "download", &signer);
 
@@ -297,7 +301,7 @@ mod tests {
 
     #[test]
     fn proxy_token_with_wrong_token_type_is_rejected() {
-        let (tampered_token, signer) = sign_proxy_token_with_type("user");
+        let (tampered_token, signer) = sign_raw_proxy_token("user", "lfs-upload", "upload");
 
         let result = validate_proxy_token(&tampered_token, "abc123def456", "upload", &signer);
 

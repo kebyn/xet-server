@@ -15,12 +15,17 @@ pub struct XetSigner {
     kid: String,
     ttl_seconds: u64,
     proxy_ttl_seconds: u64,
-    /// C1 fix: Configurable TTL for internal tokens (Hub-to-CAS communication).
-    /// Default: 86400 seconds (24 hours). GC runs hourly, so 60s TTL was too short.
+    /// Configurable TTL for Hub-to-CAS internal tokens.
+    /// Default: 86400 seconds (24 hours).
     internal_ttl_seconds: u64,
 }
 
 impl XetSigner {
+    fn expiration(now: u64, ttl_seconds: u64) -> Result<u64, String> {
+        now.checked_add(ttl_seconds)
+            .ok_or_else(|| "Token expiration timestamp overflow".to_string())
+    }
+
     /// Create a new XetSigner from a PEM-encoded private key
     pub fn from_pem(
         pem_bytes: &[u8],
@@ -32,7 +37,6 @@ impl XetSigner {
     }
 
     /// Create a new XetSigner from a PEM-encoded private key with configurable internal token TTL.
-    /// C1 fix: Allows GC internal tokens to have longer TTL (default 24 hours).
     pub fn from_pem_with_internal_ttl(
         pem_bytes: &[u8],
         kid: &str,
@@ -70,7 +74,6 @@ impl XetSigner {
     }
 
     /// Create a new XetSigner from a raw signing key with configurable internal token TTL.
-    /// C1 fix: Allows GC internal tokens to have longer TTL.
     pub fn new_with_internal_ttl(
         signing_key: SigningKey,
         kid: &str,
@@ -89,7 +92,6 @@ impl XetSigner {
 
     /// Internal helper to sign claims and produce a token
     /// Returns (token, expiration_timestamp)
-    /// I1 fix: Return Result to propagate serialization errors instead of panicking
     fn sign_claims(&self, claims: XetClaims, kind: TokenKind) -> Result<(String, u64), String> {
         let exp = claims.exp;
 
@@ -100,8 +102,6 @@ impl XetSigner {
 
     /// Sign and create a Xet access token
     /// Returns (token, expiration_timestamp)
-    /// I1 fix: Use unwrap_or_default() for system time to avoid panic on clock issues
-    /// I2 fix: Return Result to propagate serialization errors instead of returning empty string
     pub fn sign(
         &self,
         sub: &str,
@@ -110,14 +110,11 @@ impl XetSigner {
         repo_type: &str,
         revision: &str,
     ) -> Result<(String, u64), String> {
-        // M4 fix: Reject signing if system clock is broken instead of using 0.
-        // With iat=0, the verifier's max-age check would reject the token anyway,
-        // but failing fast here gives a clearer error.
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .map_err(|_| "System clock is before UNIX_EPOCH, cannot sign tokens".to_string())?;
-        let exp = now + self.ttl_seconds;
+        let exp = Self::expiration(now, self.ttl_seconds)?;
 
         let claims = XetClaims {
             sub: sub.to_string(),
@@ -139,8 +136,6 @@ impl XetSigner {
     /// Sign and create a short-lived proxy token for LFS operations
     /// Proxy tokens are bound to a specific OID, operation (upload/download), and repository
     /// Returns (token, expiration_timestamp)
-    /// I1 fix: Use unwrap_or_default() for system time to avoid panic on clock issues
-    /// I2 fix: Return Result to propagate serialization errors instead of returning empty string
     pub fn sign_proxy(
         &self,
         sub: &str,
@@ -149,13 +144,12 @@ impl XetSigner {
         repo_id: &str,
         repo_type: &str,
     ) -> Result<(String, u64), String> {
-        // M4 fix: Reject signing if system clock is broken
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .map_err(|_| "System clock is before UNIX_EPOCH, cannot sign tokens".to_string())?;
         // Proxy tokens use configurable TTL (default 300s / 5 minutes)
-        let exp = now + self.proxy_ttl_seconds;
+        let exp = Self::expiration(now, self.proxy_ttl_seconds)?;
 
         let claims = XetClaims {
             sub: sub.to_string(),
@@ -188,7 +182,7 @@ impl XetSigner {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .map_err(|_| "System clock is before UNIX_EPOCH, cannot sign tokens".to_string())?;
-        let exp = now + self.proxy_ttl_seconds;
+        let exp = Self::expiration(now, self.proxy_ttl_seconds)?;
 
         let claims = XetClaims {
             sub: sub.to_string(),
@@ -208,17 +202,14 @@ impl XetSigner {
     }
 
     /// Sign and create an internal token for Hub-to-CAS communication
-    /// Internal tokens are short-lived (60 seconds) and can only access /internal/* endpoints
+    /// Internal tokens can only access /internal/* endpoints.
     /// Returns (token, expiration_timestamp)
-    /// I1 fix: Use unwrap_or_default() for system time to avoid panic on clock issues
-    /// I2 fix: Return Result to propagate serialization errors instead of returning empty string
     pub fn sign_internal(&self) -> Result<(String, u64), String> {
-        // M4 fix: Reject signing if system clock is broken
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .map_err(|_| "System clock is before UNIX_EPOCH, cannot sign tokens".to_string())?;
-        let exp = now + self.internal_ttl_seconds; // C1 fix: Configurable TTL (was hardcoded 60s)
+        let exp = Self::expiration(now, self.internal_ttl_seconds)?;
 
         let claims = XetClaims {
             sub: "hub-service".to_string(),
@@ -234,7 +225,6 @@ impl XetSigner {
             operation: None,
         };
 
-        // C2 fix: Use internal_ prefix to distinguish from user tokens
         self.sign_claims(claims, TokenKind::Internal)
     }
 
@@ -696,5 +686,34 @@ mod tests {
             signer.verify_xet_token(&token).is_none(),
             "token with non-EdDSA header alg should not verify"
         );
+    }
+
+    #[test]
+    fn signing_rejects_expiration_overflow() {
+        let signer = XetSigner::new_with_internal_ttl(
+            generate_test_key(),
+            "overflow-key",
+            u64::MAX,
+            u64::MAX,
+            u64::MAX,
+        );
+
+        assert!(
+            signer
+                .sign("user", "read", "namespace/model", "model", "main")
+                .is_err()
+        );
+        assert!(
+            signer
+                .sign_proxy(
+                    "user",
+                    "0123456789abcdef",
+                    "download",
+                    "namespace/model",
+                    "model",
+                )
+                .is_err()
+        );
+        assert!(signer.sign_internal().is_err());
     }
 }

@@ -52,6 +52,9 @@ pub enum TokenKind {
     Internal,
 }
 
+/// Maximum lifetime accepted by the shared token wire contract.
+pub const MAX_TOKEN_LIFETIME_SECS: u64 = 7 * 24 * 3600;
+
 impl TokenKind {
     pub fn prefix(self) -> &'static str {
         match self {
@@ -121,6 +124,36 @@ fn decode_header(encoded: &str) -> Result<JwtHeader, TokenWireError> {
     Ok(header)
 }
 
+fn validate_claims_for_kind(claims: &XetClaims, kind: TokenKind) -> Result<(), TokenWireError> {
+    if claims.token_type != kind.token_type() || claims.kid.is_empty() {
+        return Err(TokenWireError::InvalidToken);
+    }
+
+    let lifetime = claims
+        .exp
+        .checked_sub(claims.iat)
+        .ok_or(TokenWireError::InvalidToken)?;
+    if lifetime == 0 || lifetime > MAX_TOKEN_LIFETIME_SECS {
+        return Err(TokenWireError::InvalidToken);
+    }
+
+    if kind == TokenKind::Proxy {
+        let oid = claims.oid.as_deref().filter(|oid| !oid.trim().is_empty());
+        let operation = claims.operation.as_deref();
+        let expected_scope = match operation {
+            Some("upload") => "lfs-upload",
+            Some("download") => "lfs-download",
+            _ => return Err(TokenWireError::InvalidToken),
+        };
+
+        if oid.is_none() || claims.scope != expected_scope {
+            return Err(TokenWireError::InvalidToken);
+        }
+    }
+
+    Ok(())
+}
+
 /// Read the unverified `kid` from a structurally valid token header.
 ///
 /// The returned value is only a key-selection hint. Callers must still verify
@@ -135,9 +168,7 @@ pub fn sign_claims(
     signing_key: &SigningKey,
     kind: TokenKind,
 ) -> Result<String, TokenWireError> {
-    if claims.token_type != kind.token_type() {
-        return Err(TokenWireError::InvalidToken);
-    }
+    validate_claims_for_kind(claims, kind)?;
 
     let header = JwtHeader {
         alg: "EdDSA".to_string(),
@@ -205,7 +236,6 @@ pub fn verify_token_any_kind(
     if claims.token_type != kind.token_type() {
         return Err(TokenWireError::InvalidToken);
     }
-
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| TokenWireError::InvalidToken)?
@@ -214,7 +244,6 @@ pub fn verify_token_any_kind(
         return Err(TokenWireError::Expired);
     }
 
-    const MAX_TOKEN_LIFETIME_SECS: u64 = 7 * 24 * 3600;
     if claims.iat > now {
         return Err(TokenWireError::InvalidToken);
     }
@@ -222,15 +251,7 @@ pub fn verify_token_any_kind(
         return Err(TokenWireError::Expired);
     }
 
-    if kind == TokenKind::Proxy {
-        let valid_proxy_scope = claims
-            .scope
-            .split_whitespace()
-            .all(|scope| scope.starts_with("lfs-"));
-        if !valid_proxy_scope {
-            return Err(TokenWireError::InvalidToken);
-        }
-    }
+    validate_claims_for_kind(&claims, kind)?;
 
     Ok((kind, claims))
 }
@@ -282,6 +303,24 @@ mod tests {
         format!(
             "{}{}.{}",
             TokenKind::User.prefix(),
+            input,
+            URL_SAFE_NO_PAD.encode(sig.to_bytes())
+        )
+    }
+
+    fn sign_raw_claims(signing_key: &SigningKey, claims: &XetClaims, kind: TokenKind) -> String {
+        let header = serde_json::json!({
+            "alg": "EdDSA",
+            "typ": "JWT",
+            "kid": claims.kid,
+        });
+        let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap());
+        let claims_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(claims).unwrap());
+        let input = format!("{}.{}", header_b64, claims_b64);
+        let sig = signing_key.sign(input.as_bytes());
+        format!(
+            "{}{}.{}",
+            kind.prefix(),
             input,
             URL_SAFE_NO_PAD.encode(sig.to_bytes())
         )
@@ -347,7 +386,7 @@ mod tests {
         let mut claims = claims(TokenKind::User, kid);
         claims.iat = now;
         claims.exp = now;
-        let token = sign_claims(&claims, &signing_key, TokenKind::User).unwrap();
+        let token = sign_raw_claims(&signing_key, &claims, TokenKind::User);
 
         let err = verify_token(&token, &signing_key.verifying_key(), kid, TokenKind::User)
             .expect_err("exp equal to current time must be rejected");
@@ -366,5 +405,62 @@ mod tests {
             .expect_err("non-EdDSA token must be rejected");
 
         assert_eq!(err, TokenWireError::InvalidToken);
+    }
+
+    #[test]
+    fn proxy_tokens_require_complete_consistent_capabilities() {
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let kid = "kid-1";
+
+        let mut invalid_claims = Vec::new();
+
+        let mut missing_oid = claims(TokenKind::Proxy, kid);
+        missing_oid.oid = None;
+        invalid_claims.push(missing_oid);
+
+        let mut missing_operation = claims(TokenKind::Proxy, kid);
+        missing_operation.operation = None;
+        invalid_claims.push(missing_operation);
+
+        let mut unknown_operation = claims(TokenKind::Proxy, kid);
+        unknown_operation.operation = Some("delete".to_string());
+        unknown_operation.scope = "lfs-delete".to_string();
+        invalid_claims.push(unknown_operation);
+
+        let mut mismatched_scope = claims(TokenKind::Proxy, kid);
+        mismatched_scope.operation = Some("upload".to_string());
+        invalid_claims.push(mismatched_scope);
+
+        for invalid in invalid_claims {
+            assert_eq!(
+                sign_claims(&invalid, &signing_key, TokenKind::Proxy),
+                Err(TokenWireError::InvalidToken)
+            );
+
+            let token = sign_raw_claims(&signing_key, &invalid, TokenKind::Proxy);
+            assert_eq!(
+                verify_token(&token, &signing_key.verifying_key(), kid, TokenKind::Proxy),
+                Err(TokenWireError::InvalidToken)
+            );
+        }
+    }
+
+    #[test]
+    fn tokens_longer_than_maximum_lifetime_are_rejected_immediately() {
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let kid = "kid-1";
+        let mut claims = claims(TokenKind::User, kid);
+        claims.exp = claims.iat + MAX_TOKEN_LIFETIME_SECS + 1;
+
+        assert_eq!(
+            sign_claims(&claims, &signing_key, TokenKind::User),
+            Err(TokenWireError::InvalidToken)
+        );
+
+        let token = sign_raw_claims(&signing_key, &claims, TokenKind::User);
+        assert_eq!(
+            verify_token(&token, &signing_key.verifying_key(), kid, TokenKind::User),
+            Err(TokenWireError::InvalidToken)
+        );
     }
 }

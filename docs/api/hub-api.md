@@ -625,7 +625,7 @@ Authorization: Bearer hf_xxx
 **说明**：
 - 读令牌具有 `read` 作用域
 - 写令牌具有 `write` 作用域
-- 令牌有效期由 Hub 的 `HUB_TOKEN_TTL_SECONDS` 配置决定（默认 3600 秒）
+- 令牌有效期由 Hub 的 `HUB_TOKEN_TTL_SECONDS` 配置决定（默认 3600 秒，最大 604800 秒/7 天）
 
 **示例**：
 ```bash
@@ -744,6 +744,8 @@ curl -X POST "http://localhost:8080/api/models/my-org/my-model/preupload/main" \
 LFS 代理 API 将 Git LFS 请求代理到 CAS Server。支持标准 LFS 端点和 Git-style LFS 端点。
 
 **授权边界**：LFS 对象字节路径是 content-hash capability。Hub 会校验用户是否具备执行 batch operation 所需的 Hub scope，并签发绑定 OID 和 operation 的 `proxy_xxx` token；对象上传/下载阶段只验证该 proxy token，不校验 OID 是否属于 URL 中的 repo。私有 repo 的 OID 由 tree、resolve 和 repo metadata API 保护。
+
+Proxy token 的 OID 必须非空，operation 只能是 `upload` 或 `download`，scope 必须分别精确为 `lfs-upload` 或 `lfs-download`；缺失字段、未知 operation、scope 不匹配或附加 scope 都会被拒绝。
 
 ### 标准 LFS 端点
 

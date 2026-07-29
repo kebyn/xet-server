@@ -397,7 +397,12 @@ fn proxy_tokens_with_non_lfs_scopes_are_rejected_across_hub_and_cas() {
 
     for invalid_scope in ["read", "read lfs-download"] {
         let proxy_claims = claims(TokenKind::Proxy, kid, invalid_scope);
-        let proxy_token = sign_proxy_claims_token(&proxy_claims, &keypair).unwrap();
+        assert_eq!(
+            sign_proxy_claims_token(&proxy_claims, &keypair),
+            Err(AuthError::InvalidToken)
+        );
+        let proxy_token =
+            sign_raw_token(&signing_key, &proxy_claims, "proxy_", "EdDSA", "JWT", kid);
 
         assert_eq!(
             verify_token(

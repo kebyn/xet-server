@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::str::FromStr;
+use xet_auth_types::MAX_TOKEN_LIFETIME_SECS;
 
 /// Server configuration settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,10 +66,9 @@ pub struct AuthSettings {
     /// Configure via `HUB_PROXY_TOKEN_TTL_SECONDS` environment variable.
     /// Default: 300 (5 minutes).
     pub proxy_token_ttl_seconds: u64,
-    /// C1 fix: TTL for internal tokens (Hub-to-CAS communication, used by GC).
+    /// TTL for internal tokens used in Hub-to-CAS communication.
     /// Configure via `HUB_INTERNAL_TOKEN_TTL_SECONDS` environment variable.
-    /// Default: 86400 (24 hours). Previous hardcoded value was 60 seconds,
-    /// which caused GC to fail because GC runs hourly and tokens expired before next run.
+    /// Default: 86400 (24 hours).
     pub internal_token_ttl_seconds: u64,
 }
 
@@ -79,7 +79,7 @@ impl Default for AuthSettings {
             kid: "hub-key-1".to_string(),
             token_ttl_seconds: 3600,
             proxy_token_ttl_seconds: 300,
-            internal_token_ttl_seconds: 86400, // C1 fix: 24 hours (was hardcoded 60s)
+            internal_token_ttl_seconds: 86400,
         }
     }
 }
@@ -222,14 +222,30 @@ impl HubConfig {
         if self.auth.proxy_token_ttl_seconds == 0 {
             return Err("HUB_PROXY_TOKEN_TTL_SECONDS must be > 0 (got 0). Proxy tokens would expire immediately.".to_string());
         }
-        // C1 fix: Validate internal token TTL (must be long enough for GC interval)
         if self.auth.internal_token_ttl_seconds == 0 {
             return Err("HUB_INTERNAL_TOKEN_TTL_SECONDS must be > 0 (got 0). Internal tokens would expire immediately.".to_string());
+        }
+        for (key, ttl) in [
+            ("HUB_TOKEN_TTL_SECONDS", self.auth.token_ttl_seconds),
+            (
+                "HUB_PROXY_TOKEN_TTL_SECONDS",
+                self.auth.proxy_token_ttl_seconds,
+            ),
+            (
+                "HUB_INTERNAL_TOKEN_TTL_SECONDS",
+                self.auth.internal_token_ttl_seconds,
+            ),
+        ] {
+            if ttl > MAX_TOKEN_LIFETIME_SECS {
+                return Err(format!(
+                    "{key} must be <= {MAX_TOKEN_LIFETIME_SECS} seconds (7 days), got {ttl}."
+                ));
+            }
         }
         if self.auth.internal_token_ttl_seconds < 3600 {
             tracing::warn!(
                 "HUB_INTERNAL_TOKEN_TTL_SECONDS is {} (less than 1 hour). \
-                GC runs hourly by default. Consider increasing to at least 86400 (24 hours).",
+                Frequent internal-token refresh may be required.",
                 self.auth.internal_token_ttl_seconds
             );
         }
