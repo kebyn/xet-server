@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  quality:
+    name: Format, lint, and test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Run all tests
+        run: cargo test --workspace --all-targets
+      - name: Run documentation tests
+        run: cargo test --workspace --doc
+
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      # cargo-audit 0.22 is required for current CVSS 4.0 advisories and has a
+      # newer MSRV than the server. It only reads Cargo.lock, so keep this
+      # toolchain isolated from the Rust 1.85 build and test job above.
+      - name: Install audit toolchain
+        run: rustup toolchain install 1.88.0 --profile minimal
+      - name: Install cargo-audit
+        run: cargo +1.88.0 install cargo-audit --version 0.22.2 --locked
+      - name: Audit dependencies
+        run: cargo +1.88.0 audit
