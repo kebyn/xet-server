@@ -543,20 +543,12 @@ impl MetadataStore for SqliteMetadataStore {
         entries: &[FileEntry],
         expected_parent: Option<&str>,
     ) -> Result<(), MetadataError> {
-        // S3 NOTE: Manual transaction control is necessary for BEGIN IMMEDIATE,
-        // which sqlx's Transaction API doesn't directly support.
-        // Tradeoff: If panic occurs between BEGIN and COMMIT/ROLLBACK, the connection
-        // may return to pool with an open transaction. However, sqlx will discard
-        // connections that error, and SQLite will auto-rollback when connection closes.
-        let mut conn = self
+        // BEGIN IMMEDIATE acquires SQLite's single-writer lock before checking HEAD.
+        // SQLx's Transaction queues a rollback on Drop, so cancellation cannot
+        // return a connection with an open transaction to the pool.
+        let mut tx = self
             .pool
-            .acquire()
-            .await
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
-
-        // Use IMMEDIATE to acquire write lock upfront (SQLite only supports one writer)
-        sqlx::query("BEGIN IMMEDIATE")
-            .execute(&mut *conn)
+            .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
@@ -568,7 +560,7 @@ impl MetadataStore for SqliteMetadataStore {
                 "SELECT commit_id FROM heads WHERE repo_id = ?1"
             )
             .bind(rev.repo_id)
-            .fetch_optional(&mut *conn)
+            .fetch_optional(&mut *tx)
             .await
             .map_err(|e| MetadataError::DatabaseError(e.to_string()))?
             .map(|r| r.try_get::<String, _>(0))
@@ -591,7 +583,7 @@ impl MetadataStore for SqliteMetadataStore {
             .bind(&rev.message)
             .bind(&rev.author)
             .bind(rev.created_at)
-            .execute(&mut *conn)
+            .execute(&mut *tx)
             .await
             .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
@@ -608,7 +600,7 @@ impl MetadataStore for SqliteMetadataStore {
                 .bind(size)
                 .bind(&entry.cas_hash)
                 .bind(is_lfs_int)
-                .execute(&mut *conn)
+                .execute(&mut *tx)
                 .await
                 .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
             }
@@ -617,7 +609,7 @@ impl MetadataStore for SqliteMetadataStore {
             sqlx::query("INSERT OR REPLACE INTO heads (repo_id, commit_id) VALUES (?1, ?2)")
                 .bind(rev.repo_id)
                 .bind(&rev.commit_id)
-                .execute(&mut *conn)
+                .execute(&mut *tx)
                 .await
                 .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
@@ -626,15 +618,17 @@ impl MetadataStore for SqliteMetadataStore {
 
         match result {
             Ok(()) => {
-                sqlx::query("COMMIT")
-                    .execute(&mut *conn)
+                tx.commit()
                     .await
                     .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
                 Ok(())
             }
             Err(e) => {
-                // Explicit ROLLBACK before returning error
-                sqlx::query("ROLLBACK").execute(&mut *conn).await.ok();
+                tx.rollback().await.map_err(|rollback_error| {
+                    MetadataError::DatabaseError(format!(
+                        "Commit failed ({e}); rollback failed: {rollback_error}"
+                    ))
+                })?;
                 Err(e)
             }
         }
@@ -777,5 +771,83 @@ mod tests {
             store.get_revision(repo.id, &revision.commit_id).await,
             Err(MetadataError::RevisionNotFound(_))
         ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_commit_rolls_back_before_connection_reuse() {
+        let store = std::sync::Arc::new(SqliteMetadataStore::in_memory().await.unwrap());
+        let repo = store
+            .create_repo("ns", "cancelled", RepoType::Model, false)
+            .await
+            .unwrap();
+
+        sqlx::query(
+            "CREATE TRIGGER slow_file_insert BEFORE INSERT ON file_tree BEGIN \
+             SELECT length(randomblob(64000000)); END",
+        )
+        .execute(&store.pool)
+        .await
+        .unwrap();
+
+        let revision = Revision {
+            commit_id: "cancelled-commit".to_string(),
+            repo_id: repo.id,
+            parent: None,
+            message: "cancelled".to_string(),
+            author: "ns".to_string(),
+            created_at: 1,
+        };
+        let entries = vec![FileEntry {
+            path: "slow.bin".to_string(),
+            repo_id: repo.id,
+            commit_id: revision.commit_id.clone(),
+            size: 1,
+            cas_hash: "hash".to_string(),
+            is_lfs: false,
+        }];
+
+        let task_store = store.clone();
+        let task =
+            tokio::spawn(async move { task_store.commit_atomic(&revision, &entries, None).await });
+
+        while store.pool.num_idle() != 0 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        assert!(
+            !task.is_finished(),
+            "test trigger must keep the commit in flight"
+        );
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+
+        sqlx::query("DROP TRIGGER slow_file_insert")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+
+        let replacement = Revision {
+            commit_id: "replacement-commit".to_string(),
+            repo_id: repo.id,
+            parent: None,
+            message: "replacement".to_string(),
+            author: "ns".to_string(),
+            created_at: 2,
+        };
+        store
+            .commit_atomic(&replacement, &[], None)
+            .await
+            .expect("a cancelled commit must not poison the pooled connection");
+
+        assert_eq!(
+            store.get_head(repo.id).await.unwrap().as_deref(),
+            Some("replacement-commit")
+        );
+        assert!(
+            store
+                .get_revision(repo.id, "cancelled-commit")
+                .await
+                .is_err()
+        );
     }
 }
