@@ -6,8 +6,10 @@
 use super::{FileEntry, MetadataError, MetadataStore, Repo, RepoType, Revision};
 use crate::sqlite_pool::{connect_hub_sqlite_pool, connect_in_memory_hub_sqlite_pool};
 use async_trait::async_trait;
-use sqlx::Row;
-use sqlx::sqlite::SqlitePool;
+use sqlx::pool::PoolConnection;
+use sqlx::sqlite::{SqliteConnection, SqlitePool};
+use sqlx::{Connection, Row, Sqlite};
+use std::ops::{Deref, DerefMut};
 
 /// Async SQLite-based metadata store using sqlx connection pool
 ///
@@ -15,6 +17,49 @@ use sqlx::sqlite::SqlitePool;
 /// WAL mode is enabled for better read/write concurrency.
 pub struct SqliteMetadataStore {
     pool: SqlitePool,
+}
+
+/// Prevents a cancelled transaction from returning an open SQLite transaction
+/// to the pool. Resolved transactions reuse their connection normally; an
+/// unresolved connection is closed, which makes SQLite roll back atomically.
+struct TransactionConnectionGuard {
+    connection: PoolConnection<Sqlite>,
+    resolved: bool,
+}
+
+impl TransactionConnectionGuard {
+    fn new(connection: PoolConnection<Sqlite>) -> Self {
+        Self {
+            connection,
+            resolved: false,
+        }
+    }
+
+    fn mark_resolved(&mut self) {
+        self.resolved = true;
+    }
+}
+
+impl Deref for TransactionConnectionGuard {
+    type Target = SqliteConnection;
+
+    fn deref(&self) -> &Self::Target {
+        &self.connection
+    }
+}
+
+impl DerefMut for TransactionConnectionGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.connection
+    }
+}
+
+impl Drop for TransactionConnectionGuard {
+    fn drop(&mut self) {
+        if !self.resolved {
+            self.connection.close_on_drop();
+        }
+    }
 }
 
 /// Check if a sqlx::Error represents a UNIQUE constraint violation.
@@ -422,8 +467,13 @@ impl MetadataStore for SqliteMetadataStore {
     }
 
     async fn add_file_entries(&self, entries: Vec<FileEntry>) -> Result<(), MetadataError> {
-        let mut tx = self
+        let connection = self
             .pool
+            .acquire()
+            .await
+            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+        let mut connection = TransactionConnectionGuard::new(connection);
+        let mut tx = connection
             .begin()
             .await
             .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
@@ -448,6 +498,7 @@ impl MetadataStore for SqliteMetadataStore {
         tx.commit()
             .await
             .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+        connection.mark_resolved();
 
         Ok(())
     }
@@ -544,10 +595,15 @@ impl MetadataStore for SqliteMetadataStore {
         expected_parent: Option<&str>,
     ) -> Result<(), MetadataError> {
         // BEGIN IMMEDIATE acquires SQLite's single-writer lock before checking HEAD.
-        // SQLx's Transaction queues a rollback on Drop, so cancellation cannot
-        // return a connection with an open transaction to the pool.
-        let mut tx = self
+        // If this future is cancelled, the connection guard closes the connection;
+        // SQLite then rolls back before the pool can create a replacement.
+        let connection = self
             .pool
+            .acquire()
+            .await
+            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+        let mut connection = TransactionConnectionGuard::new(connection);
+        let mut tx = connection
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
@@ -621,6 +677,7 @@ impl MetadataStore for SqliteMetadataStore {
                 tx.commit()
                     .await
                     .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+                connection.mark_resolved();
                 Ok(())
             }
             Err(e) => {
@@ -629,6 +686,7 @@ impl MetadataStore for SqliteMetadataStore {
                         "Commit failed ({e}); rollback failed: {rollback_error}"
                     ))
                 })?;
+                connection.mark_resolved();
                 Err(e)
             }
         }
@@ -775,7 +833,13 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cancelled_commit_rolls_back_before_connection_reuse() {
-        let store = std::sync::Arc::new(SqliteMetadataStore::in_memory().await.unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        let database_path = dir.path().join("cancelled-commit.db");
+        let store = std::sync::Arc::new(
+            SqliteMetadataStore::new(database_path.to_str().unwrap(), 1)
+                .await
+                .unwrap(),
+        );
         let repo = store
             .create_repo("ns", "cancelled", RepoType::Model, false)
             .await
