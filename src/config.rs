@@ -111,9 +111,9 @@ pub struct StorageConfig {
     /// For S3 or if local_path is unset, defaults to `/var/tmp/xet-uploads`.
     /// Configure via `XET_UPLOAD_TEMP_DIR` environment variable.
     pub upload_temp_dir: Option<String>,
-    /// Directory for xorb reconstruction temp files.
-    /// Used by the download reconstruction pipeline to store xorb chunks while
-    /// reassembling them into the final LFS object. Defaults to OS temp dir + "xet-reconstruction".
+    /// Directory for reconstruction and bounded remote-download temp files.
+    /// Used to stage remote xorbs, shards, and LFS objects without retaining
+    /// whole objects in memory. Defaults to OS temp dir + "xet-reconstruction".
     /// Configure via `XET_RECONSTRUCTION_TEMP_DIR` environment variable.
     pub reconstruction_temp_dir: Option<String>,
     /// I3: Enable integrity verification on LFS downloads.
@@ -142,7 +142,7 @@ impl StorageConfig {
         }
     }
 
-    /// Resolve the directory for xorb reconstruction temp files.
+    /// Resolve the directory for reconstruction and remote-download temp files.
     /// Uses configured value, falling back to OS temp dir + "xet-reconstruction".
     pub fn resolve_reconstruction_temp_dir(&self) -> PathBuf {
         if let Some(dir) = &self.reconstruction_temp_dir {

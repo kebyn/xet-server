@@ -1,7 +1,4 @@
 use actix_web::{HttpResponse, web};
-use futures_util::Stream;
-use std::pin::Pin;
-use std::task::{Context, Poll};
 use tokio_util::io::ReaderStream;
 use tracing::error;
 
@@ -57,10 +54,7 @@ pub(super) async fn serve_verified_xet_reconstruction(
         }
     };
 
-    let stream = GuardedFileStream {
-        inner: ReaderStream::new(file),
-        _guard: guard,
-    };
+    let stream = crate::util::GuardedFileStream::new(ReaderStream::new(file), guard);
     let body = actix_web::body::SizedStream::new(size, stream);
 
     GLOBAL_METRICS.record_request(200);
@@ -71,20 +65,4 @@ pub(super) async fn serve_verified_xet_reconstruction(
     HttpResponse::Ok()
         .content_type("application/octet-stream")
         .body(body)
-}
-
-struct GuardedFileStream<S> {
-    inner: S,
-    _guard: crate::util::TempPathGuard,
-}
-
-impl<S> Stream for GuardedFileStream<S>
-where
-    S: Stream<Item = Result<bytes::Bytes, std::io::Error>> + Unpin,
-{
-    type Item = Result<bytes::Bytes, std::io::Error>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Pin::new(&mut self.inner).poll_next(cx)
-    }
 }

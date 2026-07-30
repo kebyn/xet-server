@@ -68,6 +68,17 @@ pub(super) async fn serve_raw_blob(
                     ));
                 }
             };
+            if !metadata.is_file() {
+                error!("LFS storage path is not a file: {}", path.display());
+                GLOBAL_METRICS.record_request(500);
+                GLOBAL_METRICS.record_error();
+                GLOBAL_METRICS.record_latency(start);
+                return RawBlobResult::Error(HttpResponse::InternalServerError().json(
+                    serde_json::json!({
+                        "error": crate::api::INTERNAL_ERROR_MESSAGE
+                    }),
+                ));
+            }
             let file_size = metadata.len();
 
             let base_stream = ReaderStream::new(file);
@@ -106,7 +117,53 @@ pub(super) async fn serve_raw_blob(
                 )
             }
         }
-        Ok(None) => serve_raw_blob_inmemory(oid, storage, config, start).await,
+        Ok(None) => {
+            let temp_dir = config.storage.resolve_reconstruction_temp_dir();
+            let (file_size, base_stream) = match crate::util::download_to_temp_stream(
+                storage.get_ref().as_ref(),
+                &object_key,
+                &temp_dir,
+                "lfs-download",
+            )
+            .await
+            {
+                Ok(download) => download,
+                Err(StorageError::NotFound(_)) => return RawBlobResult::Missing,
+                Err(e) => {
+                    error!("Failed to stream remote LFS object {}: {}", oid, e);
+                    GLOBAL_METRICS.record_request(500);
+                    GLOBAL_METRICS.record_error();
+                    GLOBAL_METRICS.record_latency(start);
+                    return RawBlobResult::Error(HttpResponse::InternalServerError().json(
+                        serde_json::json!({
+                            "error": crate::api::INTERNAL_ERROR_MESSAGE
+                        }),
+                    ));
+                }
+            };
+
+            GLOBAL_METRICS.record_request(200);
+            GLOBAL_METRICS.record_storage_operation();
+            GLOBAL_METRICS.record_download_bytes(file_size);
+            GLOBAL_METRICS.record_latency(start);
+
+            if verify_integrity {
+                let stream = IntegrityVerifyingStream::new(base_stream, oid.to_string());
+                let body = actix_web::body::SizedStream::new(file_size, stream);
+                RawBlobResult::Served(
+                    HttpResponse::Ok()
+                        .content_type("application/octet-stream")
+                        .body(body),
+                )
+            } else {
+                let body = actix_web::body::SizedStream::new(file_size, base_stream);
+                RawBlobResult::Served(
+                    HttpResponse::Ok()
+                        .content_type("application/octet-stream")
+                        .body(body),
+                )
+            }
+        }
         Err(StorageError::NotFound(_)) => RawBlobResult::Missing,
         Err(e) => {
             error!("Failed to get path for {}: {}", oid, e);
@@ -190,78 +247,85 @@ where
     }
 }
 
-/// Fallback: serve a raw blob by loading it entirely into memory.
-/// Performs integrity verification first when configured.
-async fn serve_raw_blob_inmemory(
-    oid: &str,
-    storage: web::Data<Box<dyn StorageBackend>>,
-    config: web::Data<ServerConfig>,
-    start: std::time::Instant,
-) -> RawBlobResult {
-    let object_key = format!("lfs/objects/{}", oid);
-    let object_data = match storage.get(&object_key).await {
-        Ok(data) => {
-            GLOBAL_METRICS.record_storage_operation();
-            data
-        }
-        Err(StorageError::NotFound(_)) => return RawBlobResult::Missing,
-        Err(e) => {
-            error!("Failed to fetch object: {}", e);
-            GLOBAL_METRICS.record_request(500);
-            GLOBAL_METRICS.record_error();
-            GLOBAL_METRICS.record_latency(start);
-            return RawBlobResult::Error(HttpResponse::InternalServerError().json(
-                serde_json::json!({
-                    "error": crate::api::INTERNAL_ERROR_MESSAGE
-                }),
-            ));
-        }
-    };
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use bytes::Bytes;
+    use std::path::Path;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
-    if config.storage.verify_download_integrity {
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(&object_data);
-        let computed_hash = format!("{:x}", hasher.finalize());
+    use crate::storage::StorageResult;
 
-        if computed_hash != oid {
-            error!(
-                "Integrity check FAILED for {}: computed {} != expected {} ({} bytes)",
-                oid,
-                computed_hash,
-                oid,
-                object_data.len()
-            );
-            GLOBAL_METRICS.record_request(500);
-            GLOBAL_METRICS.record_error();
-            GLOBAL_METRICS.record_latency(start);
-            return RawBlobResult::Error(HttpResponse::InternalServerError().json(
-                serde_json::json!({
-                    "error": crate::api::INTERNAL_ERROR_MESSAGE
-                }),
-            ));
-        }
-
-        info!(
-            "Integrity check passed for {} ({} bytes)",
-            oid,
-            object_data.len()
-        );
+    struct StreamingOnlyStorage {
+        data: Bytes,
+        download_called: Arc<AtomicBool>,
     }
 
-    info!(
-        "Downloaded LFS object {} ({} bytes)",
-        oid,
-        object_data.len()
-    );
+    #[async_trait]
+    impl StorageBackend for StreamingOnlyStorage {
+        async fn put(&self, _key: &str, _data: Bytes) -> StorageResult<()> {
+            Err(StorageError::Internal("unexpected put".to_string()))
+        }
 
-    GLOBAL_METRICS.record_request(200);
-    GLOBAL_METRICS.record_download_bytes(object_data.len() as u64);
-    GLOBAL_METRICS.record_latency(start);
+        async fn get(&self, _key: &str) -> StorageResult<Bytes> {
+            Err(StorageError::Internal(
+                "unbounded get must not be used for downloads".to_string(),
+            ))
+        }
 
-    RawBlobResult::Served(
-        HttpResponse::Ok()
-            .content_type("application/octet-stream")
-            .body(object_data),
-    )
+        async fn exists(&self, _key: &str) -> StorageResult<bool> {
+            Ok(true)
+        }
+
+        async fn delete(&self, _key: &str) -> StorageResult<()> {
+            Ok(())
+        }
+
+        async fn get_size(&self, _key: &str) -> StorageResult<u64> {
+            Ok(self.data.len() as u64)
+        }
+
+        async fn download_to_path(&self, _key: &str, dest: &Path) -> StorageResult<()> {
+            self.download_called.store(true, Ordering::SeqCst);
+            tokio::fs::write(dest, &self.data)
+                .await
+                .map_err(|error| StorageError::Internal(error.to_string()))
+        }
+    }
+
+    #[actix_web::test]
+    async fn remote_lfs_download_uses_bounded_streaming_path() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let data = Bytes::from_static(b"remote LFS bytes");
+        let download_called = Arc::new(AtomicBool::new(false));
+        let storage: Box<dyn StorageBackend> = Box::new(StreamingOnlyStorage {
+            data: data.clone(),
+            download_called: download_called.clone(),
+        });
+        let mut config = ServerConfig::default();
+        config.storage.reconstruction_temp_dir =
+            Some(temp_dir.path().to_str().unwrap().to_string());
+
+        let result = serve_raw_blob(
+            &"a".repeat(64),
+            web::Data::new(storage),
+            web::Data::new(config),
+            std::time::Instant::now(),
+        )
+        .await;
+
+        let RawBlobResult::Served(response) = result else {
+            panic!("remote object should be served");
+        };
+        assert_eq!(response.status(), 200);
+        assert_eq!(
+            actix_web::body::to_bytes(response.into_body())
+                .await
+                .unwrap(),
+            data
+        );
+        assert!(download_called.load(Ordering::SeqCst));
+    }
 }

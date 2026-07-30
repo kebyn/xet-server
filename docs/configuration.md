@@ -60,7 +60,7 @@ export XET_INDEX_REBUILD_STRICT=true
 | `XET_S3_REGION` | S3 区域 | `us-east-1` | 否 |
 | `XET_S3_ENDPOINT` | S3 端点 URL | - | 否 |
 | `XET_UPLOAD_TEMP_DIR` | 流式上传临时文件目录 | 自动 | 否 |
-| `XET_RECONSTRUCTION_TEMP_DIR` | 文件重构时 xorb 下载的临时目录 | `{OS_temp}/xet-reconstruction` | 否 |
+| `XET_RECONSTRUCTION_TEMP_DIR` | 文件重构及远端 xorb/shard/LFS 有界下载的临时目录 | `{OS_temp}/xet-reconstruction` | 否 |
 
 **说明**：
 - `XET_LOCAL_PATH` 在 `XET_STORAGE_BACKEND=local` 时必需
@@ -68,7 +68,7 @@ export XET_INDEX_REBUILD_STRICT=true
 - `XET_UPLOAD_TEMP_DIR` 默认值：
   - 本地存储：`{XET_LOCAL_PATH}/.tmp`（同一文件系统，支持原子重命名）
   - S3 存储：`/var/tmp/xet-uploads`（不被系统重启清理）
-- `XET_RECONSTRUCTION_TEMP_DIR`：流式重构场景使用，建议使用 SSD
+- `XET_RECONSTRUCTION_TEMP_DIR`：文件重构、远端 shard 校验以及 S3/其他远端后端的 xorb/LFS HTTP 下载共用。远端对象会先流式写入自动清理的临时文件，再发送给客户端，内存不会随对象大小增长。该目录必须预留至少一个最大并发对象所需的空间；高并发部署应按并发下载数扩容，并建议使用 SSD
 
 **示例**：
 ```bash
@@ -82,6 +82,7 @@ export XET_STORAGE_BACKEND=s3
 export XET_S3_BUCKET=my-xet-bucket
 export XET_S3_REGION=us-east-1
 export XET_S3_ENDPOINT=https://s3.amazonaws.com
+export XET_RECONSTRUCTION_TEMP_DIR=/fast-ssd/xet-reconstruction
 ```
 
 ### 认证设置

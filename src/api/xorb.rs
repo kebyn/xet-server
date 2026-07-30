@@ -227,7 +227,7 @@ pub async fn download_xorb(
     path: web::Path<(String, String)>,
     storage: web::Data<Box<dyn StorageBackend>>,
     auth: web::Data<AuthVerifier>,
-    _config: web::Data<ServerConfig>,
+    config: web::Data<ServerConfig>,
     req: actix_web::HttpRequest,
 ) -> HttpResponse {
     let start = std::time::Instant::now();
@@ -261,9 +261,8 @@ pub async fn download_xorb(
         return rej.respond(start);
     }
 
-    // C2 fix: Use streaming download instead of loading entire xorb into memory.
-    // This prevents DoS via large xorb downloads (xorbs can be up to 512MB).
-    // Try file-based streaming first (local storage), fall back to in-memory for S3.
+    // Prefer zero-copy local streaming. Remote backends stream into a guarded
+    // temporary file so memory usage does not scale with xorb size.
     let xorb_key = format!("xorbs/{}", xorb_hash_hex);
 
     // Try streaming path (local storage: zero-copy file access)
@@ -271,6 +270,13 @@ pub async fn download_xorb(
         Ok(Some(path)) => {
             let file = match tokio::fs::File::open(&path).await {
                 Ok(f) => f,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    GLOBAL_METRICS.record_request(404);
+                    GLOBAL_METRICS.record_latency(start);
+                    return HttpResponse::NotFound().json(serde_json::json!({
+                        "error": format!("Xorb not found: {}", hash_str)
+                    }));
+                }
                 Err(e) => {
                     error!(
                         "Failed to open xorb file for streaming {}: {}",
@@ -287,6 +293,13 @@ pub async fn download_xorb(
             };
             let metadata = match file.metadata().await {
                 Ok(m) => m,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    GLOBAL_METRICS.record_request(404);
+                    GLOBAL_METRICS.record_latency(start);
+                    return HttpResponse::NotFound().json(serde_json::json!({
+                        "error": format!("Xorb not found: {}", hash_str)
+                    }));
+                }
                 Err(e) => {
                     error!("Failed to get xorb file metadata: {}", e);
                     GLOBAL_METRICS.record_request(500);
@@ -297,6 +310,15 @@ pub async fn download_xorb(
                     }));
                 }
             };
+            if !metadata.is_file() {
+                error!("Xorb storage path is not a file: {}", path.display());
+                GLOBAL_METRICS.record_request(500);
+                GLOBAL_METRICS.record_error();
+                GLOBAL_METRICS.record_latency(start);
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": crate::api::INTERNAL_ERROR_MESSAGE
+                }));
+            }
             let file_size = metadata.len();
 
             use tokio_util::io::ReaderStream;
@@ -309,65 +331,65 @@ pub async fn download_xorb(
             GLOBAL_METRICS.record_download_bytes(file_size);
             GLOBAL_METRICS.record_latency(start);
 
-            return HttpResponse::Ok()
+            HttpResponse::Ok()
                 .content_type("application/octet-stream")
-                .body(body);
+                .body(body)
         }
         Ok(None) => {
-            // Non-file backend (S3): fall back to in-memory get
-            // Note: S3 backend should implement get_stream for true streaming
+            let temp_dir = config.storage.resolve_reconstruction_temp_dir();
+            let (file_size, stream) = match crate::util::download_to_temp_stream(
+                storage.get_ref().as_ref(),
+                &xorb_key,
+                &temp_dir,
+                "xorb-download",
+            )
+            .await
+            {
+                Ok(download) => download,
+                Err(StorageError::NotFound(_)) => {
+                    GLOBAL_METRICS.record_request(404);
+                    GLOBAL_METRICS.record_latency(start);
+                    return HttpResponse::NotFound().json(serde_json::json!({
+                        "error": format!("Xorb not found: {}", hash_str)
+                    }));
+                }
+                Err(e) => {
+                    error!("Failed to stream remote xorb {}: {}", hash_str, e);
+                    GLOBAL_METRICS.record_request(500);
+                    GLOBAL_METRICS.record_error();
+                    GLOBAL_METRICS.record_latency(start);
+                    return HttpResponse::InternalServerError().json(serde_json::json!({
+                        "error": crate::api::INTERNAL_ERROR_MESSAGE
+                    }));
+                }
+            };
+
+            let body = actix_web::body::SizedStream::new(file_size, stream);
+            GLOBAL_METRICS.record_request(200);
+            GLOBAL_METRICS.record_storage_operation();
+            GLOBAL_METRICS.record_download_bytes(file_size);
+            GLOBAL_METRICS.record_latency(start);
+            HttpResponse::Ok()
+                .content_type("application/octet-stream")
+                .body(body)
         }
         Err(StorageError::NotFound(_)) => {
             GLOBAL_METRICS.record_request(404);
             GLOBAL_METRICS.record_latency(start);
-            return HttpResponse::NotFound().json(serde_json::json!({
+            HttpResponse::NotFound().json(serde_json::json!({
                 "error": format!("Xorb not found: {}", hash_str)
-            }));
+            }))
         }
         Err(e) => {
             error!("Failed to get path for xorb {}: {}", hash_str, e);
             GLOBAL_METRICS.record_request(500);
             GLOBAL_METRICS.record_error();
             GLOBAL_METRICS.record_latency(start);
-            return HttpResponse::InternalServerError().json(serde_json::json!({
+            HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": crate::api::INTERNAL_ERROR_MESSAGE
-            }));
+            }))
         }
     }
-
-    // Fallback: in-memory download (for S3 and other non-file backends)
-    let xorb_data = match storage.get(&xorb_key).await {
-        Ok(data) => {
-            GLOBAL_METRICS.record_storage_operation();
-            data
-        }
-        Err(StorageError::NotFound(_)) => {
-            GLOBAL_METRICS.record_request(404);
-            GLOBAL_METRICS.record_latency(start);
-            return HttpResponse::NotFound().json(serde_json::json!({
-                "error": format!("Xorb not found: {}", hash_str)
-            }));
-        }
-        Err(e) => {
-            error!("Failed to fetch xorb: {}", e);
-            GLOBAL_METRICS.record_request(500);
-            GLOBAL_METRICS.record_error();
-            GLOBAL_METRICS.record_latency(start);
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": crate::api::INTERNAL_ERROR_MESSAGE
-            }));
-        }
-    };
-
-    info!("Downloaded xorb {} ({} bytes)", hash_str, xorb_data.len());
-
-    GLOBAL_METRICS.record_request(200);
-    GLOBAL_METRICS.record_download_bytes(xorb_data.len() as u64);
-    GLOBAL_METRICS.record_latency(start);
-
-    HttpResponse::Ok()
-        .content_type("application/octet-stream")
-        .body(xorb_data)
 }
 
 /// Check if there's enough disk space for an upload.
@@ -382,7 +404,13 @@ mod tests {
     use crate::api::auth::{AuthVerifier, KeyPair, XetClaims, sign_xet_token};
     use crate::config::AuthConfig;
     use crate::storage::local::LocalStorage;
+    use crate::storage::{StorageError, StorageResult};
     use actix_web::{App, test, web};
+    use async_trait::async_trait;
+    use bytes::Bytes;
+    use std::path::Path;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
     use tempfile::tempdir;
 
@@ -436,6 +464,43 @@ mod tests {
             operation: None,
         };
         sign_xet_token(&claims, kp).unwrap()
+    }
+
+    struct StreamingOnlyStorage {
+        data: Bytes,
+        download_called: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl StorageBackend for StreamingOnlyStorage {
+        async fn put(&self, _key: &str, _data: Bytes) -> StorageResult<()> {
+            Err(StorageError::Internal("unexpected put".to_string()))
+        }
+
+        async fn get(&self, _key: &str) -> StorageResult<Bytes> {
+            Err(StorageError::Internal(
+                "unbounded get must not be used for downloads".to_string(),
+            ))
+        }
+
+        async fn exists(&self, _key: &str) -> StorageResult<bool> {
+            Ok(true)
+        }
+
+        async fn get_size(&self, _key: &str) -> StorageResult<u64> {
+            Ok(self.data.len() as u64)
+        }
+
+        async fn delete(&self, _key: &str) -> StorageResult<()> {
+            Ok(())
+        }
+
+        async fn download_to_path(&self, _key: &str, dest: &Path) -> StorageResult<()> {
+            self.download_called.store(true, Ordering::SeqCst);
+            tokio::fs::write(dest, &self.data)
+                .await
+                .map_err(|error| StorageError::Internal(error.to_string()))
+        }
     }
 
     #[actix_web::test]
@@ -492,5 +557,73 @@ mod tests {
 
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), 400);
+    }
+
+    #[actix_web::test]
+    async fn remote_xorb_download_uses_bounded_streaming_path() {
+        let (kp, auth, mut config) = create_test_config();
+        let temp_dir = tempdir().unwrap();
+        config.storage.reconstruction_temp_dir =
+            Some(temp_dir.path().to_str().unwrap().to_string());
+        let token = create_test_token(&kp, "read");
+        let data = Bytes::from_static(b"remote xorb bytes");
+        let download_called = Arc::new(AtomicBool::new(false));
+        let storage: Box<dyn StorageBackend> = Box::new(StreamingOnlyStorage {
+            data: data.clone(),
+            download_called: download_called.clone(),
+        });
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(storage))
+                .app_data(web::Data::new(auth))
+                .app_data(web::Data::new(config))
+                .route(
+                    "/v1/xorbs/{prefix}/{hash}/download",
+                    web::get().to(download_xorb),
+                ),
+        )
+        .await;
+
+        let hash = "a".repeat(64);
+        let req = test::TestRequest::get()
+            .uri(&format!("/v1/xorbs/default/{hash}/download"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), 200);
+        assert_eq!(test::read_body(resp).await, data);
+        assert!(download_called.load(Ordering::SeqCst));
+    }
+
+    #[actix_web::test]
+    async fn missing_local_xorb_download_returns_not_found() {
+        let dir = tempdir().unwrap();
+        let storage: Box<dyn StorageBackend> =
+            Box::new(LocalStorage::new(dir.path().to_str().unwrap()).unwrap());
+        let (kp, auth, config) = create_test_config();
+        let token = create_test_token(&kp, "read");
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(storage))
+                .app_data(web::Data::new(auth))
+                .app_data(web::Data::new(config))
+                .route(
+                    "/v1/xorbs/{prefix}/{hash}/download",
+                    web::get().to(download_xorb),
+                ),
+        )
+        .await;
+
+        let hash = "b".repeat(64);
+        let req = test::TestRequest::get()
+            .uri(&format!("/v1/xorbs/default/{hash}/download"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), 404);
     }
 }

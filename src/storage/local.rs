@@ -6,23 +6,24 @@ use bytes::Bytes;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 
+use crate::util::TempPathGuard;
+
 /// 跨文件系统安全拷贝:先 copy 到临时文件,再原子 rename 到最终路径。
 /// 避免中断时在最终 key 留下截断文件。
 async fn copy_then_rename(source: &Path, dest: &Path) -> StorageResult<()> {
-    let temp_dest = unique_temp_path(dest);
-    fs::copy(source, &temp_dest).await.map_err(|e| {
+    let temp_dest = TempPathGuard::new(unique_temp_path(dest));
+    fs::copy(source, temp_dest.path()).await.map_err(|e| {
         StorageError::Internal(format!(
             "Failed to copy {} → {}: {}",
             source.display(),
-            temp_dest.display(),
+            temp_dest.path().display(),
             e
         ))
     })?;
-    fs::rename(&temp_dest, dest).await.map_err(|e| {
-        let _ = std::fs::remove_file(&temp_dest);
+    fs::rename(temp_dest.path(), dest).await.map_err(|e| {
         StorageError::Internal(format!(
             "Failed to rename {} → {}: {}",
-            temp_dest.display(),
+            temp_dest.path().display(),
             dest.display(),
             e
         ))
@@ -118,7 +119,7 @@ impl StorageBackend for LocalStorage {
     async fn put(&self, key: &str, data: Bytes) -> StorageResult<()> {
         // 原子写:先写入临时文件,再 rename 到最终路径,避免崩溃时留下截断文件。
         let path = self.object_path(key)?;
-        let temp_path = unique_temp_path(&path);
+        let temp_path = TempPathGuard::new(unique_temp_path(&path));
 
         // Create parent directories
         if let Some(parent) = path.parent() {
@@ -128,14 +129,12 @@ impl StorageBackend for LocalStorage {
         }
 
         // Write to temp file
-        fs::write(&temp_path, &data)
+        fs::write(temp_path.path(), &data)
             .await
             .map_err(|e| StorageError::Internal(format!("Failed to write temp file: {}", e)))?;
 
         // Atomic rename
-        fs::rename(&temp_path, &path).await.map_err(|e| {
-            // Best-effort cleanup of temp file
-            let _ = std::fs::remove_file(&temp_path);
+        fs::rename(temp_path.path(), &path).await.map_err(|e| {
             StorageError::Internal(format!("Failed to rename temp to final: {}", e))
         })?;
 
@@ -241,7 +240,11 @@ impl StorageBackend for LocalStorage {
     }
 
     async fn list_objects(&self, prefix: &str) -> StorageResult<Vec<String>> {
-        let dir = self.base_path.join(prefix);
+        let dir = if prefix.is_empty() {
+            self.base_path.clone()
+        } else {
+            self.object_path(prefix)?
+        };
         if !dir.exists() {
             return Ok(Vec::new());
         }
@@ -374,6 +377,23 @@ mod tests {
 
         assert_eq!(tokio::fs::read(&dest).await.unwrap(), data);
         assert_no_tmp_files(dest.parent().unwrap());
+    }
+
+    #[tokio::test]
+    async fn list_objects_rejects_path_traversal_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let store_path = dir.path().join("store");
+        let store = LocalStorage::new(store_path.to_str().unwrap()).unwrap();
+        store
+            .put("shards/inside", Bytes::from_static(b"inside"))
+            .await
+            .unwrap();
+
+        let error = store
+            .list_objects("../")
+            .await
+            .expect_err("list prefix must not escape the storage root");
+        assert!(matches!(error, StorageError::InvalidArgument(_)));
     }
 
     fn assert_no_tmp_files(dir: &Path) {

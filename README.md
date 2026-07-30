@@ -296,7 +296,7 @@ CAS 对象访问是 content-capability based：持有有效 CAS token 的客户�
 | `XET_S3_REGION` | S3 区域 | - |
 | `XET_S3_ENDPOINT` | S3 端点 URL | - |
 | `XET_UPLOAD_TEMP_DIR` | 上传临时文件目录 | 自动 |
-| `XET_RECONSTRUCTION_TEMP_DIR` | 文件重构时 xorb 下载的临时目录 | 自动 |
+| `XET_RECONSTRUCTION_TEMP_DIR` | 文件重构及远端 xorb/shard/LFS 有界下载的临时目录 | 自动 |
 | `XET_VERIFY_DOWNLOAD_INTEGRITY` | 启用下载完整性校验 | `false` |
 
 > **⚠️ 重要：S3 Lifecycle Rules 配置**

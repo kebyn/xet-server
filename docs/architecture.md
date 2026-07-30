@@ -188,8 +188,10 @@ src/
 ├── util/             # 工具函数
 │   ├── mod.rs
 │   ├── disk.rs       # 磁盘操作
+│   ├── download_stream.rs # 远端对象有界下载流
 │   ├── streaming_hash.rs # 流式哈希
-│   └── temp_file.rs  # 临时文件管理
+│   ├── temp_file.rs  # 流式上传临时文件
+│   └── temp_path.rs  # RAII 临时路径清理
 ├── config.rs         # 配置管理
 ├── error.rs          # 错误类型定义
 ├── metrics.rs        # Prometheus 指标
@@ -253,6 +255,7 @@ Shard I/O 不把完整对象复制到内存：本地文件原地解析，S3/其�
 - 5 MiB 及以上对象使用流式 multipart 上传；part size 从 8 MiB 起并按对象大小扩展，以遵守 10,000-part/5 TiB 限制
 - 每个 multipart 用唯一 upload ID 跟踪，因此同一 content-addressed key 的并发上传不会覆盖清理状态
 - 错误、future cancellation 和 graceful shutdown 会 best-effort abort；进程崩溃或 runtime 已退出时仍依赖 bucket 的 `AbortIncompleteMultipartUpload` lifecycle rule 最终清理
+- 远端 xorb/LFS HTTP 下载通过 `XET_RECONSTRUCTION_TEMP_DIR` 流式落盘并校验实际大小，再由带 RAII guard 的文件流返回；响应完成或取消时自动删除临时文件，内存使用不随对象大小增长
 
 **配置**：
 ```bash
@@ -266,6 +269,7 @@ export XET_S3_ENDPOINT=https://s3.amazonaws.com  # 可选，默认 AWS S3
 
 # 通用配置
 export XET_UPLOAD_TEMP_DIR=/fast-ssd/xet-uploads  # 可选，上传临时目录
+export XET_RECONSTRUCTION_TEMP_DIR=/fast-ssd/xet-reconstruction  # 需按下载并发预留空间
 export XET_VERIFY_DOWNLOAD_INTEGRITY=false  # 可选，下载完整性校验
 ```
 
@@ -286,6 +290,7 @@ export XET_UPLOAD_TEMP_DIR=/fast-ssd/xet-uploads  # 可选，默认为 {XET_LOCA
 - `XET_S3_ENDPOINT`: S3 端点 URL（可选，默认 AWS S3）
 - `XET_LOCAL_PATH`: 本地存储路径（本地后端必需）
 - `XET_UPLOAD_TEMP_DIR`: 上传临时目录（可选，本地存储默认为 `{XET_LOCAL_PATH}/.tmp`，S3 存储默认为 `/var/tmp/xet-uploads`）
+- `XET_RECONSTRUCTION_TEMP_DIR`: 重构和远端对象下载临时目录；建议使用 SSD，并按最大对象大小和并发数预留磁盘空间
 - `XET_VERIFY_DOWNLOAD_INTEGRITY`: 启用下载时 SHA-256 完整性校验（可选，默认 false）
 
 ### 4. 认证系统

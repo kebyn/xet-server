@@ -39,6 +39,8 @@ use std::sync::{Arc, Mutex};
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+use crate::util::TempPathGuard;
+
 /// Files smaller than this use simple put_object (no multipart overhead).
 /// S3 requires minimum 5MB per part (except the last), so this is the threshold.
 const MULTIPART_THRESHOLD: u64 = 5 * 1024 * 1024;
@@ -150,16 +152,18 @@ impl Drop for ActiveUploadGuard {
             // abort_all_active_uploads call can still attempt cleanup.
             return;
         };
-        let Some(key) = self.active_uploads.remove(&self.upload_id) else {
-            return;
-        };
-
         let client = self.client.clone();
         let bucket = self.bucket.clone();
         let upload_id = self.upload_id.clone();
         let active_uploads = self.active_uploads.clone();
         handle.spawn(async move {
-            if let Err(error) = client
+            // Claim the registry entry only once the task is actually running.
+            // A concurrent shutdown drain then owns the abort instead, while a
+            // task that never gets polled leaves the entry available for retry.
+            let Some(key) = active_uploads.remove(&upload_id) else {
+                return;
+            };
+            match client
                 .abort_multipart_upload()
                 .bucket(&bucket)
                 .key(&key)
@@ -167,13 +171,18 @@ impl Drop for ActiveUploadGuard {
                 .send()
                 .await
             {
-                tracing::warn!(
-                    key = %key,
-                    upload_id = %upload_id,
-                    error = %error,
-                    "Failed to abort cancelled multipart upload"
-                );
-                active_uploads.register(upload_id, key);
+                Ok(_) => {
+                    active_uploads.remove(&upload_id);
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        key = %key,
+                        upload_id = %upload_id,
+                        error = %error,
+                        "Failed to abort cancelled multipart upload"
+                    );
+                    active_uploads.register(upload_id, key);
+                }
             }
         });
     }
@@ -249,10 +258,9 @@ impl S3Storage {
     /// On any error, the in-progress multipart upload is aborted to avoid
     /// leaving orphaned parts that incur storage costs.
     ///
-    /// I3 fix: The upload_id is registered in `active_uploads` on initiation and
-    /// removed on completion (success or abort). If the S3Storage is dropped while
-    /// uploads are still in flight (e.g., server shutdown), the Drop impl aborts
-    /// them to prevent orphaned parts from accumulating costs.
+    /// The upload ID is registered in `active_uploads` on initiation and removed
+    /// on completion or a successful abort. If the storage backend is dropped
+    /// while uploads are still in flight, its Drop implementation retries them.
     async fn multipart_upload(&self, key: &str, path: &Path, file_size: u64) -> StorageResult<()> {
         let part_size = multipart_part_size(file_size)?;
 
@@ -335,8 +343,6 @@ impl S3Storage {
     /// Called automatically on Drop. Can also be called explicitly during
     /// graceful shutdown to ensure cleanup before the runtime exits.
     ///
-    /// I3 fix: Provides shutdown-time cleanup for multipart uploads that would
-    /// otherwise leave orphaned parts accumulating storage costs.
     pub async fn abort_all_active_uploads(&self) {
         let uploads = self.active_uploads.drain();
 
@@ -494,7 +500,7 @@ fn multipart_part_size(file_size: u64) -> StorageResult<u64> {
     Ok(PART_SIZE.max(required_size))
 }
 
-/// I3 fix: On drop, abort any in-flight multipart uploads to prevent orphaned parts
+/// On drop, abort any in-flight multipart uploads to prevent orphaned parts
 /// from accumulating storage costs.
 ///
 /// This is a best-effort safety net for runtime-driven shutdown while multipart
@@ -623,13 +629,13 @@ impl StorageBackend for S3Storage {
         Ok(data)
     }
 
-    /// I2 fix: Download an S3 object directly to a file on disk using streaming.
+    /// Download an S3 object directly to a file on disk using streaming.
     ///
     /// This implementation uses ByteStream's streaming capabilities to write
     /// the object directly to disk without loading the entire object into memory.
     /// Memory usage is bounded to the internal buffer size of the ByteStream.
     ///
-    /// C1 fix: Writes to a temp file first, then renames to dest on success.
+    /// Writes to a temp file first, then renames to dest on success.
     /// If download fails mid-stream, the partial temp file is cleaned up and
     /// dest is never left in a corrupted state.
     async fn download_to_path(&self, key: &str, dest: &Path) -> StorageResult<()> {
@@ -648,21 +654,31 @@ impl StorageBackend for S3Storage {
                 }
             })?;
 
-        // C1 fix: Write to a unique temp file in the same directory, then rename on success.
+        // Write to a unique temp file in the same directory, then rename on success.
         // This ensures dest is never left as a partial/corrupted file and avoids
         // collisions between concurrent downloads to the same destination.
-        let temp_dest = {
+        if let Some(parent) = dest.parent() {
+            tokio::fs::create_dir_all(parent).await.map_err(|error| {
+                StorageError::Internal(format!(
+                    "Failed to create download directory {}: {}",
+                    parent.display(),
+                    error
+                ))
+            })?;
+        }
+
+        let temp_dest = TempPathGuard::new({
             let file_name = dest
                 .file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or("download");
             dest.with_file_name(format!("{}.{}.part", file_name, uuid::Uuid::new_v4()))
-        };
+        });
 
-        let mut file = File::create(&temp_dest).await.map_err(|e| {
+        let mut file = File::create(temp_dest.path()).await.map_err(|e| {
             StorageError::Internal(format!(
                 "Failed to create file {}: {}",
-                temp_dest.display(),
+                temp_dest.path().display(),
                 e
             ))
         })?;
@@ -677,7 +693,7 @@ impl StorageBackend for S3Storage {
                 file.write_all(&chunk).await.map_err(|e| {
                     StorageError::Internal(format!(
                         "Failed to write to {}: {}",
-                        temp_dest.display(),
+                        temp_dest.path().display(),
                         e
                     ))
                 })?;
@@ -685,22 +701,21 @@ impl StorageBackend for S3Storage {
 
             // Flush to ensure all data is written
             file.flush().await.map_err(|e| {
-                StorageError::Internal(format!("Failed to flush {}: {}", temp_dest.display(), e))
+                StorageError::Internal(format!(
+                    "Failed to flush {}: {}",
+                    temp_dest.path().display(),
+                    e
+                ))
             })?;
 
             Ok(())
         }
         .await;
 
-        // If download failed, clean up the partial temp file
-        if let Err(e) = download_result {
-            let _ = tokio::fs::remove_file(&temp_dest).await;
-            return Err(e);
-        }
+        download_result?;
 
         // Atomic rename from temp to final destination
-        if let Err(error) = tokio::fs::rename(&temp_dest, dest).await {
-            let _ = tokio::fs::remove_file(&temp_dest).await;
+        if let Err(error) = tokio::fs::rename(temp_dest.path(), dest).await {
             return Err(StorageError::Internal(format!(
                 "Failed to rename temp file to {}: {}",
                 dest.display(),
