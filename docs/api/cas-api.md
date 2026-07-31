@@ -163,7 +163,7 @@ Content-Type: application/octet-stream
 
 Shard 上传会在 shard 进入可发现索引前验证所有引用的 xorbs 以及声明的 file/chunk 映射。语法上有效但引用缺失 xorb、chunk hash 不匹配，或声明的 file hash 与重构内容不匹配的 shard 会被拒绝，并且不会注册到 metadata index 中用于重构或全局去重。
 
-Shard 不会被整文件读入并保留副本：本地后端直接从文件解析，远端后端流式下载到自动清理的临时文件；解析器以 64 KiB 哈希缓冲区加解析后的 metadata 工作，并在分配前校验文件长度、section offset、entry count、整数溢出和截断。启动重建以最多 10 个 shard 为一批并发解析和验证，避免 shard 文件大小造成成倍的常驻内存放大。
+Shard 不会被整文件读入并保留副本：本地后端直接从文件解析，远端后端流式下载到自动清理的临时文件；解析器以 64 KiB 哈希缓冲区加解析后的 metadata 工作，并在分配前校验文件长度、section offset、entry count、整数溢出和截断。启动重建流式枚举对象 key，以最多 10 个 shard 为一批并发解析和验证；S3 列表固定为最多 1000 项一页并校验 continuation token 进度，避免对象总数或 shard 文件大小造成成倍的常驻内存放大。
 
 **响应**：
 - `200 OK`: 上传成功

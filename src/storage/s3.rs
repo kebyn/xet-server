@@ -26,14 +26,15 @@
 //! This will automatically abort any multipart upload that hasn't completed within 7 days,
 //! preventing orphaned parts from accumulating and incurring unnecessary costs.
 
-use super::{StorageBackend, StorageError, StorageResult};
+use super::{ObjectKeyStream, StorageBackend, StorageError, StorageResult};
 use async_trait::async_trait;
 use aws_sdk_s3::config::Credentials;
 use aws_sdk_s3::error::ProvideErrorMetadata;
 use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 use aws_sdk_s3::{Client, Config};
 use bytes::Bytes;
-use std::collections::HashMap;
+use futures_util::{StreamExt, TryStreamExt, stream};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tokio::fs::File;
@@ -50,6 +51,38 @@ const MULTIPART_THRESHOLD: u64 = 5 * 1024 * 1024;
 const PART_SIZE: u64 = 8 * 1024 * 1024;
 const MAX_MULTIPART_PARTS: i32 = 10_000;
 const MAX_S3_OBJECT_SIZE: u64 = 5 * 1024 * 1024 * 1024 * 1024;
+const LIST_PAGE_SIZE: i32 = 1_000;
+
+fn validate_next_continuation_token(
+    seen: &mut HashSet<String>,
+    next: Option<&str>,
+    is_truncated: bool,
+) -> StorageResult<Option<String>> {
+    if !is_truncated && next.is_some() {
+        return Err(StorageError::Internal(
+            "S3 listing returned a continuation token for a complete page".to_string(),
+        ));
+    }
+    let Some(token) = next else {
+        if is_truncated {
+            return Err(StorageError::Internal(
+                "S3 listing was truncated without a continuation token".to_string(),
+            ));
+        }
+        return Ok(None);
+    };
+    if token.is_empty() {
+        return Err(StorageError::Internal(
+            "S3 listing returned an empty continuation token".to_string(),
+        ));
+    }
+    if !seen.insert(token.to_string()) {
+        return Err(StorageError::Internal(
+            "S3 listing repeated a continuation token".to_string(),
+        ));
+    }
+    Ok(Some(token.to_string()))
+}
 
 #[derive(Default)]
 struct ActiveMultipartUploads {
@@ -754,38 +787,77 @@ impl StorageBackend for S3Storage {
     }
 
     async fn list_objects(&self, prefix: &str) -> StorageResult<Vec<String>> {
-        let mut keys = Vec::new();
-        let mut continuation_token: Option<String> = None;
+        self.list_objects_stream(prefix).try_collect().await
+    }
 
-        loop {
-            let mut req = self
-                .client
-                .list_objects_v2()
-                .bucket(&self.bucket)
-                .prefix(prefix);
-
-            if let Some(ref token) = continuation_token {
-                req = req.continuation_token(token);
-            }
-
-            let resp = req
-                .send()
-                .await
-                .map_err(|e| StorageError::Internal(format!("S3 list_objects_v2 failed: {}", e)))?;
-
-            for obj in resp.contents() {
-                if let Some(key) = obj.key() {
-                    keys.push(key.to_string());
-                }
-            }
-
-            match resp.next_continuation_token() {
-                Some(token) => continuation_token = Some(token.to_string()),
-                None => break,
-            }
+    fn list_objects_stream<'a>(&'a self, prefix: &'a str) -> ObjectKeyStream<'a> {
+        struct S3ListState {
+            client: Client,
+            bucket: String,
+            prefix: String,
+            continuation_token: Option<String>,
+            seen_tokens: HashSet<String>,
+            keys: VecDeque<String>,
+            complete: bool,
         }
 
-        Ok(keys)
+        let state = S3ListState {
+            client: self.client.clone(),
+            bucket: self.bucket.clone(),
+            prefix: prefix.to_string(),
+            continuation_token: None,
+            seen_tokens: HashSet::new(),
+            keys: VecDeque::new(),
+            complete: false,
+        };
+
+        stream::try_unfold(state, |mut state| async move {
+            loop {
+                if let Some(key) = state.keys.pop_front() {
+                    return Ok(Some((key, state)));
+                }
+                if state.complete {
+                    return Ok(None);
+                }
+
+                let mut request = state
+                    .client
+                    .list_objects_v2()
+                    .bucket(&state.bucket)
+                    .prefix(&state.prefix)
+                    .max_keys(LIST_PAGE_SIZE);
+                if let Some(token) = &state.continuation_token {
+                    request = request.continuation_token(token);
+                }
+                let response = request.send().await.map_err(|error| {
+                    StorageError::Internal(format!("S3 list_objects_v2 failed: {}", error))
+                })?;
+                let page_limit = usize::try_from(LIST_PAGE_SIZE).map_err(|_| {
+                    StorageError::Internal("S3 list page size does not fit in usize".to_string())
+                })?;
+                if response.contents().len() > page_limit {
+                    return Err(StorageError::Internal(format!(
+                        "S3 listing returned {} objects, exceeding requested page size {}",
+                        response.contents().len(),
+                        page_limit
+                    )));
+                }
+
+                state.keys.extend(
+                    response
+                        .contents()
+                        .iter()
+                        .filter_map(|object| object.key().map(str::to_string)),
+                );
+                state.continuation_token = validate_next_continuation_token(
+                    &mut state.seen_tokens,
+                    response.next_continuation_token(),
+                    response.is_truncated().unwrap_or(false),
+                )?;
+                state.complete = state.continuation_token.is_none();
+            }
+        })
+        .boxed()
     }
 
     async fn get_size(&self, key: &str) -> StorageResult<u64> {
@@ -844,5 +916,22 @@ mod tests {
 
         let error = multipart_part_size(MAX_S3_OBJECT_SIZE + 1).unwrap_err();
         assert!(matches!(error, StorageError::InvalidArgument(_)));
+    }
+
+    #[test]
+    fn continuation_tokens_must_advance_and_match_truncation_state() {
+        let mut seen = HashSet::new();
+        assert_eq!(
+            validate_next_continuation_token(&mut seen, Some("page-2"), true).unwrap(),
+            Some("page-2".to_string())
+        );
+        assert!(validate_next_continuation_token(&mut seen, Some("page-2"), true).is_err());
+        assert!(validate_next_continuation_token(&mut seen, None, true).is_err());
+        assert!(validate_next_continuation_token(&mut seen, Some(""), true).is_err());
+        assert!(validate_next_continuation_token(&mut seen, Some("unexpected"), false).is_err());
+        assert_eq!(
+            validate_next_continuation_token(&mut seen, None, false).unwrap(),
+            None
+        );
     }
 }

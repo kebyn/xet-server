@@ -1,8 +1,9 @@
 //! Local filesystem storage backend
 
-use super::{StorageBackend, StorageError, StorageResult};
+use super::{ObjectKeyStream, StorageBackend, StorageError, StorageResult};
 use async_trait::async_trait;
 use bytes::Bytes;
+use futures_util::{StreamExt, TryStreamExt, stream};
 use std::path::{Path, PathBuf};
 use tokio::fs;
 
@@ -240,18 +241,93 @@ impl StorageBackend for LocalStorage {
     }
 
     async fn list_objects(&self, prefix: &str) -> StorageResult<Vec<String>> {
-        let dir = if prefix.is_empty() {
-            self.base_path.clone()
-        } else {
-            self.object_path(prefix)?
-        };
-        if !dir.exists() {
-            return Ok(Vec::new());
+        self.list_objects_stream(prefix).try_collect().await
+    }
+
+    fn list_objects_stream<'a>(&'a self, prefix: &'a str) -> ObjectKeyStream<'a> {
+        struct LocalListState {
+            base_path: PathBuf,
+            root: Option<PathBuf>,
+            directories: Vec<tokio::fs::ReadDir>,
         }
 
-        let mut keys = Vec::new();
-        Self::walk_dir(&self.base_path, &dir, &mut keys).await?;
-        Ok(keys)
+        let root = if prefix.is_empty() {
+            self.base_path.clone()
+        } else {
+            match self.object_path(prefix) {
+                Ok(path) => path,
+                Err(error) => return stream::once(async move { Err(error) }).boxed(),
+            }
+        };
+        let state = LocalListState {
+            base_path: self.base_path.clone(),
+            root: Some(root),
+            directories: Vec::new(),
+        };
+
+        stream::try_unfold(state, |mut state| async move {
+            if let Some(root) = state.root.take() {
+                match fs::read_dir(&root).await {
+                    Ok(directory) => state.directories.push(directory),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                    Err(error) => {
+                        return Err(StorageError::Internal(format!(
+                            "Failed to read dir {}: {}",
+                            root.display(),
+                            error
+                        )));
+                    }
+                }
+            }
+
+            loop {
+                let Some(directory) = state.directories.last_mut() else {
+                    return Ok(None);
+                };
+                let entry = directory.next_entry().await.map_err(|error| {
+                    StorageError::Internal(format!("Failed to read dir entry: {}", error))
+                })?;
+                let Some(entry) = entry else {
+                    state.directories.pop();
+                    continue;
+                };
+
+                let path = entry.path();
+                let file_type = entry.file_type().await.map_err(|error| {
+                    StorageError::Internal(format!("Failed to get file type: {}", error))
+                })?;
+                if file_type.is_dir() {
+                    match fs::read_dir(&path).await {
+                        Ok(directory) => state.directories.push(directory),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => {
+                            return Err(StorageError::Internal(format!(
+                                "Failed to read dir {}: {}",
+                                path.display(),
+                                error
+                            )));
+                        }
+                    }
+                    continue;
+                }
+                if !file_type.is_file() {
+                    continue;
+                }
+
+                let key = path
+                    .strip_prefix(&state.base_path)
+                    .map_err(|error| {
+                        StorageError::Internal(format!(
+                            "Failed to compute relative path: {}",
+                            error
+                        ))
+                    })?
+                    .to_string_lossy()
+                    .to_string();
+                return Ok(Some((key, state)));
+            }
+        })
+        .boxed()
     }
 
     async fn get_size(&self, key: &str) -> StorageResult<u64> {
@@ -270,45 +346,10 @@ impl StorageBackend for LocalStorage {
     }
 }
 
-impl LocalStorage {
-    /// Recursively walk a directory, collecting keys relative to base_path.
-    async fn walk_dir(base_path: &Path, dir: &Path, keys: &mut Vec<String>) -> StorageResult<()> {
-        let mut entries = fs::read_dir(dir).await.map_err(|e| {
-            StorageError::Internal(format!("Failed to read dir {}: {}", dir.display(), e))
-        })?;
-
-        while let Some(entry) = entries
-            .next_entry()
-            .await
-            .map_err(|e| StorageError::Internal(format!("Failed to read dir entry: {}", e)))?
-        {
-            let path = entry.path();
-            let file_type = entry
-                .file_type()
-                .await
-                .map_err(|e| StorageError::Internal(format!("Failed to get file type: {}", e)))?;
-
-            if file_type.is_dir() {
-                Box::pin(Self::walk_dir(base_path, &path, keys)).await?;
-            } else if file_type.is_file() {
-                let key = path
-                    .strip_prefix(base_path)
-                    .map_err(|e| {
-                        StorageError::Internal(format!("Failed to compute relative path: {}", e))
-                    })?
-                    .to_string_lossy()
-                    .to_string();
-                keys.push(key);
-            }
-        }
-
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::TryStreamExt;
 
     #[tokio::test]
     async fn test_copy_then_rename_atomic() {
@@ -393,6 +434,39 @@ mod tests {
             .list_objects("../")
             .await
             .expect_err("list prefix must not escape the storage root");
+        assert!(matches!(error, StorageError::InvalidArgument(_)));
+    }
+
+    #[tokio::test]
+    async fn list_objects_stream_yields_nested_keys_and_rejects_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalStorage::new(dir.path().to_str().unwrap()).unwrap();
+        store
+            .put("shards/one", Bytes::from_static(b"one"))
+            .await
+            .unwrap();
+        store
+            .put("shards/nested/two", Bytes::from_static(b"two"))
+            .await
+            .unwrap();
+        store
+            .put("xorbs/ignored", Bytes::from_static(b"ignored"))
+            .await
+            .unwrap();
+
+        let mut keys: Vec<String> = store
+            .list_objects_stream("shards/")
+            .try_collect()
+            .await
+            .unwrap();
+        keys.sort();
+        assert_eq!(keys, vec!["shards/nested/two", "shards/one"]);
+
+        let error = store
+            .list_objects_stream("../")
+            .try_collect::<Vec<_>>()
+            .await
+            .expect_err("streaming list prefix must not escape the storage root");
         assert!(matches!(error, StorageError::InvalidArgument(_)));
     }
 

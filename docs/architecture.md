@@ -223,7 +223,7 @@ src/
 
 CAS 启动时会将索引状态置为 `rebuilding`，重建成功后置为 `ready` 并记录 shard 数；重建失败时置为 `failed`。默认情况下进程会继续启动但 `/ready` 返回 `503`，便于编排系统等待或摘除实例；设置 `XET_INDEX_REBUILD_STRICT=true` 时，重建失败会让 CAS 直接启动失败。
 
-Shard I/O 不把完整对象复制到内存：本地文件原地解析，S3/其他远端对象流式下载到带 RAII 清理的临时文件；解析器以 64 KiB 哈希缓冲加解析后的 metadata 工作，并在分配前验证物理文件长度、section offset、entry count、checked arithmetic 和截断。启动重建以 10 个 shard 为一批进行有界并发解析与内容验证，因此峰值受单批解析 metadata、xorb 验证和临时文件控制，而不会随 shard 原始字节总量直接放大。
+Shard I/O 不把完整对象复制到内存：本地文件原地解析，S3/其他远端对象流式下载到带 RAII 清理的临时文件；解析器以 64 KiB 哈希缓冲加解析后的 metadata 工作，并在分配前验证物理文件长度、section offset、entry count、checked arithmetic 和截断。启动重建通过存储 backend 流式枚举 shard key，以 10 个 shard 为一批进行有界并发解析与内容验证，不先构造全量 key 列表。S3 每页最多请求并接受 1000 个 key，拒绝空、重复、缺失或与 truncation 状态矛盾的 continuation token。因此峰值受单批 key、解析 metadata、xorb 验证和临时文件控制，而不会随 shard 对象总数或原始字节总量直接放大。
 
 ### 3. 存储后端
 

@@ -566,7 +566,7 @@ export HUB_UPLOAD_TEMP_DIR=/fast-ssd/hub-uploads
 **CAS Server**：
 - `XET_MAX_BODY_SIZE_MB` 控制 xorb/shard/LFS 流式上传的累计字节上限，不代表等量内容会常驻内存
 - 非上传 JSON/Bytes 请求体由独立的 10 MiB `PayloadConfig` 限制
-- shard 从文件解析，内存为解析后 metadata 加 64 KiB 哈希缓冲；启动重建最多 10 个 shard 一批并发处理
+- shard 从文件解析，内存为解析后 metadata 加 64 KiB 哈希缓冲；启动重建流式枚举对象 key，最多 10 个 shard 一批并发处理，不保留全量 key 列表
 - 默认 2048MB（2GB）足够大多数用例
 - 如果内存有限，可以降低此值
 

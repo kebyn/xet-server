@@ -7,6 +7,7 @@
 //! The index is rebuilt from storage on each startup (stateless server design).
 //! This ensures consistency and avoids local state management complexity.
 
+use futures_util::StreamExt;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -201,23 +202,31 @@ impl MetadataIndex {
         storage: Arc<Box<dyn crate::storage::StorageBackend>>,
         temp_dir: std::path::PathBuf,
     ) -> Result<usize, String> {
-        let shard_keys = storage
-            .list_objects("shards/")
-            .await
-            .map_err(|e| format!("Failed to list shards: {}", e))?;
+        let mut shard_keys = storage.list_objects_stream("shards/");
 
-        // I1 fix: Process shards concurrently with bounded parallelism
-        // Using batches of 10 to balance parallelism with resource usage
+        // Process shard keys as they are listed, keeping both parsing concurrency
+        // and the number of retained listing entries bounded.
         const BATCH_SIZE: usize = 10;
         let mut total_count = 0;
 
-        for chunk in shard_keys.chunks(BATCH_SIZE) {
-            let mut handles = vec![];
+        loop {
+            let mut batch = Vec::with_capacity(BATCH_SIZE);
+            while batch.len() < BATCH_SIZE {
+                let Some(shard_key) = shard_keys.next().await else {
+                    break;
+                };
+                let shard_key =
+                    shard_key.map_err(|error| format!("Failed to list shards: {}", error))?;
+                batch.push(shard_key);
+            }
+            if batch.is_empty() {
+                break;
+            }
 
-            for shard_key in chunk {
+            let mut handles = Vec::with_capacity(batch.len());
+            for key in batch {
                 let storage_clone = storage.clone();
                 let temp_dir_clone = temp_dir.clone();
-                let key = shard_key.clone();
 
                 let handle = tokio::spawn(async move {
                     let shard = match crate::shard_io::parse_shard_from_storage(
@@ -305,16 +314,18 @@ pub struct IndexStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use bytes::Bytes;
     use sha2::{Digest, Sha256};
+    use std::path::{Path, PathBuf};
     use tempfile::tempdir;
 
     use crate::format::compression::CompressionScheme;
     use crate::format::shard_builder::{FileSegment, ShardBuilder, XorbChunkBuildEntry};
     use crate::format::xorb_builder::XorbBuilder;
     use crate::hash::compute_data_hash;
-    use crate::storage::StorageBackend;
     use crate::storage::local::LocalStorage;
+    use crate::storage::{ObjectKeyStream, StorageBackend, StorageError, StorageResult};
     use crate::types::MerkleHash;
 
     fn sha256_merkle_hash(data: &[u8]) -> MerkleHash {
@@ -359,6 +370,51 @@ mod tests {
 
         assert_eq!(compressed_len, raw_chunk.len() as u32);
         (shard_builder.build().unwrap(), file_hash.to_hex())
+    }
+
+    struct StreamingListOnlyStorage {
+        inner: LocalStorage,
+    }
+
+    #[async_trait]
+    impl StorageBackend for StreamingListOnlyStorage {
+        async fn put(&self, key: &str, data: Bytes) -> StorageResult<()> {
+            self.inner.put(key, data).await
+        }
+
+        async fn get(&self, key: &str) -> StorageResult<Bytes> {
+            self.inner.get(key).await
+        }
+
+        async fn get_path(&self, key: &str) -> StorageResult<Option<PathBuf>> {
+            self.inner.get_path(key).await
+        }
+
+        async fn exists(&self, key: &str) -> StorageResult<bool> {
+            self.inner.exists(key).await
+        }
+
+        async fn delete(&self, key: &str) -> StorageResult<()> {
+            self.inner.delete(key).await
+        }
+
+        async fn list_objects(&self, _prefix: &str) -> StorageResult<Vec<String>> {
+            Err(StorageError::Internal(
+                "index rebuild must not collect the complete key list".to_string(),
+            ))
+        }
+
+        fn list_objects_stream<'a>(&'a self, prefix: &'a str) -> ObjectKeyStream<'a> {
+            self.inner.list_objects_stream(prefix)
+        }
+
+        async fn get_size(&self, key: &str) -> StorageResult<u64> {
+            self.inner.get_size(key).await
+        }
+
+        async fn download_to_path(&self, key: &str, dest: &Path) -> StorageResult<()> {
+            self.inner.download_to_path(key, dest).await
+        }
     }
 
     #[test]
@@ -607,6 +663,31 @@ mod tests {
             .put(&format!("shards/{}", shard_id), Bytes::from(shard_data))
             .await
             .unwrap();
+
+        let index = MetadataIndex::new();
+        let count = index
+            .rebuild_from_storage(storage, rebuild_temp_dir.path().to_path_buf())
+            .await
+            .unwrap();
+
+        assert_eq!(count, 0);
+        assert!(index.get_shards_for_file(&file_hash).is_none());
+    }
+
+    #[tokio::test]
+    async fn rebuild_consumes_streaming_listing_without_collecting_all_keys() {
+        let raw = b"stream the shard listing before validating referenced objects";
+        let (shard_data, file_hash) = build_one_chunk_shard(raw);
+        let storage_dir = tempdir().unwrap();
+        let rebuild_temp_dir = tempdir().unwrap();
+        let local = LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap();
+        let shard_id = compute_data_hash(&shard_data).to_hex();
+        local
+            .put(&format!("shards/{shard_id}"), Bytes::from(shard_data))
+            .await
+            .unwrap();
+        let storage: Arc<Box<dyn StorageBackend>> =
+            Arc::new(Box::new(StreamingListOnlyStorage { inner: local }));
 
         let index = MetadataIndex::new();
         let count = index

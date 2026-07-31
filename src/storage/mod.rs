@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use futures_util::{StreamExt, TryStreamExt, stream};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -21,6 +22,7 @@ pub enum StorageError {
 }
 
 pub type StorageResult<T> = Result<T, StorageError>;
+pub type ObjectKeyStream<'a> = futures_util::stream::BoxStream<'a, StorageResult<String>>;
 
 #[async_trait]
 pub trait StorageBackend: Send + Sync {
@@ -76,6 +78,16 @@ pub trait StorageBackend: Send + Sync {
     /// Returns full keys (e.g., "shards/abc123", "shards/def456").
     async fn list_objects(&self, _prefix: &str) -> StorageResult<Vec<String>> {
         Ok(Vec::new())
+    }
+
+    /// Stream object keys matching a prefix without requiring callers to retain
+    /// the complete listing. Production backends should override this method;
+    /// the compatibility implementation delegates to `list_objects`.
+    fn list_objects_stream<'a>(&'a self, prefix: &'a str) -> ObjectKeyStream<'a> {
+        stream::once(async move { self.list_objects(prefix).await })
+            .map_ok(|keys| stream::iter(keys.into_iter().map(Ok)))
+            .try_flatten()
+            .boxed()
     }
 
     /// Get the size of an object in bytes.
