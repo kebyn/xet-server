@@ -64,6 +64,7 @@ export XET_INDEX_REBUILD_STRICT=true
 
 **说明**：
 - `XET_LOCAL_PATH` 在 `XET_STORAGE_BACKEND=local` 时必需
+- 本地 backend 启动时会创建并解析 `XET_LOCAL_PATH`；对象 key 路径中的 symbolic link 会被拒绝，读写和 listing 不会跟随 symlink 越过该根目录。该目录及其父目录必须由服务账号控制，不得授予不可信本地用户写权限
 - `XET_S3_BUCKET` 在 `XET_STORAGE_BACKEND=s3` 时必需
 - `XET_UPLOAD_TEMP_DIR` 默认值：
   - 本地存储：`{XET_LOCAL_PATH}/.tmp`（同一文件系统，支持原子重命名）

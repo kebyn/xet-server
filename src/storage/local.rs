@@ -4,7 +4,7 @@ use super::{ObjectKeyStream, StorageBackend, StorageError, StorageResult};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::{StreamExt, TryStreamExt, stream};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use tokio::fs;
 
 use crate::util::TempPathGuard;
@@ -36,6 +36,82 @@ fn unique_temp_path(dest: &Path) -> PathBuf {
     dest.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()))
 }
 
+fn ensure_resolved_within_base(base_path: &Path, resolved: PathBuf) -> StorageResult<PathBuf> {
+    if resolved.starts_with(base_path) {
+        Ok(resolved)
+    } else {
+        Err(StorageError::InvalidArgument(
+            "Object key resolves outside the configured local storage root".to_string(),
+        ))
+    }
+}
+
+async fn reject_symlink_components(base_path: &Path, path: &Path) -> StorageResult<()> {
+    match fs::symlink_metadata(base_path).await {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err(StorageError::InvalidArgument(
+                "Configured local storage root is no longer a directory".to_string(),
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(StorageError::InvalidArgument(
+                "Configured local storage root no longer exists".to_string(),
+            ));
+        }
+        Err(error) => {
+            return Err(StorageError::Internal(format!(
+                "Failed to inspect local storage root {}: {}",
+                base_path.display(),
+                error
+            )));
+        }
+    }
+
+    let relative = path.strip_prefix(base_path).map_err(|_| {
+        StorageError::InvalidArgument(
+            "Object key resolves outside the configured local storage root".to_string(),
+        )
+    })?;
+    let mut current = base_path.to_path_buf();
+    for component in relative.components() {
+        current.push(component);
+        match fs::symlink_metadata(&current).await {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(StorageError::InvalidArgument(
+                    "Object key contains a symbolic-link path component".to_string(),
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(StorageError::Internal(format!(
+                    "Failed to inspect local storage path {}: {}",
+                    current.display(),
+                    error
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn canonicalize_confined(base_path: &Path, path: &Path) -> StorageResult<PathBuf> {
+    reject_symlink_components(base_path, path).await?;
+    let resolved = fs::canonicalize(path).await.map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            StorageError::NotFound(path.to_string_lossy().into_owned())
+        } else {
+            StorageError::Internal(format!(
+                "Failed to resolve local storage path {}: {}",
+                path.display(),
+                error
+            ))
+        }
+    })?;
+    ensure_resolved_within_base(base_path, resolved)
+}
+
 pub struct LocalStorage {
     base_path: PathBuf,
 }
@@ -43,13 +119,38 @@ pub struct LocalStorage {
 impl LocalStorage {
     pub fn new(base_path: &str) -> StorageResult<Self> {
         let path = PathBuf::from(base_path);
-        Ok(Self { base_path: path })
+        if path.as_os_str().is_empty() {
+            return Err(StorageError::InvalidArgument(
+                "Local storage path cannot be empty".to_string(),
+            ));
+        }
+        std::fs::create_dir_all(&path).map_err(|error| {
+            StorageError::Internal(format!(
+                "Failed to create local storage root {}: {}",
+                path.display(),
+                error
+            ))
+        })?;
+        let base_path = std::fs::canonicalize(&path).map_err(|error| {
+            StorageError::Internal(format!(
+                "Failed to resolve local storage root {}: {}",
+                path.display(),
+                error
+            ))
+        })?;
+        Ok(Self { base_path })
     }
 
     /// Validate key and construct object path, preventing path traversal attacks.
     fn object_path(&self, key: &str) -> StorageResult<PathBuf> {
-        // Reject absolute paths
-        if key.starts_with('/') || key.starts_with('\\') {
+        let key_path = Path::new(key);
+        if key.starts_with('/')
+            || key.starts_with('\\')
+            || key_path.is_absolute()
+            || key_path
+                .components()
+                .any(|component| matches!(component, Component::Prefix(_) | Component::RootDir))
+        {
             return Err(StorageError::InvalidArgument(format!(
                 "Invalid key: absolute path not allowed: {}",
                 key
@@ -85,49 +186,34 @@ impl LocalStorage {
 
         Ok(self.base_path.join(key))
     }
+
+    async fn prepare_parent(&self, path: &Path) -> StorageResult<()> {
+        let Some(parent) = path.parent() else {
+            return Err(StorageError::InvalidArgument(
+                "Object key has no parent directory".to_string(),
+            ));
+        };
+        reject_symlink_components(&self.base_path, parent).await?;
+        fs::create_dir_all(parent)
+            .await
+            .map_err(|error| StorageError::Internal(format!("Failed to create dirs: {error}")))?;
+        canonicalize_confined(&self.base_path, parent).await?;
+        Ok(())
+    }
 }
 
 #[async_trait]
 impl StorageBackend for LocalStorage {
     async fn health_check(&self) -> StorageResult<()> {
-        match fs::metadata(&self.base_path).await {
-            Ok(meta) if meta.is_dir() => Ok(()),
-            Ok(_) => Err(StorageError::Internal(format!(
-                "Local storage path is not a directory: {}",
-                self.base_path.display()
-            ))),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                let parent = self.base_path.parent().unwrap_or_else(|| Path::new("."));
-                match fs::metadata(parent).await {
-                    Ok(meta) if meta.is_dir() => Ok(()),
-                    Ok(_) => Err(StorageError::Internal(format!(
-                        "Local storage parent is not a directory: {}",
-                        parent.display()
-                    ))),
-                    Err(e) => Err(StorageError::Internal(format!(
-                        "Local storage path is not accessible: {}",
-                        e
-                    ))),
-                }
-            }
-            Err(e) => Err(StorageError::Internal(format!(
-                "Local storage path is not accessible: {}",
-                e
-            ))),
-        }
+        reject_symlink_components(&self.base_path, &self.base_path).await
     }
 
     async fn put(&self, key: &str, data: Bytes) -> StorageResult<()> {
         // 原子写:先写入临时文件,再 rename 到最终路径,避免崩溃时留下截断文件。
         let path = self.object_path(key)?;
+        reject_symlink_components(&self.base_path, &path).await?;
+        self.prepare_parent(&path).await?;
         let temp_path = TempPathGuard::new(unique_temp_path(&path));
-
-        // Create parent directories
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .await
-                .map_err(|e| StorageError::Internal(format!("Failed to create dirs: {}", e)))?;
-        }
 
         // Write to temp file
         fs::write(temp_path.path(), &data)
@@ -147,12 +233,8 @@ impl StorageBackend for LocalStorage {
     /// Falls back to copy+delete on cross-filesystem.
     async fn put_from_path(&self, key: &str, source: &Path) -> StorageResult<()> {
         let dest = self.object_path(key)?;
-
-        if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent)
-                .await
-                .map_err(|e| StorageError::Internal(format!("Failed to create dirs: {}", e)))?;
-        }
+        reject_symlink_components(&self.base_path, &dest).await?;
+        self.prepare_parent(&dest).await?;
 
         // Try atomic rename first (same filesystem → zero-copy)
         match fs::rename(source, &dest).await {
@@ -168,6 +250,15 @@ impl StorageBackend for LocalStorage {
 
     async fn get(&self, key: &str) -> StorageResult<Bytes> {
         let path = self.object_path(key)?;
+        let path = canonicalize_confined(&self.base_path, &path)
+            .await
+            .map_err(|error| {
+                if matches!(error, StorageError::NotFound(_)) {
+                    StorageError::NotFound(key.to_string())
+                } else {
+                    error
+                }
+            })?;
 
         // Directly attempt read; map NotFound errors (avoids TOCTOU race with exists())
         match fs::read(&path).await {
@@ -180,11 +271,16 @@ impl StorageBackend for LocalStorage {
     }
 
     async fn get_path(&self, key: &str) -> StorageResult<Option<PathBuf>> {
-        // Return the path without checking existence. The caller handles
-        // missing files via File::open error, avoiding a TOCTOU race between
-        // the exists() check and the subsequent open().
+        // Existing objects return their canonical confined path. Missing objects
+        // keep the lexical path so callers preserve their existing File::open
+        // not-found handling without following a symlink component.
         let path = self.object_path(key)?;
-        Ok(Some(path))
+        reject_symlink_components(&self.base_path, &path).await?;
+        match canonicalize_confined(&self.base_path, &path).await {
+            Ok(path) => Ok(Some(path)),
+            Err(StorageError::NotFound(_)) => Ok(Some(path)),
+            Err(error) => Err(error),
+        }
     }
 
     /// Download a local object to `dest` without routing through `get()`.
@@ -194,6 +290,15 @@ impl StorageBackend for LocalStorage {
     /// into place, rather than being read fully into RAM.
     async fn download_to_path(&self, key: &str, dest: &Path) -> StorageResult<()> {
         let source = self.object_path(key)?;
+        let source = canonicalize_confined(&self.base_path, &source)
+            .await
+            .map_err(|error| {
+                if matches!(error, StorageError::NotFound(_)) {
+                    StorageError::NotFound(key.to_string())
+                } else {
+                    error
+                }
+            })?;
 
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent)
@@ -226,11 +331,21 @@ impl StorageBackend for LocalStorage {
 
     async fn exists(&self, key: &str) -> StorageResult<bool> {
         let path = self.object_path(key)?;
-        Ok(path.exists())
+        reject_symlink_components(&self.base_path, &path).await?;
+        match canonicalize_confined(&self.base_path, &path).await {
+            Ok(_) => Ok(true),
+            Err(StorageError::NotFound(_)) => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
     async fn delete(&self, key: &str) -> StorageResult<()> {
         let path = self.object_path(key)?;
+        let path = match canonicalize_confined(&self.base_path, &path).await {
+            Ok(path) => path,
+            Err(StorageError::NotFound(_)) => return Ok(()),
+            Err(error) => return Err(error),
+        };
 
         // Directly attempt delete; ignore NotFound (avoids TOCTOU race with exists())
         match fs::remove_file(&path).await {
@@ -267,6 +382,11 @@ impl StorageBackend for LocalStorage {
 
         stream::try_unfold(state, |mut state| async move {
             if let Some(root) = state.root.take() {
+                let root = match canonicalize_confined(&state.base_path, &root).await {
+                    Ok(root) => root,
+                    Err(StorageError::NotFound(_)) => return Ok(None),
+                    Err(error) => return Err(error),
+                };
                 match fs::read_dir(&root).await {
                     Ok(directory) => state.directories.push(directory),
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -297,6 +417,11 @@ impl StorageBackend for LocalStorage {
                     StorageError::Internal(format!("Failed to get file type: {}", error))
                 })?;
                 if file_type.is_dir() {
+                    let path = match canonicalize_confined(&state.base_path, &path).await {
+                        Ok(path) => path,
+                        Err(StorageError::NotFound(_)) => continue,
+                        Err(error) => return Err(error),
+                    };
                     match fs::read_dir(&path).await {
                         Ok(directory) => state.directories.push(directory),
                         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -332,6 +457,15 @@ impl StorageBackend for LocalStorage {
 
     async fn get_size(&self, key: &str) -> StorageResult<u64> {
         let path = self.object_path(key)?;
+        let path = canonicalize_confined(&self.base_path, &path)
+            .await
+            .map_err(|error| {
+                if matches!(error, StorageError::NotFound(_)) {
+                    StorageError::NotFound(key.to_string())
+                } else {
+                    error
+                }
+            })?;
 
         match fs::metadata(&path).await {
             Ok(meta) => Ok(meta.len()),
@@ -468,6 +602,123 @@ mod tests {
             .await
             .expect_err("streaming list prefix must not escape the storage root");
         assert!(matches!(error, StorageError::InvalidArgument(_)));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_operations_reject_symlink_escape_from_storage_root() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store_path = dir.path().join("store");
+        let outside_path = dir.path().join("outside");
+        tokio::fs::create_dir_all(store_path.join("objects"))
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(&outside_path).await.unwrap();
+        tokio::fs::write(outside_path.join("secret"), b"outside")
+            .await
+            .unwrap();
+        symlink(&outside_path, store_path.join("objects/link")).unwrap();
+        let store = LocalStorage::new(store_path.to_str().unwrap()).unwrap();
+        let escaped_key = "objects/link/secret";
+
+        assert!(matches!(
+            store.get(escaped_key).await,
+            Err(StorageError::InvalidArgument(_))
+        ));
+        assert!(matches!(
+            store.get_path(escaped_key).await,
+            Err(StorageError::InvalidArgument(_))
+        ));
+        assert!(matches!(
+            store.get_size(escaped_key).await,
+            Err(StorageError::InvalidArgument(_))
+        ));
+        assert!(matches!(
+            store.exists(escaped_key).await,
+            Err(StorageError::InvalidArgument(_))
+        ));
+
+        let download = dir.path().join("download");
+        assert!(matches!(
+            store.download_to_path(escaped_key, &download).await,
+            Err(StorageError::InvalidArgument(_))
+        ));
+        assert!(!download.exists());
+
+        assert!(matches!(
+            store
+                .put("objects/link/new", Bytes::from_static(b"new"))
+                .await,
+            Err(StorageError::InvalidArgument(_))
+        ));
+        assert!(!outside_path.join("new").exists());
+
+        let upload = dir.path().join("upload");
+        tokio::fs::write(&upload, b"upload").await.unwrap();
+        assert!(matches!(
+            store.put_from_path("objects/link/moved", &upload).await,
+            Err(StorageError::InvalidArgument(_))
+        ));
+        assert!(upload.exists());
+        assert!(!outside_path.join("moved").exists());
+
+        assert!(matches!(
+            store.delete(escaped_key).await,
+            Err(StorageError::InvalidArgument(_))
+        ));
+        assert_eq!(
+            tokio::fs::read(outside_path.join("secret")).await.unwrap(),
+            b"outside"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn list_objects_stream_rejects_symlink_prefix_outside_storage_root() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store_path = dir.path().join("store");
+        let outside_path = dir.path().join("outside");
+        tokio::fs::create_dir_all(&store_path).await.unwrap();
+        tokio::fs::create_dir_all(&outside_path).await.unwrap();
+        tokio::fs::write(outside_path.join("external-shard"), b"outside")
+            .await
+            .unwrap();
+        symlink(&outside_path, store_path.join("shards")).unwrap();
+        let store = LocalStorage::new(store_path.to_str().unwrap()).unwrap();
+
+        let error = store
+            .list_objects_stream("shards/")
+            .try_collect::<Vec<_>>()
+            .await
+            .expect_err("listing must not follow a prefix symlink outside storage");
+        assert!(matches!(error, StorageError::InvalidArgument(_)));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn put_rejects_storage_root_replaced_with_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store_path = dir.path().join("store");
+        let outside_path = dir.path().join("outside");
+        let store = LocalStorage::new(store_path.to_str().unwrap()).unwrap();
+        tokio::fs::create_dir_all(&outside_path).await.unwrap();
+        tokio::fs::remove_dir(&store_path).await.unwrap();
+        symlink(&outside_path, &store_path).unwrap();
+
+        assert!(store.health_check().await.is_err());
+        assert!(matches!(
+            store
+                .put("nested/object", Bytes::from_static(b"outside"))
+                .await,
+            Err(StorageError::InvalidArgument(_))
+        ));
+        assert!(!outside_path.join("nested").exists());
     }
 
     fn assert_no_tmp_files(dir: &Path) {
