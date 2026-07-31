@@ -177,6 +177,38 @@ fn docs_pin_commit_snapshot_and_blob_size_contracts() {
 }
 
 #[test]
+fn docs_describe_hub_module_boundaries_and_schema_recovery() {
+    let architecture = repo_file("docs/architecture.md");
+    for module in [
+        "services/",
+        "commit/",
+        "lfs_proxy/",
+        "migrations.rs",
+        "sqlite_pool.rs",
+    ] {
+        assert!(
+            architecture.contains(module),
+            "architecture docs must include current Hub module: {module}"
+        );
+    }
+
+    let configuration = repo_file("docs/configuration.md");
+    for phrase in [
+        "停止所有 Hub 实例",
+        "HUB_SQLITE_PATH",
+        "-wal",
+        "-shm",
+        "CAS 对象无需重新上传",
+        "不要静默删除",
+    ] {
+        assert!(
+            configuration.contains(phrase),
+            "configuration docs must preserve schema recovery step: {phrase}"
+        );
+    }
+}
+
+#[test]
 fn docs_describe_real_keyring_rotation_and_legacy_mode() {
     let configuration = repo_file("docs/configuration.md");
     for phrase in [

@@ -96,31 +96,34 @@ Xet Server 是一个高性能的**内容寻址存储（CAS）**系统，专为�
 
 ```
 hub/src/
-├── api/              # API 端点处理器
-│   ├── commit.rs     # Commit API (NDJSON) handler facade
-│   ├── commit/       # Commit DTO、ID、内容解码、路径校验 helper
-│   ├── repo.rs       # 仓库 CRUD
-│   ├── tree.rs       # 文件树列出
-│   ├── resolve.rs    # 文件下载
-│   ├── token_exchange.rs  # 令牌交换
-│   ├── lfs_proxy.rs  # LFS 代理 handler facade
-│   ├── lfs_proxy/    # LFS proxy batch/token/streaming helper
-│   ├── whoami.rs     # 用户身份验证
-│   ├── preupload.rs  # 预上传检查
-│   ├── shared.rs     # 共享工具（revision 解析等）
-│   └── internal.rs   # 内部 API（供 CAS 内部使用）
-├── auth/             # 认证
-│   ├── xet_signer.rs # JWT 签名
-│   ├── token_store.rs # 令牌存储
-│   └── extract.rs    # 令牌提取
-├── metadata/         # 元数据管理
-│   └── sqlite.rs     # SQLite 元数据存储
-├── cas_client/       # CAS 客户端
-│   └── mod.rs        # 与 CAS 通信
-├── config.rs         # 配置管理
-├── server.rs         # 服务器启动和路由
-└── error.rs          # 错误类型定义
+├── api/                  # HTTP 参数/响应与错误映射
+│   ├── commit.rs         # Commit NDJSON handler
+│   ├── repo.rs           # 仓库 HTTP API
+│   ├── tree.rs           # 文件树与 Link pagination
+│   ├── resolve.rs        # GET/HEAD 文件解析
+│   ├── token_exchange.rs # CAS token exchange
+│   └── lfs_proxy.rs      # LFS proxy handler
+├── services/             # 业务规则与授权边界
+│   ├── commit.rs         # commit 校验与有序 delta
+│   ├── repo.rs           # 仓库业务逻辑
+│   ├── tree.rs           # 文件树分页语义
+│   ├── resolve.rs        # revision/file 解析
+│   └── lfs_*.rs          # LFS batch/object/upload 服务
+├── commit/               # Commit DTO、ID、内容解码和路径校验
+├── lfs_proxy/            # LFS batch、OID、token 和流式 helper
+├── auth/                 # Hub token 存储、提取与 CAS token 签名
+├── metadata/
+│   ├── mod.rs            # 持久化接口与公共类型
+│   └── sqlite.rs         # SQLite 原子事务实现
+├── cas_client/           # Hub 到 CAS 的有界客户端
+├── migrations.rs         # SQLite schema 初始化与兼容性校验
+├── sqlite_pool.rs        # 共享 SQLite pool 配置
+├── config.rs             # 配置管理
+├── server.rs             # 路由、readiness 与服务启动
+└── error.rs              # 稳定 HTTP 错误边界
 ```
+
+HTTP handler 只负责协议映射，`services/` 执行业务和授权规则，`metadata/` 与 `cas_client/` 负责持久化及外部 I/O。Commit 的 HEAD 校验、revision、完整 snapshot 和新 HEAD 在 SQLite 单个写事务中提交；handler 的提前校验只用于更快返回，不能替代事务内权威校验。
 
 **数据流**：
 
@@ -907,6 +910,7 @@ LFS 对象是原始文件的直接存储，使用 SHA-256 哈希标识。
 
 **Hub API**：
 - 有状态设计（元数据存储在 SQLite，启动时由内置 migration runner 初始化或校验 schema）
+- migration runner 对未来版本、没有迁移路径的旧版本和无法识别的 schema 拒绝启动；恢复时先备份旧库，再用当前版本创建空库并重建 Hub 元数据。CAS 对象独立存储，无需重新上传
 - 当前只实现 SQLite backend；多实例 Hub 是受限部署模式，要求共享同一个 SQLite 文件、相同 `HUB_TOKEN_HASH_SALT` 和相同 Hub signing key，并受 SQLite 单写者限制
 - 负载均衡可以分发无状态 HTTP 请求，但不能绕过 SQLite 写入串行化；生产多写场景需要先引入明确的分布式数据库 backend（当前未实现）
 

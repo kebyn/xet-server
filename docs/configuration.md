@@ -244,6 +244,19 @@ export HUB_TOKEN_TTL_SECONDS=7200  # 2 小时
 - 多 Hub 实例部署仍属于受限模式：所有实例必须连接同一个 SQLite 文件、使用相同 `HUB_TOKEN_HASH_SALT` 和 Hub signing key，并接受 SQLite 单写者限制；项目当前没有内置 Postgres/MySQL 等分布式数据库 backend
 - 建议使用 SSD 存储以获得最佳性能
 
+**不兼容 schema 的恢复步骤**：
+
+当启动日志报告未来版本、旧版本无迁移路径或无法识别的 Hub schema 时，进程会停止启动，不会继续提供流量，也不会自动修改或删除该数据库。恢复时：
+
+1. 停止所有 Hub 实例，确保没有进程继续写入 `HUB_SQLITE_PATH`。
+2. 对数据库做一致备份。可以在停服后保留 `HUB_SQLITE_PATH` 及同目录下可能存在的 `-wal`、`-shm` sidecar，或使用 `sqlite3 "$HUB_SQLITE_PATH" ".backup '/backup/hub-metadata.db'"` 生成备份。
+3. 将旧数据库及 sidecar 移出配置路径并保留；不要静默删除或覆盖原库。
+4. 让 Hub 以原 `HUB_SQLITE_PATH` 启动，migration runner 会创建当前版本的空数据库。
+5. 重新创建 Hub 用户 token、仓库和 commit 元数据，或通过经过验证的离线工具从备份导入。新库会使用新的 token hash salt，因此旧 `hf_xxx` token 不再有效。
+6. CAS 对象无需重新上传：xorb、shard 和 LFS object 与 Hub SQLite 分离，key 和持久格式保持不变；但它们只有在新的 Hub snapshot 再次引用后才能通过 Hub repo API 发现。
+
+项目不承诺任意旧 Hub SQLite schema 可原地升级；没有明确 migration 时，应使用上述备份和重建流程。
+
 **示例**：
 ```bash
 export HUB_SQLITE_PATH=/var/lib/xet/hub-metadata.db
