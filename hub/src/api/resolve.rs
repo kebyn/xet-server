@@ -3,6 +3,7 @@ use crate::config::HubConfig;
 use crate::error::{bad_gateway_error_response, internal_error_response};
 use crate::metadata::{MetadataStore, RepoType};
 use crate::services::resolve::{ResolveFileRequest, ResolveService, ResolveServiceError};
+use actix_web::http::Method;
 use actix_web::{HttpRequest, HttpResponse, web};
 use std::sync::Arc;
 
@@ -56,16 +57,24 @@ async fn handle_resolve(
     let commit_id = resolved.commit_id;
     let file_entry = resolved.file_entry;
 
-    // I8: Build download URL using Hub's URL (not CAS internal URL)
-    // Clients go through Hub, which proxies to CAS
+    if req.method() == Method::HEAD {
+        return HttpResponse::Ok()
+            .content_type("application/octet-stream")
+            .insert_header(("Content-Length", file_entry.size.to_string()))
+            .insert_header(("X-Repo-Commit", commit_id.as_str()))
+            .insert_header(("ETag", format!("\"{}\"", file_entry.cas_hash)))
+            .insert_header(("X-Linked-Size", file_entry.size.to_string()))
+            .insert_header(("X-Linked-Etag", file_entry.cas_hash.as_str()))
+            .finish();
+    }
+
+    // Clients download through Hub rather than a CAS internal URL.
     let hub_base_url = config.server.base_url();
 
     // Generate a short-lived proxy token for the download
     let xet_signer =
         req.app_data::<web::Data<std::sync::Arc<crate::auth::xet_signer::XetSigner>>>();
     let proxy_token_param = if let Some(signer) = xet_signer {
-        // I2 fix: Handle signing errors gracefully - if we can't sign, omit the token
-        // I6 fix: Use actual username instead of "anonymous" for audit trail
         match signer.sign_proxy(
             auth.username(),
             &file_entry.cas_hash,
@@ -125,8 +134,7 @@ async fn handle_resolve(
                                 .body(data);
                         }
                         Err(crate::error::HubError::NotFound(_)) => {
-                            // I8 fix: If CAS explicitly returns 404, propagate it to client
-                            // instead of redirecting to a URL that will also 404
+                            // Avoid redirecting to a URL that will also return 404.
                             return HttpResponse::NotFound().json(serde_json::json!({
                                 "error": format!("File content not found in storage: {}", file_entry.cas_hash),
                                 "error_type": "NotFoundError"

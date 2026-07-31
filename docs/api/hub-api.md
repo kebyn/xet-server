@@ -557,9 +557,13 @@ Authorization: Bearer hf_xxx
 
 **HEAD 响应头**：
 - `Content-Length`: 文件大小（字节）
-- `Content-Type`: 文件 MIME 类型（如 `application/octet-stream`）
-- `X-Xet-Hash`: 文件的 BLAKE3 哈希（如果可用）
-- `ETag`: 文件版本标识
+- `Content-Type`: `application/octet-stream`
+- `X-Repo-Commit`: 实际解析到的 commit ID
+- `ETag`: 带双引号的 snapshot SHA-256 OID
+- `X-Linked-Size`: 文件大小（兼容 HuggingFace Hub 客户端）
+- `X-Linked-Etag`: snapshot SHA-256 OID（兼容 HuggingFace Hub 客户端）
+
+HEAD 在完成仓库权限、revision 和 snapshot 文件查询后直接返回上述元数据，不签发下载 token，也不向 CAS 请求文件 body。
 
 **使用场景**：
 - **GET**: 下载完整文件内容
@@ -585,7 +589,8 @@ curl -I \
 # HTTP/1.1 200 OK
 # Content-Length: 104857600
 # Content-Type: application/octet-stream
-# X-Xet-Hash: blake3:abc123...
+# X-Repo-Commit: abc123...
+# ETag: "0123456789abcdef..."
 
 # 使用泛型回退路由（省略 type，默认 models）
 curl -o model.bin \
