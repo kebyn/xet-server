@@ -356,6 +356,7 @@ Commit API 的 NDJSON 有以下顺序和快照语义：
 - `file`、`lfsFile` 和 `deletedEntry` 按请求中的原始顺序执行。同一路径出现多次时，后面的 operation 覆盖前面的结果。
 - 每个 commit 保存完整文件树快照：先复制当前 HEAD 的所有父条目，再按顺序应用本次修改和删除；请求中未提及的父条目会保留到新 commit。
 - 非首个 commit 必须在 header 中提供与当前 HEAD 完全一致的 `parentRevision`。不一致或遗漏会返回 `409 Conflict`，最终比较在 SQLite transaction 中原子执行。
+- 所有 file/LFS/delete operation 的 `path` 按 UTF-8 字节计算不得超过 4096 字节。
 
 **NDJSON 操作类型**：
 

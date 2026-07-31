@@ -8,7 +8,7 @@ use crate::commit::id::generate_commit_id;
 #[cfg(test)]
 use crate::commit::types::MAX_INLINE_SIZE;
 #[cfg(test)]
-use crate::commit::validation::validate_file_path;
+use crate::commit::validation::{MAX_FILE_PATH_LENGTH, validate_file_path};
 use crate::error::{CAS_ERROR_MESSAGE, bad_gateway_error_response, internal_error_response};
 #[cfg(test)]
 use crate::metadata::Revision;
@@ -689,13 +689,18 @@ mod tests {
         assert_eq!(decoded, b"{\"test\": true}".to_vec());
     }
 
-    // I1 fix: Tests for path validation
     #[test]
     fn test_validate_file_path_valid() {
         assert!(validate_file_path("config.json").is_ok());
         assert!(validate_file_path("src/main.rs").is_ok());
         assert!(validate_file_path("a/b/c/d.txt").is_ok());
         assert!(validate_file_path("file..name").is_ok()); // Double dots in name (not component) OK
+    }
+
+    #[test]
+    fn test_validate_file_path_length_boundary() {
+        assert!(validate_file_path(&"a".repeat(MAX_FILE_PATH_LENGTH)).is_ok());
+        assert!(validate_file_path(&"a".repeat(MAX_FILE_PATH_LENGTH + 1)).is_err());
     }
 
     #[test]

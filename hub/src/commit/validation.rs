@@ -1,8 +1,18 @@
+pub(crate) const MAX_FILE_PATH_LENGTH: usize = 4096;
+
 /// Validate file paths supplied in commit operations.
 ///
-/// Rejects empty paths, absolute paths, path traversal components, null bytes,
-/// empty path components, and Windows reserved names.
+/// Rejects overlong or empty paths, absolute paths, path traversal components,
+/// null bytes, empty path components, and Windows reserved names.
 pub(crate) fn validate_file_path(path: &str) -> Result<(), String> {
+    if path.len() > MAX_FILE_PATH_LENGTH {
+        return Err(format!(
+            "File path is too long ({} bytes), maximum is {} bytes",
+            path.len(),
+            MAX_FILE_PATH_LENGTH
+        ));
+    }
+
     if path.is_empty() {
         return Err("File path cannot be empty".to_string());
     }
