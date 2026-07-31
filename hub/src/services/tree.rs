@@ -1,11 +1,16 @@
-use std::{collections::HashSet, sync::Arc};
+use std::sync::Arc;
 
 use crate::metadata::{FileEntry, MetadataError, MetadataStore, Repo, RepoType};
 use crate::services::shared::{ResolveRevisionError, can_access_repo, resolve_revision_id};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+
+const TREE_PAGE_SIZE: usize = 1_000;
+const MAX_TREE_CURSOR_LENGTH: usize = 8 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TreeServiceError {
     NotFound(String),
+    Validation(String),
     Internal(String),
 }
 
@@ -31,6 +36,13 @@ pub(crate) struct TreeListRequest<'a> {
     pub(crate) revision: &'a str,
     pub(crate) tree_path: &'a str,
     pub(crate) recursive: bool,
+    pub(crate) cursor: Option<&'a str>,
+}
+
+#[derive(Debug)]
+pub(crate) struct TreeListingPage {
+    pub(crate) entries: Vec<TreeListingEntry>,
+    pub(crate) next_cursor: Option<String>,
 }
 
 pub(crate) struct TreeService {
@@ -45,8 +57,9 @@ impl TreeService {
     pub(crate) async fn list_tree(
         &self,
         request: TreeListRequest<'_>,
-    ) -> Result<Vec<TreeListingEntry>, TreeServiceError> {
+    ) -> Result<TreeListingPage, TreeServiceError> {
         let tree_path = normalize_tree_path(request.tree_path);
+        let after_path = request.cursor.map(decode_cursor).transpose()?;
         let repo = self
             .load_repo(request.namespace, request.repo_name, request.repo_type)
             .await?;
@@ -66,17 +79,26 @@ impl TreeService {
 
         let entries = self
             .metadata
-            .get_file_tree_prefix(repo.id, &commit_id, &tree_path)
+            .get_file_tree_prefix_page(
+                repo.id,
+                &commit_id,
+                &tree_path,
+                after_path.as_deref(),
+                TREE_PAGE_SIZE,
+            )
             .await
             .map_err(|err| TreeServiceError::Internal(err.to_string()))?;
 
         let mut tree_entries = if request.recursive {
-            recursive_entries(&entries, &tree_path)
+            recursive_entries(&entries.entries, &tree_path)
         } else {
-            non_recursive_entries(&entries, &tree_path)
+            non_recursive_entries(&entries.entries, &tree_path, after_path.as_deref())
         };
         tree_entries.sort_by(|a, b| a.path.cmp(&b.path));
-        Ok(tree_entries)
+        Ok(TreeListingPage {
+            entries: tree_entries,
+            next_cursor: entries.next_after_path.as_deref().map(encode_cursor),
+        })
     }
 
     async fn load_repo(
@@ -117,24 +139,27 @@ fn join_tree_path(prefix: &str, name: &str) -> String {
     }
 }
 
-fn infer_directories(entries: &[FileEntry], prefix: &str) -> Vec<String> {
-    let mut dirs = HashSet::new();
+fn encode_cursor(path: &str) -> String {
+    URL_SAFE_NO_PAD.encode(path.as_bytes())
+}
 
-    for entry in entries {
-        let rel_path = match strip_tree_prefix(&entry.path, prefix) {
-            Some(path) => path,
-            None => continue,
-        };
-        if rel_path.is_empty() {
-            continue;
-        }
-
-        if let Some(pos) = rel_path.find('/') {
-            dirs.insert(rel_path[..pos].to_string());
-        }
+fn decode_cursor(cursor: &str) -> Result<String, TreeServiceError> {
+    if cursor.is_empty() || cursor.len() > MAX_TREE_CURSOR_LENGTH {
+        return Err(TreeServiceError::Validation(
+            "Invalid tree pagination cursor".to_string(),
+        ));
     }
-
-    dirs.into_iter().collect()
+    let decoded = URL_SAFE_NO_PAD
+        .decode(cursor)
+        .map_err(|_| TreeServiceError::Validation("Invalid tree pagination cursor".to_string()))?;
+    let path = String::from_utf8(decoded)
+        .map_err(|_| TreeServiceError::Validation("Invalid tree pagination cursor".to_string()))?;
+    if path.is_empty() {
+        return Err(TreeServiceError::Validation(
+            "Invalid tree pagination cursor".to_string(),
+        ));
+    }
+    Ok(path)
 }
 
 fn recursive_entries(entries: &[FileEntry], tree_path: &str) -> Vec<TreeListingEntry> {
@@ -156,23 +181,37 @@ fn recursive_entries(entries: &[FileEntry], tree_path: &str) -> Vec<TreeListingE
         .collect()
 }
 
-fn non_recursive_entries(entries: &[FileEntry], tree_path: &str) -> Vec<TreeListingEntry> {
+fn non_recursive_entries(
+    entries: &[FileEntry],
+    tree_path: &str,
+    after_path: Option<&str>,
+) -> Vec<TreeListingEntry> {
     let mut tree_entries = Vec::new();
-
-    for dir in infer_directories(entries, tree_path) {
-        tree_entries.push(TreeListingEntry {
-            entry_type: TreeListingEntryType::Directory,
-            oid: None,
-            size: 0,
-            path: join_tree_path(tree_path, &dir),
+    let mut last_directory = after_path
+        .and_then(|path| strip_tree_prefix(path, tree_path))
+        .and_then(|path| {
+            path.split_once('/')
+                .map(|(directory, _)| directory.to_string())
         });
-    }
 
     for entry in entries {
         let Some(rel_path) = strip_tree_prefix(&entry.path, tree_path) else {
             continue;
         };
-        if !rel_path.is_empty() && !rel_path.contains('/') {
+        if rel_path.is_empty() {
+            continue;
+        }
+        if let Some((directory, _)) = rel_path.split_once('/') {
+            if last_directory.as_deref() != Some(directory) {
+                tree_entries.push(TreeListingEntry {
+                    entry_type: TreeListingEntryType::Directory,
+                    oid: None,
+                    size: 0,
+                    path: join_tree_path(tree_path, directory),
+                });
+                last_directory = Some(directory.to_string());
+            }
+        } else {
             tree_entries.push(TreeListingEntry {
                 entry_type: TreeListingEntryType::File,
                 oid: Some(entry.cas_hash.clone()),
@@ -250,9 +289,11 @@ mod tests {
                 revision: "main",
                 tree_path: "",
                 recursive: false,
+                cursor: None,
             })
             .await
-            .unwrap();
+            .unwrap()
+            .entries;
 
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].entry_type, TreeListingEntryType::File);
@@ -292,9 +333,11 @@ mod tests {
                 revision: "main",
                 tree_path: "models",
                 recursive: true,
+                cursor: None,
             })
             .await
-            .unwrap();
+            .unwrap()
+            .entries;
 
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].entry_type, TreeListingEntryType::File);
@@ -331,9 +374,11 @@ mod tests {
                 revision: "main",
                 tree_path: "models",
                 recursive: true,
+                cursor: None,
             })
             .await
-            .unwrap();
+            .unwrap()
+            .entries;
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].path, "a.bin");
@@ -359,6 +404,7 @@ mod tests {
                 revision: "main",
                 tree_path: "",
                 recursive: false,
+                cursor: None,
             })
             .await
             .unwrap_err();
@@ -387,6 +433,7 @@ mod tests {
                 revision: "main",
                 tree_path: "",
                 recursive: false,
+                cursor: None,
             })
             .await
             .unwrap_err();

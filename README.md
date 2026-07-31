@@ -278,6 +278,7 @@ CAS 对象访问是 content-capability based：持有有效 CAS token 的客户�
 - Commit API 的 LFS `oid` 是不带 `sha256:` 前缀的 64 字符十六进制值。Hub 通过 CAS `HEAD /internal/blob/{oid}` 的必需 `X-Blob-Size` 校验声明大小；对象不存在或大小不一致返回 422。
 - Shard 从本地文件或远端临时文件有界解析，不保留整份原始字节副本；启动重建流式枚举 key，最多 10 个 shard 一批。S3 列表固定 1000 项一页并校验 continuation token 进度。S3 multipart 以唯一 upload ID 跟踪并在错误、取消和 shutdown 时 best-effort abort，bucket lifecycle rule 仍是进程崩溃时的最终兜底。
 - Hub inline resolve 在返回小文件前验证 snapshot 大小和 SHA-256 OID；损坏的 CAS 响应不会降级重定向。内部 SQL、路径、S3 配置和 CAS upstream body 只写服务端日志。Hub 对客户端返回稳定通用的 500/502 文案，CAS 的普通 500 JSON 为 `{"error":"Internal server error"}`。
+- Hub tree listing 使用每页 1000 个 snapshot 文件条目的 SQLite keyset pagination，并通过标准 `Link rel="next"` 与 `huggingface_hub` 透明分页。
 
 ## ⚙️ 配置参考
 

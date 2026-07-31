@@ -468,6 +468,15 @@ EOF
 
 **查询参数**：
 - `recursive` (optional): 是否递归列出，默认 `false`
+- `cursor` (optional): 服务端生成的 URL-safe 分页游标；客户端应直接跟随 `Link`，不要自行构造
+
+普通 tree listing 每页最多基于 1000 个有序 snapshot 文件条目生成响应。还有后续数据时，响应包含与 `huggingface_hub` 分页器兼容的 RFC 8288 header：
+
+```http
+Link: <http://localhost:8080/api/models/my-org/my-model/tree/main?recursive=true&cursor=...>; rel="next"
+```
+
+`huggingface_hub` 会透明跟随该链接；直接调用 HTTP API 的客户端应持续跟随 `rel="next"`，直到响应不再包含 `Link`。游标无效或重复指定返回 `400 ValidationError`。
 
 **响应**：
 ```json
@@ -476,27 +485,19 @@ EOF
     "type": "file",
     "oid": "abc123...",
     "size": 1234,
-    "path": "config.json",
-    "lastCommit": "abc123...",
-    "lastModified": "2026-06-12T10:00:00Z"
+    "path": "config.json"
   },
   {
     "type": "file",
     "oid": "def456...",
     "size": 104857600,
-    "path": "model.safetensors",
-    "lastCommit": "abc123...",
-    "lastModified": "2026-06-12T10:00:00Z",
-    "lfs": {
-      "oid": "def456...",
-      "size": 104857600,
-      "pointerSize": 134
-    }
+    "path": "model.safetensors"
   },
   {
     "type": "directory",
     "path": "tokenizer",
-    "oid": "ghi789..."
+    "oid": null,
+    "size": 0
   }
 ]
 ```

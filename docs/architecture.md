@@ -646,6 +646,8 @@ export CAS_SIGNING_KID=hub-key-1
 └──────────┘
 ```
 
+Tree listing 使用 `(repo_id, commit_id, path)` 上的 SQLite keyset pagination，不先把完整 snapshot 读入内存。每次查询最多读取 1001 个有序文件条目，其中 1000 个用于当前页，额外一项只用于判断是否生成 `Link rel="next"`。分页 cursor 是最后一个已处理原始文件路径的 URL-safe 编码；非递归列表会携带页边界目录状态，避免同一目录在相邻页重复返回。官方 `huggingface_hub` 客户端会自动跟随后续链接。
+
 ### 跨协议去重
 
 **场景**：文件通过 Git LFS 上传，然后通过 HF API 下载

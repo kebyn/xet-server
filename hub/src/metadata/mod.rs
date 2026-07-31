@@ -73,6 +73,14 @@ pub struct FileEntry {
     pub is_lfs: bool,
 }
 
+/// One ordered page of snapshot file entries.
+#[derive(Debug, Clone)]
+pub struct FileTreePage {
+    pub entries: Vec<FileEntry>,
+    /// Last raw file path in this page when another page is available.
+    pub next_after_path: Option<String>,
+}
+
 /// Metadata store error
 #[derive(Debug, Error)]
 pub enum MetadataError {
@@ -151,6 +159,40 @@ pub trait MetadataStore: Send + Sync {
         commit_id: &str,
         prefix: &str,
     ) -> Result<Vec<FileEntry>, MetadataError>;
+
+    /// Get an ordered, keyset-paginated page of file entries below a prefix.
+    ///
+    /// The default preserves compatibility for non-SQLite test or extension
+    /// backends. Production backends should override this to avoid collecting
+    /// the complete matching tree.
+    async fn get_file_tree_prefix_page(
+        &self,
+        repo_id: i64,
+        commit_id: &str,
+        prefix: &str,
+        after_path: Option<&str>,
+        limit: usize,
+    ) -> Result<FileTreePage, MetadataError> {
+        let mut entries = self
+            .get_file_tree_prefix(repo_id, commit_id, prefix)
+            .await?;
+        entries.sort_by(|left, right| left.path.cmp(&right.path));
+        if let Some(after_path) = after_path {
+            entries.retain(|entry| entry.path.as_str() > after_path);
+        }
+
+        let has_more = entries.len() > limit;
+        entries.truncate(limit);
+        let next_after_path = if has_more {
+            entries.last().map(|entry| entry.path.clone())
+        } else {
+            None
+        };
+        Ok(FileTreePage {
+            entries,
+            next_after_path,
+        })
+    }
 
     /// Resolve a single file
     async fn resolve_file(

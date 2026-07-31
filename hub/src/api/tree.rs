@@ -1,4 +1,5 @@
 use crate::auth::extract::{AuthRead, AuthUser};
+use crate::config::HubConfig;
 use crate::error::internal_error_response;
 use crate::metadata::{MetadataStore, RepoType};
 use crate::services::tree::{
@@ -34,6 +35,9 @@ fn tree_service_error_response(err: TreeServiceError) -> HttpResponse {
         TreeServiceError::NotFound(msg) => {
             HttpResponse::NotFound().json(error_json(msg, "NotFoundError"))
         }
+        TreeServiceError::Validation(msg) => {
+            HttpResponse::BadRequest().json(error_json(msg, "ValidationError"))
+        }
         TreeServiceError::Internal(msg) => internal_error_response("Tree request failed", msg),
     }
 }
@@ -49,6 +53,36 @@ fn parse_recursive_query(req: &HttpRequest) -> bool {
             })
         })
         .unwrap_or(false)
+}
+
+fn parse_cursor_query(req: &HttpRequest) -> Result<Option<String>, String> {
+    let mut cursor = None;
+    for (key, value) in url::form_urlencoded::parse(req.query_string().as_bytes()) {
+        if key != "cursor" {
+            continue;
+        }
+        if cursor.replace(value.into_owned()).is_some() {
+            return Err("Tree pagination cursor must be specified at most once".to_string());
+        }
+    }
+    Ok(cursor)
+}
+
+fn build_next_link(req: &HttpRequest, config: &HubConfig, cursor: &str) -> String {
+    let mut query = url::form_urlencoded::Serializer::new(String::new());
+    for (key, value) in url::form_urlencoded::parse(req.query_string().as_bytes()) {
+        if key != "cursor" {
+            query.append_pair(&key, &value);
+        }
+    }
+    query.append_pair("cursor", cursor);
+    let query = query.finish();
+    format!(
+        "{}{}?{}",
+        config.server.base_url().trim_end_matches('/'),
+        req.path(),
+        query
+    )
 }
 
 fn service_entry_to_api(entry: TreeListingEntry) -> TreeEntry {
@@ -75,8 +109,14 @@ async fn handle_tree(
 ) -> HttpResponse {
     let (namespace, repo_name, revision, tree_path) = path.into_inner();
     let recursive = parse_recursive_query(&req);
+    let cursor = match parse_cursor_query(&req) {
+        Ok(cursor) => cursor,
+        Err(error) => {
+            return HttpResponse::BadRequest().json(error_json(error, "ValidationError"));
+        }
+    };
     let service = tree_service(&metadata);
-    let entries = match service
+    let page = match service
         .list_tree(TreeListRequest {
             username: &auth.info.username,
             namespace: &namespace,
@@ -85,15 +125,27 @@ async fn handle_tree(
             revision: &revision,
             tree_path: &tree_path,
             recursive,
+            cursor: cursor.as_deref(),
         })
         .await
     {
-        Ok(entries) => entries,
+        Ok(page) => page,
         Err(err) => return tree_service_error_response(err),
     };
 
-    let tree_entries: Vec<TreeEntry> = entries.into_iter().map(service_entry_to_api).collect();
-    HttpResponse::Ok().json(tree_entries)
+    let tree_entries: Vec<TreeEntry> = page.entries.into_iter().map(service_entry_to_api).collect();
+    let mut response = HttpResponse::Ok();
+    if let Some(next_cursor) = page.next_cursor {
+        let Some(config) = req.app_data::<web::Data<HubConfig>>() else {
+            return internal_error_response(
+                "Tree pagination failed",
+                "Hub configuration is unavailable",
+            );
+        };
+        let next_link = build_next_link(&req, config, &next_cursor);
+        response.insert_header(("Link", format!("<{next_link}>; rel=\"next\"")));
+    }
+    response.json(tree_entries)
 }
 
 // Model tree handler
@@ -507,5 +559,231 @@ mod tests {
         let file_entry = body.iter().find(|e| e.path == "README.md");
         assert!(file_entry.is_some());
         assert_eq!(file_entry.unwrap().entry_type, "file");
+    }
+
+    #[actix_web::test]
+    async fn test_recursive_tree_listing_uses_hf_link_pagination() {
+        let (token_store, metadata) = setup_test_env_with_files().await;
+        let token = token_store
+            .create_token("testuser", "test-token", "read")
+            .await
+            .unwrap();
+        let repo = metadata
+            .create_repo("testuser", "large-tree", RepoType::Model, false)
+            .await
+            .unwrap();
+        let commit_id = "abc123";
+        metadata
+            .add_revision(Revision {
+                commit_id: commit_id.to_string(),
+                repo_id: repo.id,
+                parent: None,
+                message: "Initial".to_string(),
+                author: "testuser".to_string(),
+                created_at: 1000,
+            })
+            .await
+            .unwrap();
+        metadata.set_head(repo.id, commit_id).await.unwrap();
+        metadata
+            .add_file_entries(
+                (0..1001)
+                    .map(|index| FileEntry {
+                        path: format!("files/{index:04}.bin"),
+                        repo_id: repo.id,
+                        commit_id: commit_id.to_string(),
+                        size: 1,
+                        cas_hash: format!("hash-{index}"),
+                        is_lfs: true,
+                    })
+                    .collect(),
+            )
+            .await
+            .unwrap();
+
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(token_store))
+                .app_data(web::Data::new(metadata))
+                .app_data(web::Data::new(HubConfig::default()))
+                .route(
+                    "/api/models/{ns}/{repo}/tree/{revision}/{path:.*}",
+                    web::get().to(tree_model),
+                ),
+        )
+        .await;
+
+        let req = actix_test::TestRequest::get()
+            .uri("/api/models/testuser/large-tree/tree/main/?recursive=true&expand=false")
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request();
+        let resp = actix_test::call_service(&app, req).await;
+        assert!(resp.status().is_success());
+        let link = resp
+            .headers()
+            .get("Link")
+            .expect("first tree page should advertise the next page")
+            .to_str()
+            .unwrap()
+            .to_string();
+        let first_page: Vec<TreeEntry> = actix_test::read_body_json(resp).await;
+        assert_eq!(first_page.len(), 1000);
+
+        let next_url = link
+            .strip_prefix('<')
+            .and_then(|value| value.strip_suffix(">; rel=\"next\""))
+            .expect("Link header should contain one next relation");
+        let next_url = url::Url::parse(next_url).expect("next link should be absolute");
+        let next_query: std::collections::HashMap<_, _> =
+            next_url.query_pairs().into_owned().collect();
+        assert_eq!(
+            next_query.get("recursive").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(next_query.get("expand").map(String::as_str), Some("false"));
+        assert!(next_query.contains_key("cursor"));
+        let next_uri = match next_url.query() {
+            Some(query) => format!("{}?{}", next_url.path(), query),
+            None => next_url.path().to_string(),
+        };
+        let req = actix_test::TestRequest::get()
+            .uri(&next_uri)
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request();
+        let resp = actix_test::call_service(&app, req).await;
+        assert!(resp.status().is_success());
+        assert!(resp.headers().get("Link").is_none());
+        let second_page: Vec<TreeEntry> = actix_test::read_body_json(resp).await;
+        assert_eq!(second_page.len(), 1);
+        assert_eq!(second_page[0].path, "files/1000.bin");
+    }
+
+    #[actix_web::test]
+    async fn test_non_recursive_tree_pagination_does_not_repeat_directory() {
+        let (token_store, metadata) = setup_test_env_with_files().await;
+        let token = token_store
+            .create_token("testuser", "test-token", "read")
+            .await
+            .unwrap();
+        let repo = metadata
+            .create_repo("testuser", "large-directory", RepoType::Model, false)
+            .await
+            .unwrap();
+        let commit_id = "abc123";
+        metadata
+            .add_revision(Revision {
+                commit_id: commit_id.to_string(),
+                repo_id: repo.id,
+                parent: None,
+                message: "Initial".to_string(),
+                author: "testuser".to_string(),
+                created_at: 1000,
+            })
+            .await
+            .unwrap();
+        metadata.set_head(repo.id, commit_id).await.unwrap();
+        metadata
+            .add_file_entries(
+                (0..1001)
+                    .map(|index| FileEntry {
+                        path: format!("one-directory/{index:04}.bin"),
+                        repo_id: repo.id,
+                        commit_id: commit_id.to_string(),
+                        size: 1,
+                        cas_hash: format!("hash-{index}"),
+                        is_lfs: true,
+                    })
+                    .collect(),
+            )
+            .await
+            .unwrap();
+
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(token_store))
+                .app_data(web::Data::new(metadata))
+                .app_data(web::Data::new(HubConfig::default()))
+                .route(
+                    "/api/models/{ns}/{repo}/tree/{revision}/{path:.*}",
+                    web::get().to(tree_model),
+                ),
+        )
+        .await;
+
+        let req = actix_test::TestRequest::get()
+            .uri("/api/models/testuser/large-directory/tree/main/")
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request();
+        let resp = actix_test::call_service(&app, req).await;
+        let link = resp.headers().get("Link").unwrap().to_str().unwrap();
+        let next_url = link
+            .strip_prefix('<')
+            .and_then(|value| value.strip_suffix(">; rel=\"next\""))
+            .and_then(|value| url::Url::parse(value).ok())
+            .unwrap();
+        let first_page: Vec<TreeEntry> = actix_test::read_body_json(resp).await;
+        assert_eq!(first_page.len(), 1);
+        assert_eq!(first_page[0].entry_type, "directory");
+        assert_eq!(first_page[0].path, "one-directory");
+
+        let next_uri = format!("{}?{}", next_url.path(), next_url.query().unwrap());
+        let req = actix_test::TestRequest::get()
+            .uri(&next_uri)
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request();
+        let resp = actix_test::call_service(&app, req).await;
+        assert!(resp.headers().get("Link").is_none());
+        let second_page: Vec<TreeEntry> = actix_test::read_body_json(resp).await;
+        assert!(second_page.is_empty());
+    }
+
+    #[actix_web::test]
+    async fn test_tree_rejects_malformed_or_repeated_cursor() {
+        let (token_store, metadata) = setup_test_env_with_files().await;
+        let token = token_store
+            .create_token("testuser", "test-token", "read")
+            .await
+            .unwrap();
+        let repo = metadata
+            .create_repo("testuser", "cursor-test", RepoType::Model, false)
+            .await
+            .unwrap();
+        let commit_id = "abc123";
+        metadata
+            .add_revision(Revision {
+                commit_id: commit_id.to_string(),
+                repo_id: repo.id,
+                parent: None,
+                message: "Initial".to_string(),
+                author: "testuser".to_string(),
+                created_at: 1000,
+            })
+            .await
+            .unwrap();
+        metadata.set_head(repo.id, commit_id).await.unwrap();
+
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(token_store))
+                .app_data(web::Data::new(metadata))
+                .route(
+                    "/api/models/{ns}/{repo}/tree/{revision}/{path:.*}",
+                    web::get().to(tree_model),
+                ),
+        )
+        .await;
+
+        for query in ["cursor=%2A%2A%2A", "cursor=YQ&cursor=Yg"] {
+            let req = actix_test::TestRequest::get()
+                .uri(&format!(
+                    "/api/models/testuser/cursor-test/tree/main/?{query}"
+                ))
+                .insert_header(("Authorization", format!("Bearer {token}")))
+                .to_request();
+            let resp = actix_test::call_service(&app, req).await;
+            assert_eq!(resp.status(), actix_web::http::StatusCode::BAD_REQUEST);
+            let body: serde_json::Value = actix_test::read_body_json(resp).await;
+            assert_eq!(body["error_type"], "ValidationError");
+        }
     }
 }
