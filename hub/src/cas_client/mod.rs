@@ -3,6 +3,7 @@ use crate::error::HubError;
 use bytes::{Bytes, BytesMut};
 use futures_util::StreamExt;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::time::Duration;
 
 const BLOB_SIZE_HEADER: &str = "X-Blob-Size";
@@ -340,14 +341,24 @@ impl CasClient {
         }
     }
 
-    /// Download a blob from CAS via LFS endpoint (buffered version)
-    /// Loads entire file into memory. Use proxy_lfs_download_streaming for large files.
-    /// I7 fix: Check Content-Length before loading body to prevent memory exhaustion.
+    /// Download and verify a blob from CAS via the LFS endpoint.
+    ///
+    /// This buffered path is only for small inline resolve responses. The
+    /// snapshot size is used as the read limit, then both the exact size and
+    /// SHA-256 OID are checked before any bytes cross the Hub trust boundary.
     pub async fn proxy_lfs_download(
         &self,
         oid: &str,
+        expected_size: u64,
         token: &str,
     ) -> Result<bytes::Bytes, HubError> {
+        if expected_size > self.max_download_size {
+            return Err(HubError::CasError(format!(
+                "Expected CAS object size {} exceeds configured download limit {}",
+                expected_size, self.max_download_size
+            )));
+        }
+
         let url = format!("{}/lfs/objects/{}", self.base_url, oid);
         let resp = self
             .client
@@ -359,9 +370,27 @@ impl CasClient {
 
         match resp.status().as_u16() {
             200 => {
-                let body = read_response_body_limited(resp, self.max_download_size)
+                let body = read_response_body_limited(resp, expected_size)
                     .await
                     .map_err(|e| HubError::CasError(format!("CAS download rejected: {}", e)))?;
+
+                let actual_size = u64::try_from(body.len()).map_err(|_| {
+                    HubError::CasError("CAS download size cannot be represented as u64".to_string())
+                })?;
+                if actual_size != expected_size {
+                    return Err(HubError::CasError(format!(
+                        "CAS download size mismatch for {}: expected {}, received {}",
+                        oid, expected_size, actual_size
+                    )));
+                }
+
+                let actual_oid = hex::encode(Sha256::digest(&body));
+                if !actual_oid.eq_ignore_ascii_case(oid) {
+                    return Err(HubError::CasError(format!(
+                        "CAS download hash mismatch for {}: received {}",
+                        oid, actual_oid
+                    )));
+                }
 
                 Ok(body)
             }
@@ -513,7 +542,7 @@ mod tests {
 
         let result = tokio::time::timeout(
             Duration::from_secs(1),
-            client.proxy_lfs_download(&"a".repeat(64), "token"),
+            client.proxy_lfs_download(&"a".repeat(64), 1024, "token"),
         )
         .await;
         handle.stop(false).await;

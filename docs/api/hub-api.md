@@ -543,8 +543,9 @@ Authorization: Bearer hf_xxx
 - `200 OK`: 返回文件内容
 - `302 Found`: 重定向到 CDN（大文件）
 - `404 Not Found`: 文件不存在
+- `502 Bad Gateway`: CAS 不可用，或返回的内容与 commit snapshot 不一致
 
-小文件直读 CAS 时，Hub 使用短期 `xet_xxx` user token（`read` scope）调用 CAS `/lfs/objects/{oid}`。大文件或 LFS action URL 使用 `proxy_xxx` token 绑定 OID 和 download/upload operation。
+小文件直读 CAS 时，Hub 使用短期 `xet_xxx` user token（`read` scope）调用 CAS `/lfs/objects/{oid}`。读取上限收紧为 snapshot 中的文件大小；只有实际字节数与声明大小完全一致，且内容 SHA-256 等于 snapshot OID 时才返回 `200`。校验失败会记录服务端详情并返回脱敏的 `502`，不会重定向到同一个损坏对象。大文件或 LFS action URL 使用 `proxy_xxx` token 绑定 OID 和 download/upload operation。
 
 **HEAD 响应**：
 - `200 OK`: 返回文件元信息的响应头（不返回 body）

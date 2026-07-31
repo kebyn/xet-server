@@ -1,6 +1,6 @@
 use crate::auth::extract::{AuthRead, AuthUser};
 use crate::config::HubConfig;
-use crate::error::internal_error_response;
+use crate::error::{bad_gateway_error_response, internal_error_response};
 use crate::metadata::{MetadataStore, RepoType};
 use crate::services::resolve::{ResolveFileRequest, ResolveService, ResolveServiceError};
 use actix_web::{HttpRequest, HttpResponse, web};
@@ -114,7 +114,7 @@ async fn handle_resolve(
             ) {
                 Ok((cas_read_token, _)) => {
                     match cas
-                        .proxy_lfs_download(&file_entry.cas_hash, &cas_read_token)
+                        .proxy_lfs_download(&file_entry.cas_hash, file_entry.size, &cas_read_token)
                         .await
                     {
                         Ok(data) => {
@@ -133,12 +133,11 @@ async fn handle_resolve(
                             }));
                         }
                         Err(e) => {
-                            tracing::warn!(
-                                "CAS inline fetch failed for {}: {}",
-                                file_entry.cas_hash,
-                                e
+                            return bad_gateway_error_response(
+                                "CAS inline fetch failed",
+                                e,
+                                "BadGateway",
                             );
-                            // Fall through to redirect for transient errors (network, timeout)
                         }
                     }
                 }

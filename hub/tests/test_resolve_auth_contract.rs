@@ -82,13 +82,14 @@ async fn start_download_cas_requiring_xet_scope(
     url
 }
 
-#[actix_web::test]
-async fn resolve_inline_fetch_uses_xet_user_token_for_cas_download() {
+async fn resolve_inline_response(
+    expected_content: &[u8],
+    expected_size: u64,
+    cas_content: Vec<u8>,
+) -> (actix_web::http::StatusCode, web::Bytes) {
     let signer = test_signer();
-    let content = b"inline".to_vec();
-    let oid = hex::encode(Sha256::digest(&content));
-    let cas_url =
-        start_download_cas_requiring_xet_scope(signer.clone(), "read", content.clone()).await;
+    let oid = hex::encode(Sha256::digest(expected_content));
+    let cas_url = start_download_cas_requiring_xet_scope(signer.clone(), "read", cas_content).await;
 
     let token_store = Arc::new(TokenStore::in_memory().await.unwrap());
     let token = token_store
@@ -119,7 +120,7 @@ async fn resolve_inline_fetch_uses_xet_user_token_for_cas_download() {
             path: "config.json".to_string(),
             repo_id: repo.id,
             commit_id: commit_id.to_string(),
-            size: content.len() as u64,
+            size: expected_size,
             cas_hash: oid,
             is_lfs: false,
         }])
@@ -154,11 +155,42 @@ async fn resolve_inline_fetch_uses_xet_user_token_for_cas_download() {
         .to_request();
 
     let resp = test::call_service(&app, req).await;
-    assert!(
-        resp.status().is_success(),
-        "unexpected status: {}",
-        resp.status()
-    );
+    let status = resp.status();
     let body = test::read_body(resp).await;
-    assert_eq!(body.as_ref(), content.as_slice());
+    (status, body)
+}
+
+fn assert_sanitized_bad_gateway(status: actix_web::http::StatusCode, body: &[u8]) {
+    assert_eq!(status, actix_web::http::StatusCode::BAD_GATEWAY);
+    let error: serde_json::Value =
+        serde_json::from_slice(body).expect("bad gateway response should be JSON");
+    assert_eq!(error["error"], "Upstream CAS request failed");
+    assert_eq!(error["error_type"], "BadGateway");
+}
+
+#[actix_web::test]
+async fn resolve_inline_fetch_uses_xet_user_token_for_cas_download() {
+    let content = b"inline";
+    let (status, body) =
+        resolve_inline_response(content, content.len() as u64, content.to_vec()).await;
+    assert!(status.is_success(), "unexpected status: {}", status);
+    assert_eq!(body.as_ref(), content);
+}
+
+#[actix_web::test]
+async fn resolve_inline_rejects_cas_content_with_wrong_size() {
+    let expected = b"inline";
+    let (status, body) =
+        resolve_inline_response(expected, expected.len() as u64, b"short".to_vec()).await;
+
+    assert_sanitized_bad_gateway(status, &body);
+}
+
+#[actix_web::test]
+async fn resolve_inline_rejects_cas_content_with_wrong_sha256() {
+    let expected = b"inline";
+    let (status, body) =
+        resolve_inline_response(expected, expected.len() as u64, b"damage".to_vec()).await;
+
+    assert_sanitized_bad_gateway(status, &body);
 }
