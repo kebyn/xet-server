@@ -706,7 +706,8 @@ Content-Type: application/json
 ```
 
 **字段说明**：
-- `path`: 文件路径（必需）
+- `files`: 单次请求最多包含 10,000 个文件；超出上限返回 `400 ValidationError`
+- `path`: 文件路径（必需），使用与 Commit API 相同的路径规则，按 UTF-8 字节计算最多 4096 字节
 - `size`: 文件大小，字节（必需）
 
 **响应**：

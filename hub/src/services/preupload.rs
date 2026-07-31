@@ -1,12 +1,28 @@
 use std::sync::Arc;
 
+use crate::commit::validation::validate_file_path;
 use crate::metadata::{MetadataError, MetadataStore, RepoType};
+
+pub(crate) const MAX_PREUPLOAD_FILES: usize = 10_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PreuploadServiceError {
+    Validation(String),
     Forbidden(String),
     NotFound(String),
     Internal(String),
+}
+
+pub(crate) fn validate_preupload_file_count(
+    file_count: usize,
+) -> Result<(), PreuploadServiceError> {
+    if file_count > MAX_PREUPLOAD_FILES {
+        return Err(PreuploadServiceError::Validation(format!(
+            "Preupload request contains too many files ({file_count}), maximum is {MAX_PREUPLOAD_FILES}"
+        )));
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +71,11 @@ impl PreuploadService {
         &self,
         request: PreuploadRequest<'_>,
     ) -> Result<PreuploadResponse, PreuploadServiceError> {
+        validate_preupload_file_count(request.files.len())?;
+        for file in &request.files {
+            validate_file_path(&file.path).map_err(PreuploadServiceError::Validation)?;
+        }
+
         if request.namespace != request.username {
             let has_access = self
                 .metadata
@@ -103,14 +124,25 @@ fn classify_upload_mode(size: u64, inline_threshold: u64) -> UploadMode {
 mod tests {
     use std::sync::Arc;
 
-    use crate::metadata::{MetadataStore, RepoType, SqliteMetadataStore};
+    use crate::{
+        commit::validation::MAX_FILE_PATH_LENGTH,
+        metadata::{MetadataStore, RepoType, SqliteMetadataStore},
+    };
 
     use super::{
-        PreuploadFileInput, PreuploadRequest, PreuploadService, PreuploadServiceError, UploadMode,
+        MAX_PREUPLOAD_FILES, PreuploadFileInput, PreuploadRequest, PreuploadService,
+        PreuploadServiceError, UploadMode,
     };
 
     async fn metadata() -> Arc<dyn MetadataStore> {
         Arc::new(SqliteMetadataStore::in_memory().await.unwrap())
+    }
+
+    fn file(path: impl Into<String>) -> PreuploadFileInput {
+        PreuploadFileInput {
+            path: path.into(),
+            size: 1,
+        }
     }
 
     #[tokio::test]
@@ -205,6 +237,92 @@ mod tests {
             PreuploadServiceError::NotFound(
                 "Repository not found: owner/missing/model".to_string()
             )
+        );
+    }
+
+    #[tokio::test]
+    async fn accepts_maximum_file_count() {
+        let metadata = metadata().await;
+        metadata
+            .create_repo("owner", "repo", RepoType::Model, false)
+            .await
+            .unwrap();
+
+        let service = PreuploadService::new(metadata);
+        let response = service
+            .prepare_upload(PreuploadRequest {
+                username: "owner",
+                namespace: "owner",
+                repo_name: "repo",
+                repo_type: RepoType::Model,
+                inline_threshold: 1024,
+                files: (0..MAX_PREUPLOAD_FILES).map(|_| file("file.bin")).collect(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(response.files.len(), MAX_PREUPLOAD_FILES);
+    }
+
+    #[tokio::test]
+    async fn rejects_excessive_file_count_before_repo_lookup() {
+        let service = PreuploadService::new(metadata().await);
+        let err = service
+            .prepare_upload(PreuploadRequest {
+                username: "owner",
+                namespace: "owner",
+                repo_name: "missing",
+                repo_type: RepoType::Model,
+                inline_threshold: 1024,
+                files: (0..=MAX_PREUPLOAD_FILES)
+                    .map(|_| file("file.bin"))
+                    .collect(),
+            })
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            PreuploadServiceError::Validation(format!(
+                "Preupload request contains too many files ({}), maximum is {MAX_PREUPLOAD_FILES}",
+                MAX_PREUPLOAD_FILES + 1
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn validates_file_path_length_before_repo_lookup() {
+        let service = PreuploadService::new(metadata().await);
+        let accepted = service
+            .prepare_upload(PreuploadRequest {
+                username: "owner",
+                namespace: "owner",
+                repo_name: "missing",
+                repo_type: RepoType::Model,
+                inline_threshold: 1024,
+                files: vec![file("a".repeat(MAX_FILE_PATH_LENGTH))],
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(accepted, PreuploadServiceError::NotFound(_)));
+
+        let rejected = service
+            .prepare_upload(PreuploadRequest {
+                username: "owner",
+                namespace: "owner",
+                repo_name: "missing",
+                repo_type: RepoType::Model,
+                inline_threshold: 1024,
+                files: vec![file("a".repeat(MAX_FILE_PATH_LENGTH + 1))],
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(
+            rejected,
+            PreuploadServiceError::Validation(format!(
+                "File path is too long ({} bytes), maximum is {MAX_FILE_PATH_LENGTH} bytes",
+                MAX_FILE_PATH_LENGTH + 1
+            ))
         );
     }
 }

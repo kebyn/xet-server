@@ -3,7 +3,7 @@ use crate::error::internal_error_response;
 use crate::metadata::{MetadataStore, RepoType};
 use crate::services::preupload::{
     PreuploadFileInput, PreuploadRequest as ServicePreuploadRequest, PreuploadService,
-    PreuploadServiceError, UploadMode,
+    PreuploadServiceError, UploadMode, validate_preupload_file_count,
 };
 use actix_web::{HttpResponse, web};
 use serde::{Deserialize, Serialize};
@@ -49,6 +49,9 @@ fn error_json(error: String, error_type: &str) -> serde_json::Value {
 
 fn preupload_service_error_response(err: PreuploadServiceError) -> HttpResponse {
     match err {
+        PreuploadServiceError::Validation(msg) => {
+            HttpResponse::BadRequest().json(error_json(msg, "ValidationError"))
+        }
         PreuploadServiceError::Forbidden(msg) => {
             HttpResponse::Forbidden().json(error_json(msg, "ForbiddenError"))
         }
@@ -78,6 +81,11 @@ async fn handle_preupload(
     config: web::Data<crate::config::HubConfig>,
 ) -> HttpResponse {
     let (namespace, repo_name, _revision) = path.into_inner();
+    let body = body.into_inner();
+    if let Err(err) = validate_preupload_file_count(body.files.len()) {
+        return preupload_service_error_response(err);
+    }
+
     let service = preupload_service(&metadata);
     let response = match service
         .prepare_upload(ServicePreuploadRequest {
@@ -88,9 +96,9 @@ async fn handle_preupload(
             inline_threshold: config.storage.inline_threshold_bytes,
             files: body
                 .files
-                .iter()
+                .into_iter()
                 .map(|file| PreuploadFileInput {
-                    path: file.path.clone(),
+                    path: file.path,
                     size: file.size,
                 })
                 .collect(),
@@ -153,7 +161,9 @@ pub async fn preupload_space(
 mod tests {
     use super::*;
     use crate::auth::token_store::TokenStore;
+    use crate::commit::validation::MAX_FILE_PATH_LENGTH;
     use crate::metadata::SqliteMetadataStore;
+    use crate::services::preupload::MAX_PREUPLOAD_FILES;
     use actix_web::{App, test as actix_test};
 
     async fn setup_test_env() -> (
@@ -302,5 +312,54 @@ mod tests {
         let body: PreuploadResponse = actix_test::read_body_json(resp).await;
         assert_eq!(body.files.len(), 1);
         assert_eq!(body.files[0].upload_mode, "lfs");
+    }
+
+    #[actix_web::test]
+    async fn preupload_validation_errors_return_bad_request() {
+        let (token_store, metadata) = setup_test_env().await;
+        let token = token_store
+            .create_token("testuser", "test-token", "write")
+            .await
+            .unwrap();
+        metadata
+            .create_repo("testuser", "my-model", RepoType::Model, false)
+            .await
+            .unwrap();
+
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(token_store))
+                .app_data(web::Data::new(metadata))
+                .app_data(web::Data::new(crate::config::HubConfig::default()))
+                .route(
+                    "/api/models/{ns}/{repo}/preupload/{revision}",
+                    web::post().to(preupload_model),
+                ),
+        )
+        .await;
+
+        for files in [
+            vec![PreuploadFile {
+                path: "a".repeat(MAX_FILE_PATH_LENGTH + 1),
+                size: 1,
+            }],
+            (0..=MAX_PREUPLOAD_FILES)
+                .map(|_| PreuploadFile {
+                    path: "file.bin".to_string(),
+                    size: 1,
+                })
+                .collect(),
+        ] {
+            let req = actix_test::TestRequest::post()
+                .uri("/api/models/testuser/my-model/preupload/main")
+                .insert_header(("Authorization", format!("Bearer {token}")))
+                .set_json(&PreuploadRequest { files })
+                .to_request();
+
+            let resp = actix_test::call_service(&app, req).await;
+            assert_eq!(resp.status(), actix_web::http::StatusCode::BAD_REQUEST);
+            let body: serde_json::Value = actix_test::read_body_json(resp).await;
+            assert_eq!(body["error_type"], "ValidationError");
+        }
     }
 }
