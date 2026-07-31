@@ -262,6 +262,7 @@ export HUB_DB_POOL_SIZE=5
 - `CAS_BASE_URL` 指向 CAS Server 的内部 URL，默认端口为 8081（与 CAS Server 默认端口一致）
 - `HUB_CAS_TIMEOUT_SECS` 控制 Hub 到 CAS 的请求超时
 - `HUB_CAS_HEALTH_CHECK_TIMEOUT_SECS`：Hub 启动时会异步检查 CAS 连通性，超过此时间未完成会记录错误日志（非阻塞）
+- `HUB_MAX_DOWNLOAD_SIZE` 同时校验 CAS 声明的 `Content-Length` 和流式接收的实际累计字节；缺失或伪造长度头不能绕过限制。CAS batch/state 控制面响应固定限制为 8 MiB，CAS 错误体固定限制为 64 KiB
 
 **示例**：
 ```bash

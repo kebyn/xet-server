@@ -1,9 +1,61 @@
 use crate::config::CasSettings;
 use crate::error::HubError;
+use bytes::{Bytes, BytesMut};
+use futures_util::StreamExt;
 use serde::Deserialize;
 use std::time::Duration;
 
 const BLOB_SIZE_HEADER: &str = "X-Blob-Size";
+const MAX_CAS_CONTROL_RESPONSE_SIZE: u64 = 8 * 1024 * 1024;
+const MAX_CAS_ERROR_RESPONSE_SIZE: u64 = 64 * 1024;
+
+#[derive(Debug, thiserror::Error)]
+enum ResponseBodyError {
+    #[error("upstream response size {actual} bytes exceeds limit of {max} bytes")]
+    TooLarge { actual: u64, max: u64 },
+    #[error("failed to read upstream response body: {0}")]
+    Read(#[from] reqwest::Error),
+}
+
+async fn read_response_body_limited(
+    response: reqwest::Response,
+    max_size: u64,
+) -> Result<Bytes, ResponseBodyError> {
+    if let Some(declared_size) = response.content_length() {
+        if declared_size > max_size {
+            return Err(ResponseBodyError::TooLarge {
+                actual: declared_size,
+                max: max_size,
+            });
+        }
+    }
+
+    let mut stream = response.bytes_stream();
+    let mut body = BytesMut::new();
+    let mut received = 0u64;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        let chunk_size = u64::try_from(chunk.len()).map_err(|_| ResponseBodyError::TooLarge {
+            actual: u64::MAX,
+            max: max_size,
+        })?;
+        received = received
+            .checked_add(chunk_size)
+            .ok_or(ResponseBodyError::TooLarge {
+                actual: u64::MAX,
+                max: max_size,
+            })?;
+        if received > max_size {
+            return Err(ResponseBodyError::TooLarge {
+                actual: received,
+                max: max_size,
+            });
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    Ok(body.freeze())
+}
 
 fn parse_blob_size(headers: &reqwest::header::HeaderMap) -> Result<u64, HubError> {
     let value = headers.get(BLOB_SIZE_HEADER).ok_or_else(|| {
@@ -135,13 +187,15 @@ impl CasClientTrait for CasClient {
         if resp.status().is_success() {
             Ok(())
         } else {
-            let body = resp.text().await.map_err(|e| CasUploadError {
-                status,
-                message: format!("Failed to read CAS response: {}", e),
-            })?;
+            let body = read_response_body_limited(resp, MAX_CAS_ERROR_RESPONSE_SIZE)
+                .await
+                .map_err(|e| CasUploadError {
+                    status,
+                    message: format!("CAS error response rejected: {}", e),
+                })?;
             Err(CasUploadError {
                 status,
-                message: body,
+                message: String::from_utf8_lossy(&body).into_owned(),
             })
         }
     }
@@ -183,10 +237,14 @@ impl CasClient {
         let status = resp.status().as_u16();
         match status {
             200 => {
-                let state: BlobState = resp
-                    .json()
+                let body = read_response_body_limited(resp, MAX_CAS_CONTROL_RESPONSE_SIZE)
                     .await
-                    .map_err(|e| HubError::CasError(e.to_string()))?;
+                    .map_err(|e| {
+                        HubError::CasError(format!("CAS state response rejected: {}", e))
+                    })?;
+                let state: BlobState = serde_json::from_slice(&body).map_err(|e| {
+                    HubError::CasError(format!("Invalid CAS state response: {}", e))
+                })?;
                 Ok(Some(state))
             }
             404 => Ok(None),
@@ -212,19 +270,20 @@ impl CasClient {
             .map_err(|e| HubError::CasError(format!("CAS request failed: {}", e)))?;
 
         let status = resp.status().as_u16();
-        let resp_body: serde_json::Value = resp
-            .json()
+        let response_body = read_response_body_limited(resp, MAX_CAS_CONTROL_RESPONSE_SIZE)
             .await
-            .map_err(|e| HubError::CasError(e.to_string()))?;
+            .map_err(|e| HubError::CasError(format!("CAS batch response rejected: {}", e)))?;
+        let response_body: serde_json::Value = serde_json::from_slice(&response_body)
+            .map_err(|e| HubError::CasError(format!("Invalid CAS batch response: {}", e)))?;
 
         if status >= 400 {
             return Err(HubError::CasError(format!(
                 "CAS batch error: {}",
-                resp_body
+                response_body
             )));
         }
 
-        Ok(resp_body)
+        Ok(response_body)
     }
 
     /// Upload a blob to CAS from a file path (streaming version)
@@ -268,13 +327,15 @@ impl CasClient {
         if resp.status().is_success() {
             Ok(())
         } else {
-            let body = resp.text().await.map_err(|e| CasUploadError {
-                status,
-                message: format!("Failed to read CAS response: {}", e),
-            })?;
+            let body = read_response_body_limited(resp, MAX_CAS_ERROR_RESPONSE_SIZE)
+                .await
+                .map_err(|e| CasUploadError {
+                    status,
+                    message: format!("CAS error response rejected: {}", e),
+                })?;
             Err(CasUploadError {
                 status,
-                message: body,
+                message: String::from_utf8_lossy(&body).into_owned(),
             })
         }
     }
@@ -298,29 +359,9 @@ impl CasClient {
 
         match resp.status().as_u16() {
             200 => {
-                // I7 fix: Check Content-Length before loading body into memory
-                if let Some(content_length) = resp.content_length() {
-                    if content_length > self.max_download_size {
-                        return Err(HubError::CasError(format!(
-                            "Download too large: {} bytes (max: {} bytes)",
-                            content_length, self.max_download_size
-                        )));
-                    }
-                }
-
-                let body = resp
-                    .bytes()
+                let body = read_response_body_limited(resp, self.max_download_size)
                     .await
-                    .map_err(|e| HubError::CasError(e.to_string()))?;
-
-                // Double-check actual size (Content-Length could be absent or wrong)
-                if body.len() as u64 > self.max_download_size {
-                    return Err(HubError::CasError(format!(
-                        "Download too large: {} bytes (max: {} bytes)",
-                        body.len(),
-                        self.max_download_size
-                    )));
-                }
+                    .map_err(|e| HubError::CasError(format!("CAS download rejected: {}", e)))?;
 
                 Ok(body)
             }
@@ -393,7 +434,10 @@ impl CasClient {
 mod tests {
     use super::*;
     use crate::config::CasSettings;
+    use actix_web::{App, HttpResponse, HttpServer, web};
+    use futures_util::StreamExt;
     use reqwest::header::{HeaderMap, HeaderValue};
+    use std::net::TcpListener;
 
     #[test]
     fn test_client_creation() {
@@ -435,5 +479,48 @@ mod tests {
             HeaderValue::from_static("18446744073709551615"),
         );
         assert_eq!(parse_blob_size(&headers).unwrap(), u64::MAX);
+    }
+
+    async fn endless_oversized_body() -> HttpResponse {
+        let first = futures_util::stream::once(async {
+            Ok::<_, actix_web::Error>(web::Bytes::from(vec![b'x'; 2048]))
+        });
+        let never_finishes =
+            futures_util::stream::pending::<Result<web::Bytes, actix_web::Error>>();
+        HttpResponse::Ok().streaming(first.chain(never_finishes))
+    }
+
+    #[actix_web::test]
+    async fn buffered_download_rejects_runtime_limit_without_waiting_for_eof() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = HttpServer::new(|| {
+            App::new().route("/lfs/objects/{oid}", web::get().to(endless_oversized_body))
+        })
+        .listen(listener)
+        .unwrap()
+        .run();
+        let handle = server.handle();
+        actix_web::rt::spawn(server);
+
+        let client = CasClient::new(&CasSettings {
+            base_url: format!("http://{address}"),
+            internal_timeout_seconds: 30,
+            max_download_size: 1024,
+            health_check_timeout_seconds: 10,
+        })
+        .unwrap();
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            client.proxy_lfs_download(&"a".repeat(64), "token"),
+        )
+        .await;
+        handle.stop(false).await;
+
+        let error = result
+            .expect("size enforcement must not wait for upstream EOF")
+            .expect_err("body above the runtime limit must be rejected");
+        assert!(error.to_string().contains("exceeds limit"));
     }
 }

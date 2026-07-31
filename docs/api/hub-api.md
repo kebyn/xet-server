@@ -878,7 +878,7 @@ Authorization: Bearer proxy_xxx
 {"error":"Internal server error","error_type":"InternalError"}
 ```
 
-CAS 网络故障、非法响应或上游 5xx 对客户端统一为 502，且不会回显 CAS URL 或 upstream body：
+CAS 网络故障、非法响应、超出 Hub 响应上限或上游 5xx 对客户端统一为 502，且不会回显 CAS URL 或 upstream body。Hub 对文件 body 同时执行 `Content-Length` 预检和运行时累计检查；CAS batch/state JSON 与错误 body 也有独立固定上限：
 
 ```json
 {"error":"Upstream CAS request failed","error_type":"BadGateway"}

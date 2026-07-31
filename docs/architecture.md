@@ -864,6 +864,7 @@ LFS 对象是原始文件的直接存储，使用 SHA-256 哈希标识。
 ### Error Boundaries
 
 - Hub/CAS service 层和服务端日志保留 SQL、文件路径、S3 endpoint/bucket、parser 细节与 CAS upstream 状态，便于运维诊断。
+- Hub 累计 CAS 响应时同时检查 `Content-Length` 和运行时 chunk 总量：文件 body 受 `HUB_MAX_DOWNLOAD_SIZE` 限制，batch/state JSON 受 8 MiB 限制，错误 body 受 64 KiB 限制；超限时立即停止读取，不等待 upstream EOF。
 - 这些基础设施详情不跨 HTTP trust boundary：Hub 500 固定返回 `Internal server error`，CAS 故障固定返回通用 502 `Upstream CAS request failed`；CAS 普通 JSON API 的 500 固定返回 `{"error":"Internal server error"}`，HEAD 保持空 body。
 - 可由调用者修正的 4xx 继续返回路径校验、hash mismatch、对象不存在、size mismatch 或 metadata conflict 等业务信息。CAS upstream 4xx 可以保留状态码，但 Hub 不转发 upstream body。
 
