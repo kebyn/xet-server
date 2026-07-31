@@ -552,7 +552,7 @@ export CAS_SIGNING_KID=hub-key-1
 **说明**：
 - Hub 端只进行两分类：小文件内联存储（regular），大文件走 LFS 路径（lfs）
 - Commit header 必须是第一个非空 operation 且只能出现一次；非首个 commit 的 `parentRevision` 必须匹配当前 HEAD
-- file/LFS/delete operation 按请求顺序执行，同一路径最后一次操作生效；未修改的父条目复制到新 commit，使每个 revision 都是完整文件树 snapshot
+- file/LFS/delete operation 按请求顺序执行，同一路径最后一次操作生效；SQLite 在同一个 `BEGIN IMMEDIATE` 写事务内用 `INSERT ... SELECT` 复制父 snapshot，再应用有界的请求 delta，不在 Hub 进程中加载完整父树。revision、完整新 snapshot 和 HEAD 更新一起提交或回滚
 - LFS OID 必须是无 `sha256:` 前缀的 64 字符十六进制值；Hub 使用 CAS `HEAD /internal/blob/{oid}` 返回的必需 `X-Blob-Size` 验证声明大小
 - Xet 格式转换是 CAS 端的后处理步骤，通过转换管道（conversion pipeline）自动完成
 - 转换管道将 LFS blob 转换为 xorb+shard 格式，实现全局 chunk 级去重

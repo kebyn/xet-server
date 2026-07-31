@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -13,7 +12,9 @@ use crate::commit::types::{
     LfsFileOperation, MAX_INLINE_SIZE,
 };
 use crate::commit::validation::validate_file_path;
-use crate::metadata::{FileEntry, MetadataError, MetadataStore, RepoType, Revision};
+use crate::metadata::{
+    FileEntry, FileTreeChange, MetadataError, MetadataStore, RepoType, Revision,
+};
 
 pub(crate) const MAX_COMMIT_BODY_SIZE: usize = 20 * 1024 * 1024;
 pub(crate) const MAX_COMMIT_OPERATIONS: usize = 10_000;
@@ -110,10 +111,6 @@ impl CommitService {
             .map_err(map_metadata_load_error)?;
         let parent_revision = header.parent_revision.clone();
         ensure_parent_matches_head(parent_revision.as_deref(), current_head.as_deref())?;
-        let parent_entries = self
-            .load_parent_tree(repo.id, current_head.as_deref())
-            .await?;
-
         let internal_token = if operations
             .iter()
             .any(|operation| matches!(operation, TreeOperation::LfsFile(_)))
@@ -155,11 +152,11 @@ impl CommitService {
         let mut changes = Vec::with_capacity(operations.len());
         for operation in operations {
             let change = match operation {
-                TreeOperation::File(file_op) => TreeChange::Upsert(
+                TreeOperation::File(file_op) => FileTreeChange::Upsert(
                     self.process_inline_file(file_op, repo.id, &commit_id, &cas_write_token)
                         .await?,
                 ),
-                TreeOperation::LfsFile(lfs_op) => TreeChange::Upsert(
+                TreeOperation::LfsFile(lfs_op) => FileTreeChange::Upsert(
                     self.process_lfs_file(lfs_op, repo.id, &commit_id, &internal_token)
                         .await?,
                 ),
@@ -170,13 +167,11 @@ impl CommitService {
                             msg
                         ))
                     })?;
-                    TreeChange::Delete(deleted.path)
+                    FileTreeChange::Delete(deleted.path)
                 }
             };
             changes.push(change);
         }
-
-        let final_entries = Self::build_final_tree(repo.id, &commit_id, parent_entries, changes);
 
         let revision = Revision {
             commit_id: commit_id.clone(),
@@ -188,7 +183,7 @@ impl CommitService {
         };
 
         self.metadata
-            .commit_atomic(&revision, &final_entries, parent_revision.as_deref())
+            .commit_changes_atomic(&revision, &changes, parent_revision.as_deref())
             .await
             .map_err(|err| match err {
                 MetadataError::Conflict(actual_head) => CommitServiceError::Conflict {
@@ -337,50 +332,6 @@ impl CommitService {
             is_lfs: true,
         })
     }
-
-    async fn load_parent_tree(
-        &self,
-        repo_id: i64,
-        current_head: Option<&str>,
-    ) -> Result<Vec<FileEntry>, CommitServiceError> {
-        if let Some(parent_commit) = current_head {
-            self.metadata
-                .get_file_tree(repo_id, parent_commit)
-                .await
-                .map_err(map_metadata_load_error)
-        } else {
-            Ok(Vec::new())
-        }
-    }
-
-    fn build_final_tree(
-        repo_id: i64,
-        commit_id: &str,
-        parent_entries: Vec<FileEntry>,
-        changes: Vec<TreeChange>,
-    ) -> Vec<FileEntry> {
-        let mut final_entries: HashMap<String, FileEntry> = HashMap::new();
-        for mut entry in parent_entries {
-            entry.repo_id = repo_id;
-            entry.commit_id = commit_id.to_string();
-            final_entries.insert(entry.path.clone(), entry);
-        }
-
-        for change in changes {
-            match change {
-                TreeChange::Delete(path) => {
-                    final_entries.remove(&path);
-                }
-                TreeChange::Upsert(mut entry) => {
-                    entry.repo_id = repo_id;
-                    entry.commit_id = commit_id.to_string();
-                    final_entries.insert(entry.path.clone(), entry);
-                }
-            }
-        }
-
-        final_entries.into_values().collect()
-    }
 }
 
 struct ParsedCommit {
@@ -392,11 +343,6 @@ enum TreeOperation {
     File(FileOperation),
     LfsFile(LfsFileOperation),
     DeletedEntry(DeletedEntryOperation),
-}
-
-enum TreeChange {
-    Upsert(FileEntry),
-    Delete(String),
 }
 
 fn parse_commit_body(body: &str) -> Result<ParsedCommit, CommitServiceError> {

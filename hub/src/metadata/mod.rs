@@ -81,6 +81,13 @@ pub struct FileTreePage {
     pub next_after_path: Option<String>,
 }
 
+/// An ordered change applied while constructing a new snapshot.
+#[derive(Debug, Clone)]
+pub enum FileTreeChange {
+    Upsert(FileEntry),
+    Delete(String),
+}
+
 /// Metadata store error
 #[derive(Debug, Error)]
 pub enum MetadataError {
@@ -210,6 +217,43 @@ pub trait MetadataStore: Send + Sync {
         entries: &[FileEntry],
         expected_parent: Option<&str>,
     ) -> Result<(), MetadataError>;
+
+    /// Atomically copy the parent snapshot, apply ordered changes, and update HEAD.
+    ///
+    /// The compatibility implementation materializes the parent tree. Persistent
+    /// backends should override this to perform the copy and changes in their
+    /// transaction without loading the complete snapshot into application memory.
+    async fn commit_changes_atomic(
+        &self,
+        rev: &Revision,
+        changes: &[FileTreeChange],
+        expected_parent: Option<&str>,
+    ) -> Result<(), MetadataError> {
+        let mut final_entries: std::collections::HashMap<String, FileEntry> =
+            std::collections::HashMap::new();
+        if let Some(parent) = expected_parent {
+            for mut entry in self.get_file_tree(rev.repo_id, parent).await? {
+                entry.repo_id = rev.repo_id;
+                entry.commit_id = rev.commit_id.clone();
+                final_entries.insert(entry.path.clone(), entry);
+            }
+        }
+        for change in changes {
+            match change {
+                FileTreeChange::Delete(path) => {
+                    final_entries.remove(path);
+                }
+                FileTreeChange::Upsert(entry) => {
+                    let mut entry = entry.clone();
+                    entry.repo_id = rev.repo_id;
+                    entry.commit_id = rev.commit_id.clone();
+                    final_entries.insert(entry.path.clone(), entry);
+                }
+            }
+        }
+        let entries: Vec<FileEntry> = final_entries.into_values().collect();
+        self.commit_atomic(rev, &entries, expected_parent).await
+    }
 
     /// Check if a user is a member of a namespace (for organization/team support).
     /// Default: returns false (no organization support). Override to add team membership checks.

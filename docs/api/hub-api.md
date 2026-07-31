@@ -414,6 +414,8 @@ Commit API 的 NDJSON 有以下顺序和快照语义：
    ```
    - `path`: 要删除的文件路径（必需）
 
+提交持久化时，SQLite 在同一个写事务中校验 HEAD、插入 revision、以 `INSERT ... SELECT` 复制父 snapshot、按 NDJSON 顺序应用 file/LFS/delete delta，并更新 HEAD。Hub 不会把完整父文件树加载到进程内存；任一步失败都会回滚 revision、新 snapshot 和 HEAD。
+
 **响应**：
 ```json
 {

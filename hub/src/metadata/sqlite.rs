@@ -3,7 +3,7 @@
 //! Async SQLite implementation using sqlx for true async database operations.
 //! Migrated from rusqlite to prevent blocking the async runtime.
 
-use super::{FileEntry, MetadataError, MetadataStore, Repo, RepoType, Revision};
+use super::{FileEntry, FileTreeChange, MetadataError, MetadataStore, Repo, RepoType, Revision};
 use crate::sqlite_pool::{connect_hub_sqlite_pool, connect_in_memory_hub_sqlite_pool};
 use async_trait::async_trait;
 use sqlx::pool::PoolConnection;
@@ -17,6 +17,11 @@ use std::ops::{Deref, DerefMut};
 /// WAL mode is enabled for better read/write concurrency.
 pub struct SqliteMetadataStore {
     pool: SqlitePool,
+}
+
+enum CommitWrite<'a> {
+    Snapshot(&'a [FileEntry]),
+    Changes(&'a [FileTreeChange]),
 }
 
 /// Prevents a cancelled transaction from returning an open SQLite transaction
@@ -228,6 +233,156 @@ impl SqliteMetadataStore {
             .await
             .map_err(|e| MetadataError::DatabaseError(e.to_string()))
     }
+
+    async fn commit_atomic_write(
+        &self,
+        rev: &Revision,
+        write: CommitWrite<'_>,
+        expected_parent: Option<&str>,
+    ) -> Result<(), MetadataError> {
+        // BEGIN IMMEDIATE acquires SQLite's single-writer lock before checking HEAD.
+        // If this future is cancelled, the connection guard closes the connection;
+        // SQLite then rolls back before the pool can create a replacement.
+        let connection = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+        let mut connection = TransactionConnectionGuard::new(connection);
+        let mut tx = connection
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+
+        let result = async {
+            let current_head: Option<String> =
+                sqlx::query("SELECT commit_id FROM heads WHERE repo_id = ?1")
+                    .bind(rev.repo_id)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(|e| MetadataError::DatabaseError(e.to_string()))?
+                    .map(|row| row.try_get::<String, _>(0))
+                    .transpose()
+                    .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+
+            if current_head.as_deref() != expected_parent {
+                return Err(MetadataError::Conflict(current_head.unwrap_or_default()));
+            }
+
+            sqlx::query(
+                "INSERT INTO revisions (commit_id, repo_id, parent, message, author, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )
+            .bind(&rev.commit_id)
+            .bind(rev.repo_id)
+            .bind(&rev.parent)
+            .bind(&rev.message)
+            .bind(&rev.author)
+            .bind(rev.created_at)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+
+            if let CommitWrite::Changes(_) = write {
+                if let Some(parent) = expected_parent {
+                    sqlx::query(
+                        "INSERT INTO file_tree \
+                         (path, repo_id, commit_id, size, cas_hash, is_lfs) \
+                         SELECT path, ?1, ?2, size, cas_hash, is_lfs \
+                         FROM file_tree WHERE repo_id = ?1 AND commit_id = ?3",
+                    )
+                    .bind(rev.repo_id)
+                    .bind(&rev.commit_id)
+                    .bind(parent)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+                }
+            }
+
+            match write {
+                CommitWrite::Snapshot(entries) => {
+                    for entry in entries {
+                        insert_file_entry(&mut tx, rev, entry).await?;
+                    }
+                }
+                CommitWrite::Changes(changes) => {
+                    for change in changes {
+                        match change {
+                            FileTreeChange::Upsert(entry) => {
+                                insert_file_entry(&mut tx, rev, entry).await?;
+                            }
+                            FileTreeChange::Delete(path) => {
+                                sqlx::query(
+                                    "DELETE FROM file_tree \
+                                     WHERE path = ?1 AND repo_id = ?2 AND commit_id = ?3",
+                                )
+                                .bind(path)
+                                .bind(rev.repo_id)
+                                .bind(&rev.commit_id)
+                                .execute(&mut *tx)
+                                .await
+                                .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+                            }
+                        }
+                    }
+                }
+            }
+
+            sqlx::query("INSERT OR REPLACE INTO heads (repo_id, commit_id) VALUES (?1, ?2)")
+                .bind(rev.repo_id)
+                .bind(&rev.commit_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+
+            Ok::<(), MetadataError>(())
+        }
+        .await;
+
+        match result {
+            Ok(()) => {
+                tx.commit()
+                    .await
+                    .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+                connection.mark_resolved();
+                Ok(())
+            }
+            Err(error) => {
+                tx.rollback().await.map_err(|rollback_error| {
+                    MetadataError::DatabaseError(format!(
+                        "Commit failed ({error}); rollback failed: {rollback_error}"
+                    ))
+                })?;
+                connection.mark_resolved();
+                Err(error)
+            }
+        }
+    }
+}
+
+async fn insert_file_entry(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    rev: &Revision,
+    entry: &FileEntry,
+) -> Result<(), MetadataError> {
+    let is_lfs: i64 = if entry.is_lfs { 1 } else { 0 };
+    let size = file_size_to_sql(entry.size)?;
+    sqlx::query(
+        "INSERT OR REPLACE INTO file_tree \
+         (path, repo_id, commit_id, size, cas_hash, is_lfs) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+    )
+    .bind(&entry.path)
+    .bind(rev.repo_id)
+    .bind(&rev.commit_id)
+    .bind(size)
+    .bind(&entry.cas_hash)
+    .bind(is_lfs)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+    Ok(())
 }
 
 #[async_trait]
@@ -698,102 +853,18 @@ impl MetadataStore for SqliteMetadataStore {
         entries: &[FileEntry],
         expected_parent: Option<&str>,
     ) -> Result<(), MetadataError> {
-        // BEGIN IMMEDIATE acquires SQLite's single-writer lock before checking HEAD.
-        // If this future is cancelled, the connection guard closes the connection;
-        // SQLite then rolls back before the pool can create a replacement.
-        let connection = self
-            .pool
-            .acquire()
+        self.commit_atomic_write(rev, CommitWrite::Snapshot(entries), expected_parent)
             .await
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
-        let mut connection = TransactionConnectionGuard::new(connection);
-        let mut tx = connection
-            .begin_with("BEGIN IMMEDIATE")
+    }
+
+    async fn commit_changes_atomic(
+        &self,
+        rev: &Revision,
+        changes: &[FileTreeChange],
+        expected_parent: Option<&str>,
+    ) -> Result<(), MetadataError> {
+        self.commit_atomic_write(rev, CommitWrite::Changes(changes), expected_parent)
             .await
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
-
-        let result = async {
-            // Authoritative HEAD check (I3): this is the race-safe check under
-            // BEGIN IMMEDIATE lock. The handler also does a pre-check for better
-            // error messages, but this one is the source of truth.
-            let current_head: Option<String> = sqlx::query(
-                "SELECT commit_id FROM heads WHERE repo_id = ?1"
-            )
-            .bind(rev.repo_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?
-            .map(|r| r.try_get::<String, _>(0))
-            .transpose()
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
-
-            if current_head.as_deref() != expected_parent {
-                return Err(MetadataError::Conflict(
-                    current_head.unwrap_or_default(),
-                ));
-            }
-
-            // Insert revision
-            sqlx::query(
-                "INSERT INTO revisions (commit_id, repo_id, parent, message, author, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
-            )
-            .bind(&rev.commit_id)
-            .bind(rev.repo_id)
-            .bind(&rev.parent)
-            .bind(&rev.message)
-            .bind(&rev.author)
-            .bind(rev.created_at)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
-
-            // Insert file entries
-            for entry in entries {
-                let is_lfs_int: i64 = if entry.is_lfs { 1 } else { 0 };
-                let size = file_size_to_sql(entry.size)?;
-                sqlx::query(
-                    "INSERT OR REPLACE INTO file_tree (path, repo_id, commit_id, size, cas_hash, is_lfs) VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
-                )
-                .bind(&entry.path)
-                .bind(entry.repo_id)
-                .bind(&entry.commit_id)
-                .bind(size)
-                .bind(&entry.cas_hash)
-                .bind(is_lfs_int)
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
-            }
-
-            // Set HEAD
-            sqlx::query("INSERT OR REPLACE INTO heads (repo_id, commit_id) VALUES (?1, ?2)")
-                .bind(rev.repo_id)
-                .bind(&rev.commit_id)
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
-
-            Ok::<(), MetadataError>(())
-        }.await;
-
-        match result {
-            Ok(()) => {
-                tx.commit()
-                    .await
-                    .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
-                connection.mark_resolved();
-                Ok(())
-            }
-            Err(e) => {
-                tx.rollback().await.map_err(|rollback_error| {
-                    MetadataError::DatabaseError(format!(
-                        "Commit failed ({e}); rollback failed: {rollback_error}"
-                    ))
-                })?;
-                connection.mark_resolved();
-                Err(e)
-            }
-        }
     }
 }
 
@@ -933,6 +1004,163 @@ mod tests {
             store.get_revision(repo.id, &revision.commit_id).await,
             Err(MetadataError::RevisionNotFound(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn commit_changes_copies_parent_and_applies_ordered_delta_atomically() {
+        let store = SqliteMetadataStore::in_memory().await.unwrap();
+        let repo = store
+            .create_repo("ns", "delta", RepoType::Model, false)
+            .await
+            .unwrap();
+        let parent = Revision {
+            commit_id: "parent".to_string(),
+            repo_id: repo.id,
+            parent: None,
+            message: "parent".to_string(),
+            author: "ns".to_string(),
+            created_at: 1,
+        };
+        let parent_entries = vec![
+            FileEntry {
+                path: "keep.bin".to_string(),
+                repo_id: repo.id,
+                commit_id: parent.commit_id.clone(),
+                size: 1,
+                cas_hash: "keep-v1".to_string(),
+                is_lfs: true,
+            },
+            FileEntry {
+                path: "remove.bin".to_string(),
+                repo_id: repo.id,
+                commit_id: parent.commit_id.clone(),
+                size: 2,
+                cas_hash: "remove".to_string(),
+                is_lfs: true,
+            },
+        ];
+        store
+            .commit_atomic(&parent, &parent_entries, None)
+            .await
+            .unwrap();
+
+        let child = Revision {
+            commit_id: "child".to_string(),
+            repo_id: repo.id,
+            parent: Some(parent.commit_id.clone()),
+            message: "child".to_string(),
+            author: "ns".to_string(),
+            created_at: 2,
+        };
+        let changes = vec![
+            FileTreeChange::Delete("remove.bin".to_string()),
+            FileTreeChange::Upsert(FileEntry {
+                path: "keep.bin".to_string(),
+                repo_id: -1,
+                commit_id: "ignored".to_string(),
+                size: 3,
+                cas_hash: "keep-v2".to_string(),
+                is_lfs: false,
+            }),
+            FileTreeChange::Delete("keep.bin".to_string()),
+            FileTreeChange::Upsert(FileEntry {
+                path: "keep.bin".to_string(),
+                repo_id: -1,
+                commit_id: "ignored".to_string(),
+                size: 4,
+                cas_hash: "keep-final".to_string(),
+                is_lfs: true,
+            }),
+        ];
+        store
+            .commit_changes_atomic(&child, &changes, Some("parent"))
+            .await
+            .unwrap();
+
+        let parent_tree = store.get_file_tree(repo.id, "parent").await.unwrap();
+        assert_eq!(parent_tree.len(), 2);
+        let child_tree = store.get_file_tree(repo.id, "child").await.unwrap();
+        assert_eq!(child_tree.len(), 1);
+        assert_eq!(child_tree[0].path, "keep.bin");
+        assert_eq!(child_tree[0].repo_id, repo.id);
+        assert_eq!(child_tree[0].commit_id, "child");
+        assert_eq!(child_tree[0].size, 4);
+        assert_eq!(child_tree[0].cas_hash, "keep-final");
+        assert_eq!(
+            store.get_head(repo.id).await.unwrap().as_deref(),
+            Some("child")
+        );
+    }
+
+    #[tokio::test]
+    async fn commit_changes_failure_rolls_back_copied_snapshot_revision_and_head() {
+        let store = SqliteMetadataStore::in_memory().await.unwrap();
+        let repo = store
+            .create_repo("ns", "delta-rollback", RepoType::Model, false)
+            .await
+            .unwrap();
+        let parent = Revision {
+            commit_id: "parent".to_string(),
+            repo_id: repo.id,
+            parent: None,
+            message: "parent".to_string(),
+            author: "ns".to_string(),
+            created_at: 1,
+        };
+        let parent_entry = FileEntry {
+            path: "keep.bin".to_string(),
+            repo_id: repo.id,
+            commit_id: parent.commit_id.clone(),
+            size: 1,
+            cas_hash: "keep".to_string(),
+            is_lfs: true,
+        };
+        store
+            .commit_atomic(&parent, &[parent_entry], None)
+            .await
+            .unwrap();
+
+        let child = Revision {
+            commit_id: "child".to_string(),
+            repo_id: repo.id,
+            parent: Some(parent.commit_id.clone()),
+            message: "child".to_string(),
+            author: "ns".to_string(),
+            created_at: 2,
+        };
+        let changes = [FileTreeChange::Upsert(FileEntry {
+            path: "too-large.bin".to_string(),
+            repo_id: repo.id,
+            commit_id: child.commit_id.clone(),
+            size: u64::MAX,
+            cas_hash: "large".to_string(),
+            is_lfs: true,
+        })];
+        let error = store
+            .commit_changes_atomic(&child, &changes, Some("parent"))
+            .await
+            .expect_err("invalid delta must roll back the complete commit transaction");
+        assert!(matches!(error, MetadataError::InvalidOperation(_)));
+
+        assert_eq!(
+            store.get_head(repo.id).await.unwrap().as_deref(),
+            Some("parent")
+        );
+        assert!(matches!(
+            store.get_revision(repo.id, "child").await,
+            Err(MetadataError::RevisionNotFound(_))
+        ));
+        assert!(
+            store
+                .get_file_tree(repo.id, "child")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store.get_file_tree(repo.id, "parent").await.unwrap().len(),
+            1
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
