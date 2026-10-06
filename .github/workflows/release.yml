@@ -5,32 +5,220 @@ on:
     tags: ['v*']
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
+  LC_ALL: C
 
 jobs:
-  build-linux:
-    name: Build and publish release (linux x86_64)
+  build:
+    name: Reproducible build (leg ${{ matrix.id }})
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    strategy:
+      # Keep both legs running even if one fails: the surviving artifact is
+      # the reference for diagnosing a mismatch.
+      fail-fast: false
+      matrix:
+        id: [a, b]
+    env:
+      TARBALL: xet-server-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out source (distinct path per leg)
+        uses: actions/checkout@v4
+        with:
+          path: src-${{ matrix.id }}
+
       - name: Select pinned Rust toolchain
+        working-directory: src-${{ matrix.id }}
         run: rustup show active-toolchain
-      - name: Build release binaries
-        run: cargo build --release
-      - name: Package binaries
+
+      # All determinism knobs are exported once here. Everything is derived
+      # from the checked-out commit (never GITHUB_SHA: for an annotated tag
+      # that is the tag object, not the commit).
+      - name: Set deterministic build environment
+        working-directory: src-${{ matrix.id }}
         run: |
+          set -euo pipefail
+          echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> "$GITHUB_ENV"
+          CARGO_HOME_RESOLVED="${CARGO_HOME:-$HOME/.cargo}"
+          echo "RUSTFLAGS=--remap-path-prefix=$PWD=/build --remap-path-prefix=${CARGO_HOME_RESOLVED}=/cargo" >> "$GITHUB_ENV"
+          echo "CFLAGS_x86_64_unknown_linux_gnu=-ffile-prefix-map=$PWD=/build -ffile-prefix-map=${CARGO_HOME_RESOLVED}=/cargo" >> "$GITHUB_ENV"
+          echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
+
+      - name: Build release binaries
+        working-directory: src-${{ matrix.id }}
+        run: cargo build --release --locked --workspace --bins --target x86_64-unknown-linux-gnu
+
+      - name: Package deterministic tarball
+        working-directory: src-${{ matrix.id }}
+        run: |
+          set -euo pipefail
           mkdir -p dist
-          tar -czf "dist/xet-server-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu.tar.gz" \
-            -C target/release xet-server hub-api
-          cd dist && sha256sum *.tar.gz > SHA256SUMS.txt
+          # --sort=name: fixed member order; --format=gnu: no pax atime/ctime
+          # headers; --mtime=@epoch + --owner=0 --group=0 --numeric-owner:
+          # fixed metadata; gzip -n: no timestamp/filename in the gzip header.
+          tar --sort=name --format=gnu --mtime="@${SOURCE_DATE_EPOCH}" \
+              --owner=0 --group=0 --numeric-owner \
+              -C target/x86_64-unknown-linux-gnu/release -c xet-server hub-api \
+            | gzip -n > "dist/${TARBALL}"
+          sha256sum "dist/${TARBALL}" \
+            target/x86_64-unknown-linux-gnu/release/xet-server \
+            target/x86_64-unknown-linux-gnu/release/hub-api
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.id }}
+          path: src-${{ matrix.id }}/dist/
+          retention-days: 7
+          if-no-files-found: error
+
+  release:
+    name: Verify and publish release
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      TARBALL: xet-server-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz
+    steps:
+      - name: Check out source (for git metadata in release notes)
+        uses: actions/checkout@v4
+
+      - name: Download both builds
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dl
+
+      # Fail closed: nothing is published unless the two independent builds
+      # are byte-identical.
+      - name: Verify byte-identical builds
+        run: |
+          set -euo pipefail
+          ls -la dl/dist-a dl/dist-b
+          TAR_A="$(find dl/dist-a -type f -name "${TARBALL}")"
+          TAR_B="$(find dl/dist-b -type f -name "${TARBALL}")"
+          test "$(printf '%s\n' "$TAR_A" | wc -l)" -eq 1
+          test "$(printf '%s\n' "$TAR_B" | wc -l)" -eq 1
+
+          if ! cmp "$TAR_A" "$TAR_B"; then
+            echo "::error::Reproducibility check failed: the two tarballs differ."
+            sha256sum "$TAR_A" "$TAR_B"
+            exit 1
+          fi
+
+          mkdir -p x/a x/b
+          tar -xzf "$TAR_A" -C x/a
+          tar -xzf "$TAR_B" -C x/b
+          test "$(tar -tf "$TAR_A" | wc -l)" -eq 2
+          for f in xet-server hub-api; do
+            if ! cmp "x/a/$f" "x/b/$f"; then
+              echo "::error::Reproducibility check failed: $f differs between build a and build b."
+              sha256sum "x/a/$f" "x/b/$f"
+              exit 1
+            fi
+          done
+
+      - name: Stage release assets and render release notes
+        run: |
+          set -euo pipefail
+          COMMIT_SHA="$(git rev-parse HEAD)"
+          EPOCH="$(git log -1 --pretty=%ct)"
+          SHA_TARBALL="$(sha256sum "$(find dl/dist-a -type f -name "${TARBALL}")" | cut -d' ' -f1)"
+          SHA_XET="$(sha256sum x/a/xet-server | cut -d' ' -f1)"
+          SHA_HUB="$(sha256sum x/a/hub-api | cut -d' ' -f1)"
+
+          mkdir -p publish
+          cp "$(find dl/dist-a -type f -name "${TARBALL}")" "publish/${TARBALL}"
+          (cd publish && sha256sum "${TARBALL}" > SHA256SUMS.txt)
+
+          cat > release-body.md <<'TEMPLATE'
+          ## Reproducible build
+
+          This release was built **twice on independent GitHub-hosted `ubuntu-24.04` runners** from tag `__TAG__`, checked out at two different source paths. The two builds were verified byte-identical before publishing.
+
+          | | |
+          | --- | --- |
+          | Tag | `__TAG__` |
+          | Commit | `__COMMIT_SHA__` |
+          | Target | `x86_64-unknown-linux-gnu` |
+          | Toolchain | Rust 1.85.0 (pinned by `rust-toolchain.toml`) |
+          | `SOURCE_DATE_EPOCH` | `__EPOCH__` |
+
+          ### Checksums
+
+          | File | SHA-256 |
+          | --- | --- |
+          | `__TARBALL__` | `__SHA_TARBALL__` |
+          | `xet-server` (inside the tarball) | `__SHA_XET__` |
+          | `hub-api` (inside the tarball) | `__SHA_HUB__` |
+
+          Verify a downloaded release:
+
+          ```bash
+          sha256sum -c SHA256SUMS.txt
+          ```
+
+          ### Reproduce this build
+
+          On an `ubuntu-24.04`-equivalent x86_64 Linux host (glibc 2.39, gcc 13, GNU tar 1.35, gzip 1.12) with [rustup](https://rustup.rs) installed — `rust-toolchain.toml` selects the exact toolchain:
+
+          ```bash
+          git clone https://github.com/kebyn/xet-server.git
+          cd xet-server
+          git checkout __TAG__
+          export SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)"
+          export RUSTFLAGS="--remap-path-prefix=$PWD=/build --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo"
+          export CFLAGS_x86_64_unknown_linux_gnu="-ffile-prefix-map=$PWD=/build -ffile-prefix-map=${CARGO_HOME:-$HOME/.cargo}=/cargo"
+          cargo build --release --locked --workspace --bins --target x86_64-unknown-linux-gnu
+          TARBALL="xet-server-__TAG__-x86_64-unknown-linux-gnu.tar.gz"
+          tar --sort=name --format=gnu --mtime="@${SOURCE_DATE_EPOCH}" \
+              --owner=0 --group=0 --numeric-owner \
+              -C target/x86_64-unknown-linux-gnu/release -c xet-server hub-api \
+            | gzip -n > "${TARBALL}"
+          sha256sum "${TARBALL}"
+          ```
+
+          The result must match the tarball checksum above. If your local `tar`/`gzip` differs from the versions listed above, compare the extracted binaries instead:
+
+          ```bash
+          tar -xzf "${TARBALL}"
+          sha256sum xet-server hub-api
+          ```
+          TEMPLATE
+
+          sed -i \
+            -e "s|__TARBALL__|${TARBALL}|g" \
+            -e "s|__TAG__|${GITHUB_REF_NAME}|g" \
+            -e "s|__COMMIT_SHA__|${COMMIT_SHA}|g" \
+            -e "s|__EPOCH__|${EPOCH}|g" \
+            -e "s|__SHA_TARBALL__|${SHA_TARBALL}|g" \
+            -e "s|__SHA_XET__|${SHA_XET}|g" \
+            -e "s|__SHA_HUB__|${SHA_HUB}|g" \
+            release-body.md
+
+          {
+            echo "## Release verification"
+            echo
+            echo "Two independent builds compared byte-for-byte: identical."
+            echo
+            echo "| File | SHA-256 |"
+            echo "| --- | --- |"
+            echo "| \`${TARBALL}\` | \`${SHA_TARBALL}\` |"
+            echo "| \`xet-server\` | \`${SHA_XET}\` |"
+            echo "| \`hub-api\` | \`${SHA_HUB}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/*.tar.gz
-            dist/SHA256SUMS.txt
+            publish/*.tar.gz
+            publish/SHA256SUMS.txt
+          body_path: release-body.md
           generate_release_notes: true
+          fail_on_unmatched_files: true
