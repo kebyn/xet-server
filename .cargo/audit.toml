@@ -18,5 +18,24 @@
 # Re-evaluate (and remove this entry) if a future sqlx release stops listing
 # sqlx-mysql as an unconditional dependency of sqlx-macros-core, which would let
 # the phantom drop out of Cargo.lock entirely.
+#
+# RUSTSEC-2026-0258 — h2 "unbounded empty DATA frames" (memory-exhaustion DoS).
+# Ignored for the h2 0.3 line only; the fixed 0.4 line in this lockfile has
+# been upgraded past the advisory (h2 0.4.19 >= 0.4.16):
+#
+#   1. The remaining vulnerable copy is h2 v0.3.27, pulled exclusively by
+#      actix-http 3.11.2 (actix-web 4.12.1 / actix-governor 0.5.0) — the
+#      server-side HTTP/2 stack of both binaries. `cargo tree -i h2@0.3.27`
+#      confirms no other path reaches it.
+#   2. No fixed 0.3-series release exists: the upstream fix landed in
+#      h2 0.4.16+, and actix-http 3.x has not migrated to the 0.4 line.
+#      The MSRV policy (Rust 1.85) additionally forbids forcing a
+#      cross-major upgrade through the dependency graph.
+#   3. Mitigation: both servers front HTTP/2 with actix-governor rate
+#      limiting (per-peer-IP request caps), bounding the rate at which an
+#      unauthenticated peer can mount the empty-DATA-frame exhaustion.
+#
+# Re-evaluate (and remove this entry) when actix-http publishes an h2 0.4
+# migration or backports the frame bound to the 0.3 line.
 [advisories]
-ignore = ["RUSTSEC-2023-0071"]
+ignore = ["RUSTSEC-2023-0071", "RUSTSEC-2026-0258"]
