@@ -69,7 +69,7 @@ export HUB_KID=hub-key-1
 export HUB_TOKEN_TTL_SECONDS=3600
 
 # CAS 连接
-export CAS_BASE_URL=http://localhost:8081
+export HUB_CAS_BASE_URL=http://localhost:8081
 
 # 元数据数据库
 export HUB_SQLITE_PATH=/data/hub-metadata.db

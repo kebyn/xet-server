@@ -11,7 +11,7 @@ Xet Server 由两个独立的服务组成，每个服务都有自己的配置：
 
 所有配置通过**环境变量**进行管理。显式设置的数值或布尔环境变量必须能被正确解析；如果设置了非法值，服务会在启动时返回配置错误并退出，不会静默回退到默认值。未设置环境变量时才使用默认值。
 
-启动校验是严格的：CAS 布尔值只接受 `true`/`false`/`1`/`0`；`XET_CONVERSION_SCHEME` 只接受 `none`、`lz4` 或 `bg4lz4`（大小写不敏感）；所有显式数值必须能解析，速率、TTL、pool size、上传/下载上限等要求大于零。`XET_PUBLIC_BASE_URL`、生效的 `XET_S3_ENDPOINT`、`HUB_PUBLIC_BASE_URL` 和 `CAS_BASE_URL` 必须是带有效 host 的 HTTP(S) URL。跨字段约束也会校验，例如 `XET_MIN_CONVERSION_SIZE <= XET_MAX_CONVERSION_SIZE`、`HUB_INLINE_THRESHOLD <= HUB_MAX_UPLOAD_SIZE <= HUB_MAX_DOWNLOAD_SIZE`。
+启动校验是严格的：CAS 布尔值只接受 `true`/`false`/`1`/`0`；`XET_CONVERSION_SCHEME` 只接受 `none`、`lz4` 或 `bg4lz4`（大小写不敏感）；所有显式数值必须能解析，速率、TTL、pool size、上传/下载上限等要求大于零。`XET_PUBLIC_BASE_URL`、生效的 `XET_S3_ENDPOINT`、`HUB_PUBLIC_BASE_URL` 和 `HUB_CAS_BASE_URL` 必须是带有效 host 的 HTTP(S) URL。跨字段约束也会校验，例如 `XET_MIN_CONVERSION_SIZE <= XET_MAX_CONVERSION_SIZE`、`HUB_INLINE_THRESHOLD <= HUB_MAX_UPLOAD_SIZE <= HUB_MAX_DOWNLOAD_SIZE`。
 
 ---
 
@@ -267,20 +267,20 @@ export HUB_DB_POOL_SIZE=5
 
 | 环境变量 | 描述 | 默认值 | 必需 |
 |---------|------|--------|------|
-| `CAS_BASE_URL` | CAS 服务器 URL | `http://localhost:8081` | 是 |
+| `HUB_CAS_BASE_URL` | CAS 服务器 URL | `http://localhost:8081` | 是 |
 | `HUB_CAS_TIMEOUT_SECS` | CAS 请求超时（秒） | `30` | 否 |
 | `HUB_MAX_DOWNLOAD_SIZE` | CAS 下载大小限制（字节），应 >= `HUB_MAX_UPLOAD_SIZE` | `536870912` (512MB) | 否 |
 | `HUB_CAS_HEALTH_CHECK_TIMEOUT_SECS` | Hub 启动时 CAS 健康检查超时（秒） | `10` | 否 |
 
 **说明**：
-- `CAS_BASE_URL` 指向 CAS Server 的内部 URL，默认端口为 8081（与 CAS Server 默认端口一致）
+- `HUB_CAS_BASE_URL` 指向 CAS Server 的内部 URL，默认端口为 8081（与 CAS Server 默认端口一致）
 - `HUB_CAS_TIMEOUT_SECS` 控制 Hub 到 CAS 的请求超时
 - `HUB_CAS_HEALTH_CHECK_TIMEOUT_SECS`：Hub 启动时会异步检查 CAS 连通性，超过此时间未完成会记录错误日志（非阻塞）
 - `HUB_MAX_DOWNLOAD_SIZE` 同时校验 CAS 声明的 `Content-Length` 和流式接收的实际累计字节；缺失或伪造长度头不能绕过限制。CAS batch/state 控制面响应固定限制为 8 MiB，CAS 错误体固定限制为 64 KiB
 
 **示例**：
 ```bash
-export CAS_BASE_URL=http://cas-server:8081
+export HUB_CAS_BASE_URL=http://cas-server:8081
 export HUB_CAS_TIMEOUT_SECS=60
 ```
 
@@ -364,7 +364,7 @@ export HUB_PRIVATE_KEY_PATH=./keys/hub-private-key.pem
 export HUB_KID=dev-key-1
 export HUB_TOKEN_TTL_SECONDS=86400  # 24 小时（开发方便）
 export HUB_SQLITE_PATH=./data/hub-metadata.db
-export CAS_BASE_URL=http://127.0.0.1:8081
+export HUB_CAS_BASE_URL=http://127.0.0.1:8081
 ```
 
 ### 生产环境
@@ -394,7 +394,7 @@ export HUB_PRIVATE_KEY_PATH=/etc/xet/hub-private-key.pem
 export HUB_KID=hub-key-1
 export HUB_TOKEN_TTL_SECONDS=3600  # 1 小时
 export HUB_SQLITE_PATH=/var/lib/xet/hub-metadata.db
-export CAS_BASE_URL=http://cas-server:8081
+export HUB_CAS_BASE_URL=http://cas-server:8081
 export HUB_CAS_TIMEOUT_SECS=60
 export HUB_INLINE_THRESHOLD=2097152  # 2MB
 ```

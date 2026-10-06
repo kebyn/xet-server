@@ -57,13 +57,27 @@ fn test_try_from_file_or_env_rejects_invalid_public_base_url_without_panic() {
 fn test_try_from_file_or_env_rejects_invalid_cas_base_url_without_panic() {
     let _guard = ENV_LOCK.lock().unwrap();
     let _config_file = ScopedEnv::remove("HUB_CONFIG_FILE");
-    let _url = ScopedEnv::set("CAS_BASE_URL", "not a url");
+    let _url = ScopedEnv::set("HUB_CAS_BASE_URL", "not a url");
 
     let err =
         HubConfig::try_from_file_or_env().expect_err("invalid CAS base URL should be rejected");
 
-    assert!(err.contains("CAS_BASE_URL"));
+    assert!(err.contains("HUB_CAS_BASE_URL"));
     assert!(err.contains("valid URL"));
+}
+
+#[test]
+fn test_try_from_file_or_env_ignores_legacy_cas_base_url_entirely() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let _config_file = ScopedEnv::remove("HUB_CONFIG_FILE");
+    let _new_name = ScopedEnv::remove("HUB_CAS_BASE_URL");
+    let _legacy = ScopedEnv::set("CAS_BASE_URL", "not a url");
+
+    // The legacy name is deliberately not read (no fallback): even an invalid
+    // value under it must not fail validation, and the default URL applies.
+    let config =
+        HubConfig::try_from_file_or_env().expect("legacy CAS_BASE_URL must be ignored entirely");
+    assert_eq!(config.cas.base_url, "http://localhost:8081");
 }
 
 #[test]
@@ -83,7 +97,7 @@ fn test_try_from_file_or_env_rejects_invalid_numeric_values_without_fallback() {
     let _guard = ENV_LOCK.lock().unwrap();
     let _config_file = ScopedEnv::remove("HUB_CONFIG_FILE");
     let _public_base_url = ScopedEnv::remove("HUB_PUBLIC_BASE_URL");
-    let _cas_base_url = ScopedEnv::remove("CAS_BASE_URL");
+    let _cas_base_url = ScopedEnv::remove("HUB_CAS_BASE_URL");
 
     for (key, value) in [
         ("HUB_PORT", "not-a-port"),
@@ -116,7 +130,7 @@ fn test_try_from_file_or_env_rejects_zero_cas_limits_and_timeouts() {
     let _guard = ENV_LOCK.lock().unwrap();
     let _config_file = ScopedEnv::remove("HUB_CONFIG_FILE");
     let _public_base_url = ScopedEnv::remove("HUB_PUBLIC_BASE_URL");
-    let _cas_base_url = ScopedEnv::remove("CAS_BASE_URL");
+    let _cas_base_url = ScopedEnv::remove("HUB_CAS_BASE_URL");
 
     for key in [
         "HUB_CAS_TIMEOUT_SECS",
@@ -135,7 +149,7 @@ fn test_try_from_file_or_env_rejects_token_ttl_above_wire_limit() {
     let _guard = ENV_LOCK.lock().unwrap();
     let _config_file = ScopedEnv::remove("HUB_CONFIG_FILE");
     let _public_base_url = ScopedEnv::remove("HUB_PUBLIC_BASE_URL");
-    let _cas_base_url = ScopedEnv::remove("CAS_BASE_URL");
+    let _cas_base_url = ScopedEnv::remove("HUB_CAS_BASE_URL");
     let invalid_ttl = (MAX_TOKEN_LIFETIME_SECS + 1).to_string();
 
     for key in [
@@ -159,7 +173,7 @@ fn test_try_from_file_or_env_rejects_inconsistent_size_limits() {
     let _guard = ENV_LOCK.lock().unwrap();
     let _config_file = ScopedEnv::remove("HUB_CONFIG_FILE");
     let _public_base_url = ScopedEnv::remove("HUB_PUBLIC_BASE_URL");
-    let _cas_base_url = ScopedEnv::remove("CAS_BASE_URL");
+    let _cas_base_url = ScopedEnv::remove("HUB_CAS_BASE_URL");
 
     {
         let _inline = ScopedEnv::set("HUB_INLINE_THRESHOLD", "1025");
@@ -191,9 +205,9 @@ fn test_try_from_file_or_env_requires_http_urls() {
     }
     {
         let _public_base_url = ScopedEnv::remove("HUB_PUBLIC_BASE_URL");
-        let _url = ScopedEnv::set("CAS_BASE_URL", "ftp://example.com");
+        let _url = ScopedEnv::set("HUB_CAS_BASE_URL", "ftp://example.com");
         let err = HubConfig::try_from_file_or_env().expect_err("FTP CAS URL should be rejected");
-        assert!(err.contains("CAS_BASE_URL"));
+        assert!(err.contains("HUB_CAS_BASE_URL"));
         assert!(err.contains("unsupported scheme"));
     }
 }

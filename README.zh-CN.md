@@ -148,7 +148,7 @@ export HUB_KID=hub-key-1
 export HUB_TOKEN_TTL_SECONDS=3600
 
 # CAS 客户端设置
-export CAS_BASE_URL=http://localhost:8081
+export HUB_CAS_BASE_URL=http://localhost:8081
 
 # 元数据数据库
 export HUB_SQLITE_PATH=/data/hub-metadata.db
@@ -362,7 +362,7 @@ CAS 对象访问是 content-capability based：持有有效 CAS token 的客户�
 | `HUB_INTERNAL_TOKEN_TTL_SECONDS` | 内部令牌有效期（秒，用于 Hub→CAS internal endpoints，范围 `1..=604800`） | `86400` (24小时) |
 | `HUB_SQLITE_PATH` | 元数据数据库路径 | `hub.db` |
 | `HUB_DB_POOL_SIZE` | SQLite 连接池大小 | `5` |
-| `CAS_BASE_URL` | CAS 服务器 URL | `http://localhost:8081` |
+| `HUB_CAS_BASE_URL` | CAS 服务器 URL | `http://localhost:8081` |
 | `HUB_CAS_TIMEOUT_SECS` | CAS 请求超时（秒） | `30` |
 | `HUB_CAS_HEALTH_CHECK_TIMEOUT_SECS` | 启动时CAS健康检查超时（秒） | `10` |
 | `HUB_INLINE_THRESHOLD` | 内联文件阈值（字节） | `1048576` (1MB) |

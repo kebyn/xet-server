@@ -149,7 +149,7 @@ export HUB_KID=hub-key-1
 export HUB_TOKEN_TTL_SECONDS=3600
 
 # CAS client settings
-export CAS_BASE_URL=http://localhost:8081
+export HUB_CAS_BASE_URL=http://localhost:8081
 
 # Metadata database
 export HUB_SQLITE_PATH=/data/hub-metadata.db
@@ -410,7 +410,7 @@ rates, and pool sizes are rejected.
 | `HUB_INTERNAL_TOKEN_TTL_SECONDS` | Internal token lifetime for Hub→CAS internal endpoints (seconds, range `1..=604800`) | `86400` (24 hours) |
 | `HUB_SQLITE_PATH` | Metadata database path | `hub.db` |
 | `HUB_DB_POOL_SIZE` | SQLite connection pool size | `5` |
-| `CAS_BASE_URL` | CAS server URL | `http://localhost:8081` |
+| `HUB_CAS_BASE_URL` | CAS server URL | `http://localhost:8081` |
 | `HUB_CAS_TIMEOUT_SECS` | CAS request timeout (seconds) | `30` |
 | `HUB_CAS_HEALTH_CHECK_TIMEOUT_SECS` | Startup CAS health check timeout (seconds) | `10` |
 | `HUB_INLINE_THRESHOLD` | Inline file threshold (bytes) | `1048576` (1MB) |

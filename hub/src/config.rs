@@ -199,7 +199,7 @@ impl HubConfig {
         if let Some(public_base_url) = &self.server.public_base_url {
             Self::validate_http_url("HUB_PUBLIC_BASE_URL", public_base_url)?;
         }
-        Self::validate_http_url("CAS_BASE_URL", &self.cas.base_url)?;
+        Self::validate_http_url("HUB_CAS_BASE_URL", &self.cas.base_url)?;
 
         if self.server.rate_limit_rpm == 0 {
             return Err(
@@ -314,6 +314,27 @@ impl HubConfig {
         Ok(())
     }
 
+    /// Warn when the retired `CAS_BASE_URL` variable is still set.
+    ///
+    /// The Hub's CAS address moved to `HUB_CAS_BASE_URL` to match the
+    /// `HUB_CAS_*` family. The old name is deliberately not read (no
+    /// fallback), so a stale value must be surfaced loudly instead of being
+    /// silently ignored.
+    fn warn_if_legacy_cas_base_url_set() {
+        if env::var("CAS_BASE_URL").is_ok() {
+            tracing::warn!("CAS_BASE_URL is no longer read; set HUB_CAS_BASE_URL instead");
+        }
+    }
+
+    /// Read the CAS upstream base URL from `HUB_CAS_BASE_URL`.
+    fn cas_base_url_from_env() -> Result<String, String> {
+        Self::warn_if_legacy_cas_base_url_set();
+        let url =
+            env::var("HUB_CAS_BASE_URL").unwrap_or_else(|_| "http://localhost:8081".to_string());
+        Self::validate_http_url("HUB_CAS_BASE_URL", &url)?;
+        Ok(url)
+    }
+
     /// Load configuration from environment variables.
     pub fn try_from_env() -> Result<Self, String> {
         let config = HubConfig {
@@ -340,12 +361,7 @@ impl HubConfig {
                 db_pool_size: Self::parse_env("HUB_DB_POOL_SIZE", 5)?,
             },
             cas: CasSettings {
-                base_url: {
-                    let url = env::var("CAS_BASE_URL")
-                        .unwrap_or_else(|_| "http://localhost:8081".to_string());
-                    Self::validate_http_url("CAS_BASE_URL", &url)?;
-                    url
-                },
+                base_url: Self::cas_base_url_from_env()?,
                 internal_timeout_seconds: Self::parse_env("HUB_CAS_TIMEOUT_SECS", 30)?,
                 max_download_size: Self::parse_env("HUB_MAX_DOWNLOAD_SIZE", 512 * 1024 * 1024)?,
                 health_check_timeout_seconds: Self::parse_env(
@@ -441,8 +457,9 @@ impl HubConfig {
         if let Some(size) = Self::parse_optional_env("HUB_DB_POOL_SIZE")? {
             config.metadata.db_pool_size = size;
         }
-        if let Ok(url) = env::var("CAS_BASE_URL") {
-            Self::validate_http_url("CAS_BASE_URL", &url)?;
+        Self::warn_if_legacy_cas_base_url_set();
+        if let Ok(url) = env::var("HUB_CAS_BASE_URL") {
+            Self::validate_http_url("HUB_CAS_BASE_URL", &url)?;
             config.cas.base_url = url;
         }
         if let Some(timeout) = Self::parse_optional_env("HUB_CAS_TIMEOUT_SECS")? {
