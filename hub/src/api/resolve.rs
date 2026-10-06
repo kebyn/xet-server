@@ -1,3 +1,4 @@
+use super::error_json;
 use crate::auth::extract::{AuthRead, AuthUser};
 use crate::config::HubConfig;
 use crate::error::{bad_gateway_error_response, internal_error_response};
@@ -9,13 +10,6 @@ use std::sync::Arc;
 
 fn resolve_service(metadata: &web::Data<Arc<dyn MetadataStore>>) -> ResolveService {
     ResolveService::new(metadata.get_ref().clone())
-}
-
-fn error_json(error: String, error_type: &str) -> serde_json::Value {
-    serde_json::json!({
-        "error": error,
-        "error_type": error_type
-    })
 }
 
 fn resolve_service_error_response(err: ResolveServiceError) -> HttpResponse {

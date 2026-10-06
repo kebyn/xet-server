@@ -21,3 +21,15 @@ pub use token_exchange::{
 };
 pub use tree::{tree_dataset, tree_model, tree_space};
 pub use whoami::whoami;
+
+/// Uniform JSON error body for Hub API responses.
+///
+/// Shared by every api handler module; previously this helper was defined
+/// identically in seven places. `error_type` values follow the HuggingFace
+/// Hub convention (e.g. `AuthorizationError` for 403).
+pub(crate) fn error_json(error: String, error_type: &str) -> serde_json::Value {
+    serde_json::json!({
+        "error": error,
+        "error_type": error_type
+    })
+}

@@ -1,3 +1,4 @@
+use super::error_json;
 use crate::auth::extract::{AuthRead, AuthUser, AuthWrite};
 use crate::error::internal_error_response;
 use crate::metadata::{MetadataStore, Repo, RepoType};
@@ -47,13 +48,6 @@ fn chrono_datetime(timestamp: i64) -> String {
 
 fn repo_service(metadata: &web::Data<Arc<dyn MetadataStore>>) -> RepoService {
     RepoService::new(metadata.get_ref().clone())
-}
-
-fn error_json(error: String, error_type: &str) -> serde_json::Value {
-    serde_json::json!({
-        "error": error,
-        "error_type": error_type
-    })
 }
 
 fn repo_service_error_response(err: RepoServiceError, not_found_type: &str) -> HttpResponse {

@@ -1,3 +1,4 @@
+use super::error_json;
 use crate::auth::extract::{AuthUser, AuthWrite};
 use crate::error::internal_error_response;
 use crate::metadata::{MetadataStore, RepoType};
@@ -40,20 +41,13 @@ fn preupload_service(metadata: &web::Data<Arc<dyn MetadataStore>>) -> PreuploadS
     PreuploadService::new(metadata.get_ref().clone())
 }
 
-fn error_json(error: String, error_type: &str) -> serde_json::Value {
-    serde_json::json!({
-        "error": error,
-        "error_type": error_type
-    })
-}
-
 fn preupload_service_error_response(err: PreuploadServiceError) -> HttpResponse {
     match err {
         PreuploadServiceError::Validation(msg) => {
             HttpResponse::BadRequest().json(error_json(msg, "ValidationError"))
         }
         PreuploadServiceError::Forbidden(msg) => {
-            HttpResponse::Forbidden().json(error_json(msg, "ForbiddenError"))
+            HttpResponse::Forbidden().json(error_json(msg, "AuthorizationError"))
         }
         PreuploadServiceError::NotFound(msg) => {
             HttpResponse::NotFound().json(error_json(msg, "NotFoundError"))

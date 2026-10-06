@@ -1,3 +1,4 @@
+use super::error_json;
 use crate::auth::extract::{AuthRead, AuthUser, AuthWrite};
 use crate::auth::token_store::TokenInfo;
 use crate::auth::xet_signer::XetSigner;
@@ -24,13 +25,6 @@ fn token_exchange_service(
     xet_signer: &web::Data<Arc<XetSigner>>,
 ) -> TokenExchangeService {
     TokenExchangeService::new(metadata.get_ref().clone(), xet_signer.get_ref().clone())
-}
-
-fn error_json(error: String, error_type: &str) -> serde_json::Value {
-    serde_json::json!({
-        "error": error,
-        "error_type": error_type
-    })
 }
 
 fn token_exchange_error_response(err: TokenExchangeServiceError) -> HttpResponse {

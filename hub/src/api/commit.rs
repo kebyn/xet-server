@@ -1,3 +1,4 @@
+use super::error_json;
 use crate::auth::extract::{AuthUser, AuthWrite};
 use crate::auth::xet_signer::XetSigner;
 use crate::cas_client::CasClientTrait;
@@ -57,13 +58,6 @@ async fn handle_commit(
     }
 }
 
-fn error_json(error: String, error_type: &str) -> serde_json::Value {
-    serde_json::json!({
-        "error": error,
-        "error_type": error_type
-    })
-}
-
 fn commit_error_response(err: CommitServiceError) -> HttpResponse {
     match err {
         CommitServiceError::PayloadTooLarge { actual, max } => HttpResponse::PayloadTooLarge()
@@ -78,7 +72,7 @@ fn commit_error_response(err: CommitServiceError) -> HttpResponse {
             HttpResponse::BadRequest().json(error_json(message, "ValidationError"))
         }
         CommitServiceError::Forbidden(message) => {
-            HttpResponse::Forbidden().json(error_json(message, "ForbiddenError"))
+            HttpResponse::Forbidden().json(error_json(message, "AuthorizationError"))
         }
         CommitServiceError::NotFound(message) => {
             HttpResponse::NotFound().json(error_json(message, "NotFoundError"))

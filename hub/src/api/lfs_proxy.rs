@@ -1,3 +1,4 @@
+use super::error_json;
 use crate::auth::token_store::TokenStore;
 use crate::auth::xet_signer::XetSigner;
 use crate::cas_client::CasClient;
@@ -109,13 +110,6 @@ pub async fn lfs_batch(
         Ok(response) => HttpResponse::Ok().json(response),
         Err(err) => lfs_batch_error_response(err),
     }
-}
-
-fn error_json(error: String, error_type: &str) -> serde_json::Value {
-    serde_json::json!({
-        "error": error,
-        "error_type": error_type
-    })
 }
 
 fn lfs_batch_error_response(err: LfsBatchServiceError) -> HttpResponse {
