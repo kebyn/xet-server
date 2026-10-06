@@ -154,7 +154,9 @@ pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
         );
     }
 
-    // Internal endpoints (/internal/*) and health check bypass rate limiting.
+    // The health and readiness endpoints are registered at App level, before
+    // the Governor-wrapped scope, and therefore bypass rate limiting (there
+    // are no /internal/* routes on the Hub — those live on the CAS server).
     // Governor replenishes one token per configured period, so the period must be
     // 60 seconds divided by RPM. The burst capacity remains RPM.
     //
@@ -173,7 +175,7 @@ pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
 
     tracing::info!(
         "Rate limiting: {} sustained requests/minute per peer IP for public endpoints \
-         (internal/health excluded). Burst: {}, token period: {:.6}s",
+         (health endpoints excluded). Burst: {}, token period: {:.6}s",
         rpm,
         rpm,
         period.as_secs_f64()
