@@ -5,7 +5,8 @@
 ## 核心文档
 
 ### 项目文档
-- **[README.md](../README.md)** - 项目概述、快速开始、使用示例
+- **[README.md](../README.md)** - 项目概述、快速开始、使用示例（英文）
+- **[README.zh-CN.md](../README.zh-CN.md)** - 项目概述、快速开始、使用示例（中文）
 - **[HF_XET_INTEGRATION_GUIDE.md](../HF_XET_INTEGRATION_GUIDE.md)** - HuggingFace 集成指南
 - **[HUB_UPLOAD_DOWNLOAD_TEST_REPORT.md](../HUB_UPLOAD_DOWNLOAD_TEST_REPORT.md)** - Hub 上传/下载测试报告
 
@@ -47,7 +48,8 @@
 
 ```
 /data/
-├── README.md                              # 项目主文档
+├── README.md                              # 项目主文档（英文）
+├── README.zh-CN.md                        # 项目主文档（中文）
 ├── HF_XET_INTEGRATION_GUIDE.md           # HuggingFace 集成指南
 ├── HUB_UPLOAD_DOWNLOAD_TEST_REPORT.md    # 测试报告
 ├── async_sqlite_migration_analysis.md    # SQLite 异步迁移分析（已完成）
@@ -95,7 +97,7 @@
 ## 快速导航
 
 ### 新用户
-1. 阅读 [README.md](../README.md) 了解项目概述
+1. 阅读 [README.md](../README.md)（英文）或 [README.zh-CN.md](../README.zh-CN.md)（中文）了解项目概述
 2. 按照快速开始指南安装和配置
 3. 查看 [HF_XET_INTEGRATION_GUIDE.md](../HF_XET_INTEGRATION_GUIDE.md) 了解使用方式
 

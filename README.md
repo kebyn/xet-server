@@ -1,39 +1,41 @@
 # Xet Server
 
-Xet Server 是一个高性能的 **内容寻址存储（Content-Addressable Storage, CAS）** 服务器，专为大规模机器学习模型和数据集的管理而设计。它同时支持 **Git LFS 协议** 和 **HuggingFace Hub API**，提供跨协议的智能去重能力。
+English | [简体中文](README.zh-CN.md)
 
-## ✨ 核心特性
+Xet Server is a high-performance **Content-Addressable Storage (CAS)** server designed for managing large-scale machine learning models and datasets. It speaks both the **Git LFS protocol** and the **HuggingFace Hub API**, with intelligent cross-protocol deduplication.
 
-### 存储引擎
-- **内容寻址存储（CAS）** - 基于内容哈希的去重存储，自动消除重复数据
-- **内容定义分块（CDC）** - 使用 GearHash 算法进行可变大小分块（8KB-128KB）
-- **BLAKE3 哈希** - 高速加密哈希，支持 Merkle 树聚合验证
-- **LZ4 压缩** - 快速压缩，平衡性能和存储效率
-- **多存储后端** - 支持本地文件系统和 S3/MinIO 对象存储
+## ✨ Core Features
 
-### 协议支持
-- **Git LFS 兼容** - 完整的 Git Large File Storage 协议支持
-- **HuggingFace Hub API** - 兼容 HuggingFace Hub REST API，支持 `hf` CLI 工具
-- **Xet 原生协议** - 高性能原生协议，支持 xorbs 和 shards
-- **跨协议去重** - Git LFS 上传的文件可通过 HF API 去重下载
+### Storage Engine
+- **Content-addressable storage (CAS)** - hash-based deduplicated storage that automatically eliminates duplicate data
+- **Content-Defined Chunking (CDC)** - variable-size chunking (8KB-128KB) using the GearHash algorithm
+- **BLAKE3 hashing** - high-speed cryptographic hashing with Merkle tree aggregate verification
+- **LZ4 compression** - fast compression balancing performance and storage efficiency
+- **Multiple storage backends** - local filesystem and S3/MinIO object storage
 
-### 安全特性
-- **Ed25519 认证** - 基于 Ed25519 的 JWT 非对称密钥签名
-- **分层认证** - Hub tokens (`hf_xxx`) + CAS user tokens (`xet_xxx`) + LFS proxy tokens (`proxy_xxx`) + internal service tokens (`internal_xxx`)
-- **作用域控制** - `read`、`write`、`internal`、`lfs-upload`、`lfs-download`；`internal` 仅用于 Hub -> CAS 内部端点，不包含 `read`/`write`
-- **密钥轮换** - 支持 key ID (`kid`) 的多密钥管理
+### Protocol Support
+- **Git LFS compatible** - full Git Large File Storage protocol support
+- **HuggingFace Hub API** - compatible with the HuggingFace Hub REST API; works with the `hf` CLI
+- **Xet native protocol** - high-performance native protocol for xorbs and shards
+- **Cross-protocol deduplication** - files uploaded via Git LFS can be downloaded deduplicated through the HF API
 
-## 🏗️ 架构概览
+### Security
+- **Ed25519 authentication** - JWTs signed with asymmetric Ed25519 keys
+- **Layered authentication** - Hub tokens (`hf_xxx`) + CAS user tokens (`xet_xxx`) + LFS proxy tokens (`proxy_xxx`) + internal service tokens (`internal_xxx`)
+- **Scope control** - `read`, `write`, `internal`, `lfs-upload`, `lfs-download`; `internal` is reserved for Hub -> CAS internal endpoints and implies neither `read` nor `write`
+- **Key rotation** - multi-key management keyed by key ID (`kid`)
 
-Xet Server 采用**双进程架构**，由两个独立的服务组成：
+## 🏗️ Architecture Overview
+
+Xet Server uses a **two-process architecture** made up of two independent services:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                        客户端                                │
+│                         Clients                              │
 │  (git lfs, hf CLI, xet-tools, custom clients)              │
 └────────────┬──────────────────────────────┬─────────────────┘
              │                              │
-             │ Git LFS / HF Hub API         │ Xet 原生协议
+             │ Git LFS / HF Hub API         │ Xet native protocol
              │ (HTTP :8080)                 │ (HTTP :8081)
              ▼                              ▼
 ┌────────────────────────┐      ┌────────────────────────┐
@@ -41,12 +43,12 @@ Xet Server 采用**双进程架构**，由两个独立的服务组成：
 │     (HuggingFace       │─────▶│   (Content Addressable │
 │      Compatible)       │      │        Storage)        │
 │                        │      │                        │
-│  • Repository CRUD     │      │  • Xorb 存储           │
-│  • Commit API          │      │  • Shard 存储          │
-│  • Token Exchange      │      │  • 文件重构            │
-│  • Tree Listing        │      │  • 全局去重            │
-│  • File Resolve        │      │  • LFS 对象存储        │
-│  • LFS Proxy           │      │  • 状态管理            │
+│  • Repository CRUD     │      │  • Xorb storage        │
+│  • Commit API          │      │  • Shard storage       │
+│  • Token Exchange      │      │  • File reconstruction │
+│  • Tree Listing        │      │  • Global dedup        │
+│  • File Resolve        │      │  • LFS object storage  │
+│  • LFS Proxy           │      │  • State management    │
 └────────────────────────┘      └──────────┬─────────────┘
                                            │
                                            ▼
@@ -58,258 +60,287 @@ Xet Server 采用**双进程架构**，由两个独立的服务组成：
                               └────────────────────────┘
 ```
 
-### 组件说明
+### Components
 
 **Hub API Server** (`hub-api`)
-- 端口：8080（默认）
-- 功能：提供 HuggingFace Hub 兼容的 REST API
-- 职责：仓库管理、提交 API、令牌交换、LFS 代理
-- 数据库：SQLite（元数据存储，启动时运行内置 migration runner）
+- Port: 8080 (default)
+- Purpose: serves a HuggingFace Hub-compatible REST API
+- Responsibilities: repository management, commit API, token exchange, LFS proxy
+- Database: SQLite (metadata store; a built-in migration runner executes at startup)
 
 **CAS Server** (`xet-server`)
-- 端口：8081（默认，避免与 Hub API 端口 8080 冲突）
-- 功能：内容寻址存储引擎
-- 职责：xorb/shard 存储、文件重构、去重、LFS 对象管理
-- 无数据库（纯内存索引，启动时从存储后端重建）
+- Port: 8081 (default, to avoid clashing with the Hub API on 8080)
+- Purpose: the content-addressable storage engine
+- Responsibilities: xorb/shard storage, file reconstruction, deduplication, LFS object management
+- No database (in-memory index only, rebuilt from the storage backend at startup)
 
-## 🚀 快速开始
+## 🚀 Quick Start
 
-### 环境要求
+### Requirements
 
 - **Rust** 1.85+ (Edition 2024)
-- **SQLite** 3.35+（仅 Hub API 需要）
-- **可选**：S3/MinIO 存储后端
+- **SQLite** 3.35+ (Hub API only)
+- **Optional**: an S3/MinIO storage backend
 
-### 编译安装
+### Build
 
 ```bash
-# 克隆仓库
+# Clone the repository
 git clone https://github.com/your-org/xet-server.git
 cd xet-server
 
-# 编译（release 模式）
+# Build (release mode)
 cargo build --release
 
-# 二进制文件位置
+# Binary locations
 # CAS Server: target/release/xet-server
 # Hub API:    target/release/hub-api
 ```
 
-### 生成认证密钥
+### Generate Authentication Keys
 
 ```bash
-# 生成 Hub 用户令牌（用于 Hub API 认证）
+# Generate a Hub user token (for Hub API authentication)
 ./target/release/hub-api create-token \
   --username admin \
   --name "admin-token" \
   --scope "read write" \
   --db hub.db
 
-# 生成 Ed25519 密钥对（用于 CAS 令牌签名）
+# Generate an Ed25519 key pair (for CAS token signing)
 openssl genpkey -algorithm Ed25519 -out private_key.pem
 openssl pkey -in private_key.pem -pubout -out public_key.pem
 ```
 
-### 配置环境变量
+### Configure Environment Variables
 
-**CAS Server 配置**：
+**CAS Server**:
 ```bash
-# 服务器设置（默认端口 8081，避免与 Hub API 端口 8080 冲突）
+# Server settings (default port 8081, to avoid clashing with the Hub API on 8080)
 export XET_HOST=0.0.0.0
 export XET_PORT=8081
 export XET_PUBLIC_BASE_URL=http://localhost:8081
 export XET_MAX_BODY_SIZE_MB=2048
 export XET_INDEX_REBUILD_STRICT=false
 
-# 存储设置
+# Storage settings
 export XET_STORAGE_BACKEND=local
 export XET_LOCAL_PATH=/data/xet-storage
 
-# 认证设置
+# Authentication settings
 export CAS_PUBLIC_KEYS=hub-key-1=/path/to/public_key.pem
 export CAS_TRUSTED_KIDS=hub-key-1
 ```
 
-**Hub API 配置**：
+**Hub API**:
 ```bash
-# 服务器设置
+# Server settings
 export HUB_HOST=0.0.0.0
 export HUB_PORT=8080
 export HUB_PUBLIC_BASE_URL=http://localhost:8080
 
-# 认证设置
+# Authentication settings
 export HUB_PRIVATE_KEY_PATH=/path/to/private_key.pem
 export HUB_KID=hub-key-1
 export HUB_TOKEN_TTL_SECONDS=3600
 
-# CAS 客户端设置
+# CAS client settings
 export CAS_BASE_URL=http://localhost:8081
 
-# 元数据数据库
+# Metadata database
 export HUB_SQLITE_PATH=/data/hub-metadata.db
 ```
 
-### 启动服务
+### Start the Services
 
 ```bash
-# 终端 1：启动 CAS Server
+# Terminal 1: start the CAS Server
 ./target/release/xet-server
 
-# 终端 2：启动 Hub API
+# Terminal 2: start the Hub API
 ./target/release/hub-api
 ```
 
-## 💡 使用示例
+## 💡 Usage Examples
 
-### 方式 1：Git LFS 工作流
+### Option 1: Git LFS Workflow
 
-使用标准 Git LFS 命令与 Xet Server 交互：
+Interact with Xet Server using standard Git LFS commands:
 
 ```bash
-# 初始化仓库
+# Initialize a repository
 mkdir my-model && cd my-model
 git init
 git lfs install
 
-# 配置 LFS 指向 Xet Server
+# Point LFS at Xet Server
 cat > .lfsconfig << EOF
 [lfs]
     url = http://localhost:8081/lfs
 EOF
 
-# 添加大文件
+# Add a large file
 echo "*.safetensors filter=lfs diff=lfs merge=lfs -text" > .gitattributes
 cp /path/to/model.safetensors .
 
-# 提交并推送
+# Commit and push
 git add .
 git commit -m "Add model"
 git remote add origin http://localhost:8081/repo.git
 git push origin master
 ```
 
-### 方式 2：HuggingFace CLI 工作流
+### Option 2: HuggingFace CLI Workflow
 
-使用 `hf` CLI 工具与 Hub API 交互：
+Interact with the Hub API using the `hf` CLI:
 
-**注意**：`hf` 是 [huggingface-cli](https://huggingface.co/docs/huggingface_hub/main/en/guides/cli) 的简写形式。
-也可以使用标准的 `huggingface-cli` 命令，两者功能相同。Xet Server 实现了与 HuggingFace Hub 兼容的 REST API，
-因此支持标准的 HuggingFace 工具链。
+**Note**: `hf` is shorthand for
+[huggingface-cli](https://huggingface.co/docs/huggingface_hub/main/en/guides/cli).
+The standard `huggingface-cli` command works identically. Xet Server implements a
+HuggingFace Hub-compatible REST API, so the standard HuggingFace toolchain is
+supported.
 
 ```bash
-# 设置环境变量
+# Set environment variables
 export HF_ENDPOINT=http://localhost:8080
 export HF_TOKEN=hf_your_token_here
 
-# 创建仓库
+# Create a repository
 hf repo create my-model --type model
 
-# 上传文件
+# Upload a file
 hf upload my-model ./model.safetensors model.safetensors
 
-# 下载文件
+# Download a file
 hf download my-org/my-model model.safetensors --local-dir ./downloaded
 ```
 
-### 方式 3：混合工作流（跨协议去重）
+### Option 3: Hybrid Workflow (Cross-Protocol Deduplication)
 
-结合 Git LFS 和 HF API，实现跨协议去重：
+Combine Git LFS and the HF API for cross-protocol deduplication:
 
 ```bash
-# 步骤 1：通过 Git LFS 上传大文件
+# Step 1: upload a large file via Git LFS
 git lfs track "*.bin"
 git add model.bin
 git commit -m "Add model"
 git push origin master
 
-# 步骤 2：通过 HF API 下载（自动去重）
+# Step 2: download via the HF API (deduplicated automatically)
 export HF_ENDPOINT=http://localhost:8080
 hf download my-org/my-repo model.bin --local-dir ./downloaded
-# 文件从 CAS 直接返回，无需重复存储
+# The file is served straight from CAS — no duplicate storage
 ```
 
-## 📚 API 参考
+## 📚 API Reference
 
-### CAS Server API (端口 8081)
+### CAS Server API (port 8081)
 
-| 端点 | 方法 | 描述 |
-|------|------|------|
-| `/v1/xorbs/{prefix}/{hash}` | POST/PUT | 上传 Xorb 对象 |
-| `/v1/xorbs/{prefix}/{hash}/download` | GET | 下载 Xorb 对象 |
-| `/lfs/objects/{oid}` | PUT | 上传 LFS 对象 |
-| `/lfs/objects/{oid}` | GET | 下载 LFS 对象 |
-| `/v1/shards` | POST | 上传 Shard 元数据 |
-| `/v1/reconstructions/{file_id}` | GET | 获取文件重构信息 |
-| `/v2/reconstructions/{file_id}` | GET | 获取文件重构信息（V2） |
-| `/v1/chunks/{prefix}/{hash}` | GET | 全局去重查询 |
-| `/objects/batch` | POST | Git LFS 批量 API |
-| `/lfs/objects/batch` | POST | Git LFS 批量 API（LFS 路径） |
-| `/health` | GET | 存活检查（liveness） |
-| `/ready` | GET | 就绪检查（storage + MetadataIndex） |
-| `/metrics` | GET | Prometheus 指标 |
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/v1/xorbs/{prefix}/{hash}` | POST/PUT | Upload a xorb object |
+| `/v1/xorbs/{prefix}/{hash}/download` | GET | Download a xorb object |
+| `/lfs/objects/{oid}` | PUT | Upload an LFS object |
+| `/lfs/objects/{oid}` | GET | Download an LFS object |
+| `/v1/shards` | POST | Upload shard metadata |
+| `/v1/reconstructions/{file_id}` | GET | Get file reconstruction info |
+| `/v2/reconstructions/{file_id}` | GET | Get file reconstruction info (V2) |
+| `/v1/chunks/{prefix}/{hash}` | GET | Global deduplication query |
+| `/objects/batch` | POST | Git LFS batch API |
+| `/lfs/objects/batch` | POST | Git LFS batch API (LFS path) |
+| `/health` | GET | Liveness check |
+| `/ready` | GET | Readiness check (storage + MetadataIndex) |
+| `/metrics` | GET | Prometheus metrics |
 
-CAS 对象访问是 content-capability based：持有有效 CAS token 的客户端按 token scope 访问内容能力，不强制 repository-scoped object isolation。LFS batch action 优先返回短期 `proxy_xxx` token；如果未配置 `CAS_PRIVATE_KEY_PATH`，会兼容回退为调用者的 `xet_xxx` token，生产环境应避免此模式。
+CAS object access is content-capability based: clients holding a valid CAS token
+access content capabilities according to the token scope; repository-scoped object
+isolation is not enforced. LFS batch actions prefer short-lived `proxy_xxx`
+tokens; if `CAS_PRIVATE_KEY_PATH` is not configured, the server falls back to the
+caller's `xet_xxx` token for compatibility — avoid this mode in production.
 
-详细文档：[CAS API Reference](docs/api/cas-api.md)
+Detailed reference: [CAS API Reference](docs/api/cas-api.md)
 
-### Hub API (端口 8080)
+### Hub API (port 8080)
 
-| 端点 | 方法 | 描述 |
-|------|------|------|
-| `/api/whoami-v2` | GET | 用户身份信息 |
-| `/api/repos/create` | POST | 创建仓库 |
-| `/api/models` | POST | 创建模型仓库 |
-| `/api/datasets` | POST | 创建数据集仓库 |
-| `/api/spaces` | POST | 创建 Space 仓库 |
-| `/api/{type}/{ns}/{repo}/commit/{rev}` | POST | 提交文件（NDJSON） |
-| `/api/{type}/{ns}/{repo}/tree/{rev}` | GET | 列出文件树 |
-| `/{type}/{ns}/{repo}/resolve/{rev}/{path}` | GET | 下载文件 |
-| `/api/{type}/{ns}/{repo}/xet-read-token/{rev}` | GET | 获取读令牌 |
-| `/api/{type}/{ns}/{repo}/xet-write-token/{rev}` | GET | 获取写令牌 |
-| `/health` | GET | 存活检查 |
-| `/ready` | GET | 就绪检查（SQLite + CAS） |
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/whoami-v2` | GET | User identity |
+| `/api/repos/create` | POST | Create a repository |
+| `/api/models` | POST | Create a model repository |
+| `/api/datasets` | POST | Create a dataset repository |
+| `/api/spaces` | POST | Create a Space repository |
+| `/api/{type}/{ns}/{repo}/commit/{rev}` | POST | Commit files (NDJSON) |
+| `/api/{type}/{ns}/{repo}/tree/{rev}` | GET | List the file tree |
+| `/{type}/{ns}/{repo}/resolve/{rev}/{path}` | GET | Download a file |
+| `/api/{type}/{ns}/{repo}/xet-read-token/{rev}` | GET | Get a read token |
+| `/api/{type}/{ns}/{repo}/xet-write-token/{rev}` | GET | Get a write token |
+| `/health` | GET | Liveness check |
+| `/ready` | GET | Readiness check (SQLite + CAS) |
 
-详细文档：[Hub API Reference](docs/api/hub-api.md)
+Detailed reference: [Hub API Reference](docs/api/hub-api.md)
 
-### 协议与运行保证
+### Protocol & Operational Guarantees
 
-- Commit API 的 `header` 必须是第一个非空 NDJSON operation 且只能出现一次；后续 file/LFS/delete operation 保持请求顺序。同一路径以后出现的 operation 为准。
-- 每个 commit 是完整文件树 snapshot：SQLite 在同一写事务中复制父 commit 未修改条目、按顺序应用本次 delta 并更新 HEAD，不在 Hub 内存中加载完整父树；非首个 commit 必须提交与当前 HEAD 一致的 `parentRevision`。
-- Commit API 的 LFS `oid` 是不带 `sha256:` 前缀的 64 字符十六进制值。Hub 通过 CAS `HEAD /internal/blob/{oid}` 的必需 `X-Blob-Size` 校验声明大小；对象不存在或大小不一致返回 422。
-- Shard 从本地文件或远端临时文件有界解析，不保留整份原始字节副本；启动重建流式枚举 key，最多 10 个 shard 一批。S3 列表固定 1000 项一页并校验 continuation token 进度。S3 multipart 以唯一 upload ID 跟踪并在错误、取消和 shutdown 时 best-effort abort，bucket lifecycle rule 仍是进程崩溃时的最终兜底。
-- Hub inline resolve 在返回小文件前验证 snapshot 大小和 SHA-256 OID；损坏的 CAS 响应不会降级重定向。内部 SQL、路径、S3 配置和 CAS upstream body 只写服务端日志。Hub 对客户端返回稳定通用的 500/502 文案，CAS 的普通 500 JSON 为 `{"error":"Internal server error"}`。
-- Hub tree listing 使用每页 1000 个 snapshot 文件条目的 SQLite keyset pagination，并通过标准 `Link rel="next"` 与 `huggingface_hub` 透明分页。
+- The commit API `header` must be the first non-empty NDJSON operation and may
+  appear only once; subsequent file/LFS/delete operations keep request order.
+  When the same path appears more than once, the later operation wins.
+- Every commit is a full file-tree snapshot: SQLite copies the parent commit's
+  unmodified entries, applies this delta in order, and updates HEAD — all inside
+  a single write transaction, without loading the full parent tree into Hub
+  memory; commits after the first must submit a `parentRevision` matching the
+  current HEAD.
+- The commit API's LFS `oid` is a 64-character hex value without the `sha256:`
+  prefix. The Hub validates the declared size against the mandatory
+  `X-Blob-Size` from CAS `HEAD /internal/blob/{oid}`; a missing object or a size
+  mismatch returns 422.
+- Shards are parsed with bounded memory from a local file or a remote temp file,
+  without retaining a full copy of the raw bytes; the startup rebuild streams
+  key listings and processes shards in batches of at most 10. S3 listings use a
+  fixed page size of 1000 and validate continuation-token progress. S3
+  multipart uploads are tracked by unique upload ID and best-effort aborted on
+  errors, cancellation, and shutdown; a bucket lifecycle rule remains the final
+  backstop if the process crashes.
+- Hub inline resolve verifies snapshot size and SHA-256 OID before returning
+  small files; corrupted CAS responses never degrade into redirects. Internal
+  SQL, paths, S3 configuration, and CAS upstream bodies are logged server-side
+  only. Clients receive stable, generic 500/502 wording; a plain CAS 500 JSON
+  body is `{"error":"Internal server error"}`.
+- Hub tree listing uses SQLite keyset pagination of 1000 snapshot file entries
+  per page, with transparent `huggingface_hub` paging via the standard
+  `Link rel="next"` header.
 
-## ⚙️ 配置参考
+## ⚙️ Configuration Reference
 
-### CAS Server 环境变量
+### CAS Server Environment Variables
 
-| 变量名 | 描述 | 默认值 |
-|--------|------|--------|
-| `XET_HOST` | 服务器绑定地址 | `127.0.0.1` |
-| `XET_PORT` | 服务器端口 | `8081` |
-| `XET_PUBLIC_BASE_URL` | 公共访问 URL | `http://{host}:{port}` |
-| `XET_MAX_BODY_SIZE_MB` | 最大请求体大小（MB） | `2048` |
-| `XET_INDEX_REBUILD_STRICT` | MetadataIndex 重建失败时是否启动失败 | `false` |
-| `XET_STORAGE_BACKEND` | 存储后端类型 | `local` |
-| `XET_LOCAL_PATH` | 本地存储路径（使用 local 后端时必需） | `./data` |
-| `XET_S3_BUCKET` | S3 存储桶名称（使用 s3 后端时必需） | - |
-| `XET_S3_REGION` | S3 区域 | - |
-| `XET_S3_ENDPOINT` | S3 端点 URL | - |
-| `XET_UPLOAD_TEMP_DIR` | 上传临时文件目录 | 自动 |
-| `XET_RECONSTRUCTION_TEMP_DIR` | 文件重构及远端 xorb/shard/LFS 有界下载的临时目录 | 自动 |
-| `XET_VERIFY_DOWNLOAD_INTEGRITY` | 启用下载完整性校验 | `false` |
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `XET_HOST` | Server bind address | `127.0.0.1` |
+| `XET_PORT` | Server port | `8081` |
+| `XET_PUBLIC_BASE_URL` | Public access URL | `http://{host}:{port}` |
+| `XET_MAX_BODY_SIZE_MB` | Maximum request body size (MB) | `2048` |
+| `XET_INDEX_REBUILD_STRICT` | Fail startup if MetadataIndex rebuild fails | `false` |
+| `XET_STORAGE_BACKEND` | Storage backend type | `local` |
+| `XET_LOCAL_PATH` | Local storage path (required for the local backend) | `./data` |
+| `XET_S3_BUCKET` | S3 bucket name (required for the s3 backend) | - |
+| `XET_S3_REGION` | S3 region | - |
+| `XET_S3_ENDPOINT` | S3 endpoint URL | - |
+| `XET_UPLOAD_TEMP_DIR` | Temp directory for upload staging | automatic |
+| `XET_RECONSTRUCTION_TEMP_DIR` | Temp directory for file reconstruction and bounded remote xorb/shard/LFS downloads | automatic |
+| `XET_VERIFY_DOWNLOAD_INTEGRITY` | Verify download integrity | `false` |
 
-> **⚠️ 重要：S3 Lifecycle Rules 配置**
+> **⚠️ Important: S3 Lifecycle Rules**
 >
-> 使用 S3 存储后端时，**必须**配置 S3 Lifecycle Rules 来自动中止未完成的 multipart 上传，否则会产生持续的存储费用。
+> When using the S3 storage backend, you **must** configure S3 Lifecycle Rules to
+> abort incomplete multipart uploads automatically; otherwise they incur ongoing
+> storage costs.
 >
-> **配置步骤：**
-> 1. 在 AWS S3 控制台或使用 AWS CLI 编辑存储桶的 Lifecycle 规则
-> 2. 添加规则：中止未完成的 multipart 上传
-> 3. 建议设置：7 天后中止未完成的上传
+> **Steps:**
+> 1. Edit the bucket's lifecycle rules in the AWS S3 console or with the AWS CLI
+> 2. Add a rule: abort incomplete multipart uploads
+> 3. Recommended: abort uploads incomplete after 7 days
 >
-> **AWS CLI 示例：**
+> **AWS CLI example:**
 > ```bash
 > aws s3api put-bucket-lifecycle-configuration \
 >   --bucket your-bucket-name \
@@ -327,118 +358,141 @@ CAS 对象访问是 content-capability based：持有有效 CAS token 的客户�
 >   }'
 > ```
 >
-> 进程会按唯一 upload ID 跟踪并在错误、请求取消或正常 shutdown 时 best-effort abort；如果进程崩溃、runtime 已退出或 abort 自身失败，仍可能遗留 multipart。因此 lifecycle rule 不可省略。
+> The process tracks uploads by unique upload ID and aborts them best-effort on
+> errors, request cancellation, and normal shutdown; multipart parts can still be
+> left behind if the process crashes, the runtime has exited, or the abort itself
+> fails. The lifecycle rule is therefore not optional.
 
-| 变量名 | 描述 | 默认值 |
-|--------|------|--------|
-| `CAS_PUBLIC_KEYS` | 有序 `kid=/path/to/public.pem` keyring | 空（使用单公钥兼容模式） |
-| `CAS_PUBLIC_KEY_PATH` | 兼容模式的单 Ed25519 公钥路径 | `/etc/xet/public-key.pem` |
-| `CAS_TRUSTED_KIDS` | key ID allowlist | keyring 全部 kid；兼容模式 `hub-key-1` |
-| `CAS_PRIVATE_KEY_PATH` | Ed25519 私钥路径（生成 LFS proxy token） | 空（兼容模式；生产环境应配置） |
-| `CAS_SIGNING_KID` | Proxy token 签名使用的 Key ID | 空（keyring 中首个受信任映射） |
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `CAS_PUBLIC_KEYS` | Ordered `kid=/path/to/public.pem` keyring | empty (single-public-key compatibility mode) |
+| `CAS_PUBLIC_KEY_PATH` | Single Ed25519 public key path for compatibility mode | `/etc/xet/public-key.pem` |
+| `CAS_TRUSTED_KIDS` | Key ID allowlist | all keyring kids; `hub-key-1` in compatibility mode |
+| `CAS_PRIVATE_KEY_PATH` | Ed25519 private key path (issues LFS proxy tokens) | empty (compatibility mode; set in production) |
+| `CAS_SIGNING_KID` | Key ID used to sign proxy tokens | empty (first trusted mapping in the keyring) |
 
-`CAS_PUBLIC_KEYS=kid1=/path/old-public.pem,kid2=/path/new-public.pem` 建立真正的 `kid` 到公钥映射；`CAS_TRUSTED_KIDS` 只是 allowlist。未设置 keyring 时才使用旧 `CAS_PUBLIC_KEY_PATH`，并将同一公钥映射给所有 trusted kids。配置 `CAS_PRIVATE_KEY_PATH` 后，私钥必须与 `CAS_SIGNING_KID` 对应公钥匹配，否则 CAS 启动失败。
+`CAS_PUBLIC_KEYS=kid1=/path/old-public.pem,kid2=/path/new-public.pem` establishes
+a real `kid`-to-public-key mapping; `CAS_TRUSTED_KIDS` is only an allowlist. The
+legacy `CAS_PUBLIC_KEY_PATH` is used only when the keyring is unset, and maps
+that single public key to every trusted kid. When `CAS_PRIVATE_KEY_PATH` is set,
+the private key must match the public key for `CAS_SIGNING_KID`, otherwise CAS
+fails to start.
 
-`CAS_PRIVATE_KEY_PATH` 未配置时，CAS Batch API 会把调用者的 `xet_xxx` token 放入 LFS action header，而不是签发短期、单 OID、单 operation 的 `proxy_xxx` token。这会扩大 action token 泄露后的影响范围；生产环境应配置该私钥。
+When `CAS_PRIVATE_KEY_PATH` is not configured, the CAS batch API places the
+caller's `xet_xxx` token into LFS action headers instead of issuing a
+short-lived, single-OID, single-operation `proxy_xxx` token. This widens the
+blast radius if an action token leaks; configure the private key in production.
 
-`/health` 只表示 HTTP server 存活；`/ready` 用于负载均衡和编排系统的 readiness probe。CAS `/ready` 会检查存储后端和 MetadataIndex 重建状态，Hub `/ready` 会检查 SQLite 和 CAS `/ready`。显式设置的数值或布尔环境变量如果解析失败，服务会启动失败，不会静默回退默认值；布尔值只接受 `true`/`false`/`1`/`0`，生效的 URL 只接受带 host 的 HTTP(S)，上传/下载上限、TTL、rate、pool 等零值与不一致的跨字段限制会被拒绝。
+`/health` only indicates that the HTTP server is alive; `/ready` is intended for
+load-balancer and orchestrator readiness probes. CAS `/ready` checks the storage
+backend and the MetadataIndex rebuild state; Hub `/ready` checks SQLite and CAS
+`/ready`. Explicitly set numeric or boolean environment variables that fail to
+parse abort startup — there is no silent fallback to defaults; booleans accept
+only `true`/`false`/`1`/`0`, effective URLs must be HTTP(S) with a host, and
+zero values or inconsistent cross-field limits on upload/download caps, TTLs,
+rates, and pool sizes are rejected.
 
-### Hub API 环境变量
+### Hub API Environment Variables
 
-| 变量名 | 描述 | 默认值 |
-|--------|------|--------|
-| `HUB_HOST` | 服务器绑定地址 | `0.0.0.0` |
-| `HUB_PORT` | 服务器端口 | `8080` |
-| `HUB_PUBLIC_BASE_URL` | 公共访问 URL | `http://{host}:{port}` |
-| `HUB_PRIVATE_KEY_PATH` | Ed25519 私钥路径 | `private_key.pem` |
-| `HUB_KID` | 密钥标识符 | `hub-key-1` |
-| `HUB_TOKEN_TTL_SECONDS` | 令牌有效期（秒，范围 `1..=604800`） | `3600` |
-| `HUB_PROXY_TOKEN_TTL_SECONDS` | Proxy Token 有效期（秒，范围 `1..=604800`） | `300` (5分钟) |
-| `HUB_INTERNAL_TOKEN_TTL_SECONDS` | 内部令牌有效期（秒，用于 Hub→CAS internal endpoints，范围 `1..=604800`） | `86400` (24小时) |
-| `HUB_SQLITE_PATH` | 元数据数据库路径 | `hub.db` |
-| `HUB_DB_POOL_SIZE` | SQLite 连接池大小 | `5` |
-| `CAS_BASE_URL` | CAS 服务器 URL | `http://localhost:8081` |
-| `HUB_CAS_TIMEOUT_SECS` | CAS 请求超时（秒） | `30` |
-| `HUB_CAS_HEALTH_CHECK_TIMEOUT_SECS` | 启动时CAS健康检查超时（秒） | `10` |
-| `HUB_INLINE_THRESHOLD` | 内联文件阈值（字节） | `1048576` (1MB) |
-| `HUB_UPLOAD_TEMP_DIR` | 上传临时文件目录 | `./data/hub-uploads` |
-| `HUB_MAX_UPLOAD_SIZE` | 最大上传文件大小（字节） | `536870912` (512MB) |
-| `HUB_MAX_DOWNLOAD_SIZE` | CAS 下载大小限制（字节） | `536870912` (512MB) |
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `HUB_HOST` | Server bind address | `0.0.0.0` |
+| `HUB_PORT` | Server port | `8080` |
+| `HUB_PUBLIC_BASE_URL` | Public access URL | `http://{host}:{port}` |
+| `HUB_PRIVATE_KEY_PATH` | Ed25519 private key path | `private_key.pem` |
+| `HUB_KID` | Key identifier | `hub-key-1` |
+| `HUB_TOKEN_TTL_SECONDS` | Token lifetime (seconds, range `1..=604800`) | `3600` |
+| `HUB_PROXY_TOKEN_TTL_SECONDS` | Proxy token lifetime (seconds, range `1..=604800`) | `300` (5 minutes) |
+| `HUB_INTERNAL_TOKEN_TTL_SECONDS` | Internal token lifetime for Hub→CAS internal endpoints (seconds, range `1..=604800`) | `86400` (24 hours) |
+| `HUB_SQLITE_PATH` | Metadata database path | `hub.db` |
+| `HUB_DB_POOL_SIZE` | SQLite connection pool size | `5` |
+| `CAS_BASE_URL` | CAS server URL | `http://localhost:8081` |
+| `HUB_CAS_TIMEOUT_SECS` | CAS request timeout (seconds) | `30` |
+| `HUB_CAS_HEALTH_CHECK_TIMEOUT_SECS` | Startup CAS health check timeout (seconds) | `10` |
+| `HUB_INLINE_THRESHOLD` | Inline file threshold (bytes) | `1048576` (1MB) |
+| `HUB_UPLOAD_TEMP_DIR` | Temp directory for upload staging | `./data/hub-uploads` |
+| `HUB_MAX_UPLOAD_SIZE` | Maximum upload size (bytes) | `536870912` (512MB) |
+| `HUB_MAX_DOWNLOAD_SIZE` | CAS download size limit (bytes) | `536870912` (512MB) |
 
-**安全相关**：
-| 变量名 | 描述 | 默认值 |
-|--------|------|--------|
-| `HUB_TOKEN_HASH_SALT` | Token 哈希盐（多实例部署必须一致） | 自动生成 |
+**Security**:
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `HUB_TOKEN_HASH_SALT` | Token hash salt (must be identical across multi-instance deployments) | generated |
 
-Hub API 当前只提供 SQLite 元数据 backend。启动时会自动初始化或校验 schema，并为 SQLite 连接启用 WAL、外键和 busy timeout。多 Hub 实例部署必须共享同一个 SQLite 文件、使用相同 `HUB_TOKEN_HASH_SALT` 和 Hub signing key，并接受 SQLite 单写者限制；项目当前没有内置 Postgres/MySQL 等分布式数据库 backend。
+The Hub API currently offers only the SQLite metadata backend. Schema
+initialization and validation run automatically at startup, and SQLite
+connections get WAL, foreign keys, and a busy timeout. Multi-instance Hub
+deployments must share one SQLite file, use the same `HUB_TOKEN_HASH_SALT` and
+Hub signing key, and accept SQLite's single-writer limit; the project currently
+ships no distributed database backend such as Postgres/MySQL.
 
-详细文档：[Configuration Guide](docs/configuration.md)
+Detailed reference: [Configuration Guide](docs/configuration.md)
 
-## 🧪 测试
+## 🧪 Testing
 
 ```bash
-# 运行所有测试
+# Run all tests
 cargo test
 
-# 运行集成测试
+# Run integration tests
 cargo test --test '*'
 
-# 运行基准测试
+# Run benchmarks
 cargo bench
 
-# 运行特定测试
+# Run a specific test
 cargo test test_name
 ```
 
-测试覆盖：
-- 单元测试：哈希、分块、格式、存储
-- 集成测试：API 端点、认证、工作流
-- 端到端测试：完整上传/下载流程
+Test coverage:
+- Unit tests: hashing, chunking, formats, storage
+- Integration tests: API endpoints, authentication, workflows
+- End-to-end tests: full upload/download flows
 
-## 📖 文档
+## 📖 Documentation
 
-- [API 文档](docs/api/) - CAS 和 Hub API 详细参考
-- [配置指南](docs/configuration.md) - 完整配置选项说明
-- [架构说明](docs/architecture.md) - 系统架构和数据流
-- [集成指南](HF_XET_INTEGRATION_GUIDE.md) - HuggingFace 集成工作流
+- [API docs](docs/api/) - detailed CAS and Hub API references
+- [Configuration guide](docs/configuration.md) - full configuration options
+- [Architecture](docs/architecture.md) - system architecture and data flows
+- [Integration guide](HF_XET_INTEGRATION_GUIDE.md) - HuggingFace integration workflows
 
-## 🤝 贡献
+## 🤝 Contributing
 
-欢迎贡献！请参阅以下步骤：
+Contributions are welcome! Please follow these steps:
 
-1. Fork 本仓库
-2. 创建特性分支 (`git checkout -b feature/amazing-feature`)
-3. 提交更改 (`git commit -m 'Add amazing feature'`)
-4. 推送到分支 (`git push origin feature/amazing-feature`)
-5. 开启 Pull Request
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
 
-### 开发指南
+### Development Guide
 
 ```bash
-# 开发模式运行
+# Run in development mode
 cargo run --bin xet-server
 cargo run --bin hub-api
 
-# 代码检查
+# Lint
 cargo clippy
 
-# 格式化
+# Format
 cargo fmt
 ```
 
-## 📄 许可证
+## 📄 License
 
-本项目采用 MIT 许可证 - 详见 [LICENSE](LICENSE) 文件
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
-## 🙏 致谢
+## 🙏 Acknowledgments
 
-- [BLAKE3](https://github.com/BLAKE3-team/BLAKE3) - 高速加密哈希
-- [Actix Web](https://actix.rs/) - 高性能 Web 框架
-- [HuggingFace](https://huggingface.co/) - Hub API 设计参考
-- [Git LFS](https://git-lfs.github.com/) - 大文件存储协议
+- [BLAKE3](https://github.com/BLAKE3-team/BLAKE3) - fast cryptographic hashing
+- [Actix Web](https://actix.rs/) - high-performance web framework
+- [HuggingFace](https://huggingface.co/) - Hub API design reference
+- [Git LFS](https://git-lfs.github.com/) - large file storage protocol
 
-## 📞 支持
+## 📞 Support
 
 - 📧 Email: support@example.com
 - 💬 Issues: [GitHub Issues](https://github.com/your-org/xet-server/issues)
-- 📚 Docs: [完整文档](docs/)
+- 📚 Docs: [full documentation](docs/)
