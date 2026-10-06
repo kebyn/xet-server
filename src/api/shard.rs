@@ -122,17 +122,31 @@ pub async fn upload_shard(
     }
 
     // Fully validate the shard from disk before put_from_path transfers ownership.
-    let shard = match MDBShardFile::parse_from_file(temp_file.path()) {
-        Ok(s) => s,
-        Err(e) => {
-            error!("Failed to parse shard for indexing: {}", e);
-            GLOBAL_METRICS.record_request(400);
-            GLOBAL_METRICS.record_latency(start);
-            return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": "Invalid shard format"
-            }));
-        }
-    };
+    // Parse off the async runtime — shard parsing is synchronous file I/O
+    // (same pattern as shard_io::parse_path).
+    let parse_path = temp_file.path().to_path_buf();
+    let shard =
+        match tokio::task::spawn_blocking(move || MDBShardFile::parse_from_file(&parse_path)).await
+        {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => {
+                error!("Failed to parse shard for indexing: {}", e);
+                GLOBAL_METRICS.record_request(400);
+                GLOBAL_METRICS.record_latency(start);
+                return HttpResponse::BadRequest().json(serde_json::json!({
+                    "error": "Invalid shard format"
+                }));
+            }
+            Err(join_err) => {
+                error!("Shard parse task failed: {}", join_err);
+                GLOBAL_METRICS.record_request(500);
+                GLOBAL_METRICS.record_error();
+                GLOBAL_METRICS.record_latency(start);
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": crate::api::INTERNAL_ERROR_MESSAGE
+                }));
+            }
+        };
 
     // Use streaming-computed hash as shard ID
     let shard_id = hasher.finalize().to_hex();

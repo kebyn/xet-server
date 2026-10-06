@@ -69,7 +69,7 @@ pub async fn reconstruct_verified_file_to_temp(
     storage: &dyn StorageBackend,
     temp_dir: &Path,
 ) -> Result<VerifiedReconstruction, ReconstructionError> {
-    std::fs::create_dir_all(temp_dir).map_err(|e| {
+    tokio::fs::create_dir_all(temp_dir).await.map_err(|e| {
         ReconstructionError::TempIo(format!("failed to create reconstruction temp dir: {}", e))
     })?;
     let target_hash = MerkleHash::from_hex(file_id).map_err(|e| {

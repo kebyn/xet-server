@@ -83,11 +83,19 @@ pub async fn validate_shard_for_index(
             .await
             .map_err(|e| format!("Failed to download xorb {}: {}", xorb_hash_hex, e))?;
 
+        // Verify off the async runtime: whole-file synchronous reads and
+        // hashing would stall a tokio worker (same rationale as
+        // shard_io::parse_path). This path runs on every shard upload and
+        // every index rebuild.
+        let xorb_verify_path = temp_guard
+            .try_path()
+            .map_err(|e| format!("Failed to resolve xorb temp path {}: {}", xorb_hash_hex, e))?
+            .to_path_buf();
         let xorb_info =
-            verify_xorb_from_file_with_info(temp_guard.try_path().map_err(|e| {
-                format!("Failed to resolve xorb temp path {}: {}", xorb_hash_hex, e)
-            })?)
-            .map_err(|e| format!("Failed to verify xorb {}: {}", xorb_hash_hex, e))?;
+            tokio::task::spawn_blocking(move || verify_xorb_from_file_with_info(&xorb_verify_path))
+                .await
+                .map_err(|e| format!("xorb verify task failed for {}: {}", xorb_hash_hex, e))?
+                .map_err(|e| format!("Failed to verify xorb {}: {}", xorb_hash_hex, e))?;
 
         if xorb_info.xorb_hash != xorb_hash {
             return Err(format!(

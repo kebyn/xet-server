@@ -141,10 +141,17 @@ pub async fn upload_xorb(
     }
 
     // Verify xorb structure and identity from temp file on disk.
+    // Run off the async runtime: the check reads and hashes the whole file
+    // synchronously (up to max_body_size), which would stall a tokio worker.
     let temp_path = temp_file.path().to_path_buf();
-    let xorb_info = match crate::format::xorb::verify_xorb_from_file_with_info(&temp_path) {
-        Ok(info) => info,
-        Err(e) => {
+    let verify_path = temp_path.clone();
+    let xorb_info = match tokio::task::spawn_blocking(move || {
+        crate::format::xorb::verify_xorb_from_file_with_info(&verify_path)
+    })
+    .await
+    {
+        Ok(Ok(info)) => info,
+        Ok(Err(e)) => {
             error!(
                 "Xorb verification failed for {}: {}",
                 temp_path.display(),
@@ -154,6 +161,19 @@ pub async fn upload_xorb(
             GLOBAL_METRICS.record_latency(start);
             return HttpResponse::BadRequest().json(serde_json::json!({
                 "error": "Xorb verification failed"
+            }));
+        }
+        Err(join_err) => {
+            error!(
+                "Xorb verification task failed for {}: {}",
+                temp_path.display(),
+                join_err
+            );
+            GLOBAL_METRICS.record_request(500);
+            GLOBAL_METRICS.record_error();
+            GLOBAL_METRICS.record_latency(start);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": crate::api::INTERNAL_ERROR_MESSAGE
             }));
         }
     };
