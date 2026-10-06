@@ -78,7 +78,7 @@ Xet Server 采用**双进程架构**，由两个独立的服务组成：
 
 ### 环境要求
 
-- **Rust** 1.85+ (Edition 2024)
+- **Rust** 1.94.1+ (Edition 2024)
 - **SQLite** 3.35+（仅 Hub API 需要）
 - **可选**：S3/MinIO 存储后端
 

@@ -78,7 +78,7 @@ Xet Server uses a **two-process architecture** made up of two independent servic
 
 ### Requirements
 
-- **Rust** 1.85+ (Edition 2024)
+- **Rust** 1.94.1+ (Edition 2024)
 - **SQLite** 3.35+ (Hub API only)
 - **Optional**: an S3/MinIO storage backend
 

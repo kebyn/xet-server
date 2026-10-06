@@ -22,13 +22,13 @@ async fn read_response_body_limited(
     response: reqwest::Response,
     max_size: u64,
 ) -> Result<Bytes, ResponseBodyError> {
-    if let Some(declared_size) = response.content_length() {
-        if declared_size > max_size {
-            return Err(ResponseBodyError::TooLarge {
-                actual: declared_size,
-                max: max_size,
-            });
-        }
+    if let Some(declared_size) = response.content_length()
+        && declared_size > max_size
+    {
+        return Err(ResponseBodyError::TooLarge {
+            actual: declared_size,
+            max: max_size,
+        });
     }
 
     let mut stream = response.bytes_stream();

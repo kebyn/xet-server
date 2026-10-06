@@ -529,7 +529,7 @@ fn multipart_part_size(file_size: u64) -> StorageResult<u64> {
     let part_limit = u64::try_from(MAX_MULTIPART_PARTS).map_err(|_| {
         StorageError::Internal("Multipart part limit does not fit in u64".to_string())
     })?;
-    let required_size = file_size / part_limit + u64::from(file_size % part_limit != 0);
+    let required_size = file_size / part_limit + u64::from(!file_size.is_multiple_of(part_limit));
     Ok(PART_SIZE.max(required_size))
 }
 

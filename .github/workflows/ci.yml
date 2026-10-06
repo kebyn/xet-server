@@ -34,15 +34,14 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
-      # cargo-audit 0.22 is required for current CVSS 4.0 advisories and has a
-      # newer MSRV than the server. It only reads Cargo.lock, so keep this
-      # toolchain isolated from the Rust 1.85 build and test job above.
-      - name: Install audit toolchain
-        run: rustup toolchain install 1.88.0 --profile minimal
+      # cargo-audit 0.22 is required for current CVSS 4.0 advisories; it only
+      # reads Cargo.lock, so the pinned workspace toolchain is sufficient.
+      - name: Select pinned Rust toolchain
+        run: rustup show active-toolchain
       - name: Install cargo-audit
-        run: cargo +1.88.0 install cargo-audit --version 0.22.2 --locked
+        run: cargo install cargo-audit --version 0.22.2 --locked
       - name: Audit dependencies
-        run: cargo +1.88.0 audit
+        run: cargo audit
 
   msrv:
     name: Verify declared MSRV
@@ -50,14 +49,14 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
-      # rust-toolchain.toml pins the working toolchain (currently 1.85.0, equal
+      # rust-toolchain.toml pins the working toolchain (currently 1.94.1, equal
       # to the declared rust-version). This job deliberately bypasses the pin
-      # with an explicit +1.85.0 so a future toolchain bump cannot silently
+      # with an explicit +1.94.1 so a future toolchain bump cannot silently
       # break code that still claims to build on the declared MSRV.
       - name: Install declared MSRV toolchain
-        run: rustup toolchain install 1.85.0 --profile minimal
+        run: rustup toolchain install 1.94.1 --profile minimal
       - name: Check on declared MSRV
-        run: cargo +1.85.0 check --workspace --all-targets
+        run: cargo +1.94.1 check --workspace --all-targets
 
   coverage:
     name: Test coverage

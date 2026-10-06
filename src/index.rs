@@ -86,27 +86,25 @@ impl MetadataIndex {
             for file in &registration.files {
                 if let Some(existing_size) =
                     registration_sizes.insert(file.file_hash.clone(), file.file_size)
+                    && existing_size != file.file_size
                 {
-                    if existing_size != file.file_size {
-                        return Err(IndexRegistrationError::FileSizeConflict {
-                            file_hash: file.file_hash.clone(),
-                            existing_size,
-                            new_size: file.file_size,
-                        });
-                    }
+                    return Err(IndexRegistrationError::FileSizeConflict {
+                        file_hash: file.file_hash.clone(),
+                        existing_size,
+                        new_size: file.file_size,
+                    });
                 }
 
                 if let Some(existing_ref) = file_map
                     .get(&file.file_hash)
                     .and_then(|references| references.first())
+                    && existing_ref.file_size != file.file_size
                 {
-                    if existing_ref.file_size != file.file_size {
-                        return Err(IndexRegistrationError::FileSizeConflict {
-                            file_hash: file.file_hash.clone(),
-                            existing_size: existing_ref.file_size,
-                            new_size: file.file_size,
-                        });
-                    }
+                    return Err(IndexRegistrationError::FileSizeConflict {
+                        file_hash: file.file_hash.clone(),
+                        existing_size: existing_ref.file_size,
+                        new_size: file.file_size,
+                    });
                 }
             }
 

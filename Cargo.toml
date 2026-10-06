@@ -2,15 +2,11 @@
 members = [".", "hub", "xet-auth-types"]
 resolver = "3"
 
-[patch.crates-io]
-lru = { path = "vendor/lru" }
-time = { path = "vendor/time" }
-
 [package]
 name = "xet-server"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.94.1"
 
 [dependencies]
 xet-auth-types = { path = "xet-auth-types" }

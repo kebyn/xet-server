@@ -283,21 +283,21 @@ impl SqliteMetadataStore {
             .await
             .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
-            if let CommitWrite::Changes(_) = write {
-                if let Some(parent) = expected_parent {
-                    sqlx::query(
-                        "INSERT INTO file_tree \
-                         (path, repo_id, commit_id, size, cas_hash, is_lfs) \
-                         SELECT path, ?1, ?2, size, cas_hash, is_lfs \
-                         FROM file_tree WHERE repo_id = ?1 AND commit_id = ?3",
-                    )
-                    .bind(rev.repo_id)
-                    .bind(&rev.commit_id)
-                    .bind(parent)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
-                }
+            if let CommitWrite::Changes(_) = write
+                && let Some(parent) = expected_parent
+            {
+                sqlx::query(
+                    "INSERT INTO file_tree \
+                     (path, repo_id, commit_id, size, cas_hash, is_lfs) \
+                     SELECT path, ?1, ?2, size, cas_hash, is_lfs \
+                     FROM file_tree WHERE repo_id = ?1 AND commit_id = ?3",
+                )
+                .bind(rev.repo_id)
+                .bind(&rev.commit_id)
+                .bind(parent)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
             }
 
             match write {

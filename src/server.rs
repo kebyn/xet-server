@@ -92,10 +92,10 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
         .verification_key_paths()
         .map_err(std::io::Error::other)?
     {
-        if checked_public_key_paths.insert(path) {
-            if let Some(warning) = crate::config::check_public_key_permissions(path) {
-                tracing::warn!("{}", warning);
-            }
+        if checked_public_key_paths.insert(path)
+            && let Some(warning) = crate::config::check_public_key_permissions(path)
+        {
+            tracing::warn!("{}", warning);
         }
     }
 

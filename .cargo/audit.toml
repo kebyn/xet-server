@@ -29,8 +29,6 @@
 #      confirms no other path reaches it.
 #   2. No fixed 0.3-series release exists: the upstream fix landed in
 #      h2 0.4.16+, and actix-http 3.x has not migrated to the 0.4 line.
-#      The MSRV policy (Rust 1.85) additionally forbids forcing a
-#      cross-major upgrade through the dependency graph.
 #   3. Mitigation: both servers front HTTP/2 with actix-governor rate
 #      limiting (per-peer-IP request caps), bounding the rate at which an
 #      unauthenticated peer can mount the empty-DATA-frame exhaustion.

@@ -39,10 +39,10 @@ pub(crate) fn rewrite_batch_urls(
                 if let Some(upload_action) = actions.get_mut("upload") {
                     match signer.sign_proxy(username, &oid, "upload", "", "") {
                         Ok((proxy_token, _)) => {
-                            if !rewrite_action_url(upload_action, &hub_url, &proxy_token) {
-                                if let Some(actions_obj) = actions.as_object_mut() {
-                                    actions_obj.remove("upload");
-                                }
+                            if !rewrite_action_url(upload_action, &hub_url, &proxy_token)
+                                && let Some(actions_obj) = actions.as_object_mut()
+                            {
+                                actions_obj.remove("upload");
                             }
                         }
                         Err(e) => {
@@ -56,10 +56,10 @@ pub(crate) fn rewrite_batch_urls(
                 if let Some(download_action) = actions.get_mut("download") {
                     match signer.sign_proxy(username, &oid, "download", "", "") {
                         Ok((proxy_token, _)) => {
-                            if !rewrite_action_url(download_action, &hub_url, &proxy_token) {
-                                if let Some(actions_obj) = actions.as_object_mut() {
-                                    actions_obj.remove("download");
-                                }
+                            if !rewrite_action_url(download_action, &hub_url, &proxy_token)
+                                && let Some(actions_obj) = actions.as_object_mut()
+                            {
+                                actions_obj.remove("download");
                             }
                         }
                         Err(e) => {
@@ -115,13 +115,12 @@ pub(crate) fn rewrite_action_url(
         .get("header")
         .and_then(|h| h.get("Authorization"))
         .is_some()
+        && let Some(header_obj) = action.get_mut("header").and_then(|h| h.as_object_mut())
     {
-        if let Some(header_obj) = action.get_mut("header").and_then(|h| h.as_object_mut()) {
-            header_obj.insert(
-                "Authorization".to_string(),
-                serde_json::Value::String(format!("Bearer {}", proxy_token)),
-            );
-        }
+        header_obj.insert(
+            "Authorization".to_string(),
+            serde_json::Value::String(format!("Bearer {}", proxy_token)),
+        );
     }
     true
 }
