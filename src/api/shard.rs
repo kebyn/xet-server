@@ -45,6 +45,21 @@ pub async fn upload_shard(
 
     // Stream payload to temp file with incremental BLAKE3 hashing
     let temp_dir = config.storage.resolve_upload_temp_dir();
+    // M7 fix: use the same pre-check threshold as the xorb/LFS upload paths
+    // (min(max_body_size, 100MB)) so all upload entry points behave alike.
+    let check_bytes = std::cmp::min(
+        config.server.max_body_size_bytes() as u64,
+        100 * 1024 * 1024,
+    );
+    if let Err(e) = crate::util::disk::ensure_dir_and_check_space(&temp_dir, check_bytes).await {
+        error!("Insufficient disk space: {}", e);
+        GLOBAL_METRICS.record_request(507);
+        GLOBAL_METRICS.record_error();
+        GLOBAL_METRICS.record_latency(start);
+        return HttpResponse::InsufficientStorage().json(serde_json::json!({
+            "error": "Insufficient storage"
+        }));
+    }
     let mut temp_file = match TempFile::create(&temp_dir).await {
         Ok(tf) => tf,
         Err(e) => {

@@ -42,3 +42,20 @@ pub fn check_disk_space(path: &std::path::Path, required_bytes: u64) -> Result<(
         Ok(())
     }
 }
+
+/// Ensure the upload temp directory exists, then check available disk space.
+///
+/// `check_disk_space` requires the path to exist (statvfs fails otherwise).
+/// On a fresh deployment the temp dir is only created lazily by
+/// `TempFile::create`, which runs *after* the disk check — so the very first
+/// upload would be rejected with 507 before this helper existed. Creating the
+/// directory up front keeps every upload entry point self-sufficient.
+pub async fn ensure_dir_and_check_space(
+    path: &std::path::Path,
+    required_bytes: u64,
+) -> Result<(), String> {
+    tokio::fs::create_dir_all(path)
+        .await
+        .map_err(|e| format!("Failed to create temp dir {}: {}", path.display(), e))?;
+    check_disk_space(path, required_bytes)
+}

@@ -70,7 +70,7 @@ pub async fn upload_xorb(
         config.server.max_body_size_bytes() as u64,
         100 * 1024 * 1024,
     );
-    if let Err(e) = check_disk_space(&temp_dir, check_bytes) {
+    if let Err(e) = crate::util::disk::ensure_dir_and_check_space(&temp_dir, check_bytes).await {
         error!("Insufficient disk space: {}", e);
         GLOBAL_METRICS.record_request(507);
         GLOBAL_METRICS.record_error();
@@ -390,12 +390,6 @@ pub async fn download_xorb(
             }))
         }
     }
-}
-
-/// Check if there's enough disk space for an upload.
-/// Delegates to the shared utility in crate::util::disk.
-fn check_disk_space(path: &std::path::Path, required_bytes: u64) -> Result<(), String> {
-    crate::util::disk::check_disk_space(path, required_bytes)
 }
 
 #[cfg(test)]

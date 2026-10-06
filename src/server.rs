@@ -115,6 +115,24 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
             std::io::Error::other(format!("Failed to create storage backend: {}", e))
         })?);
 
+    // Pre-create the temp directories once at startup. Upload handlers check
+    // disk space via statvfs before writing, and statvfs requires the path to
+    // exist — without this, the very first upload on a fresh deployment would
+    // fail with 507 because the temp dir is otherwise only created lazily by
+    // TempFile::create (after the check).
+    for temp_dir in [
+        config.storage.resolve_upload_temp_dir(),
+        config.storage.resolve_reconstruction_temp_dir(),
+    ] {
+        tokio::fs::create_dir_all(&temp_dir).await.map_err(|e| {
+            std::io::Error::other(format!(
+                "Failed to create temp dir {}: {}",
+                temp_dir.display(),
+                e
+            ))
+        })?;
+    }
+
     let index = Arc::new(crate::index::MetadataIndex::new());
     let readiness = ReadinessState::new();
 
