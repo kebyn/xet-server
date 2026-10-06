@@ -8,7 +8,6 @@
 - **[README.md](../README.md)** - 项目概述、快速开始、使用示例（英文）
 - **[README.zh-CN.md](../README.zh-CN.md)** - 项目概述、快速开始、使用示例（中文）
 - **[HF_XET_INTEGRATION_GUIDE.md](../HF_XET_INTEGRATION_GUIDE.md)** - HuggingFace 集成指南
-- **[HUB_UPLOAD_DOWNLOAD_TEST_REPORT.md](../HUB_UPLOAD_DOWNLOAD_TEST_REPORT.md)** - Hub 上传/下载测试报告
 
 ### 用户指南
 - **[配置指南](configuration.md)** - 完整的配置选项说明
@@ -44,24 +43,37 @@
 - **状态**: 已完成（2026-06-12）
 - **描述**: 实现 HuggingFace Hub REST API 兼容层
 
+#### 2026-06-13: 配置合理性分析
+- **设计规范**: [specs/2026-06-13-config-rationality-analysis-design.md](superpowers/specs/2026-06-13-config-rationality-analysis-design.md) ✅
+- **实施计划**: [plans/2026-06-13-config-rationality-analysis.md](superpowers/plans/2026-06-13-config-rationality-analysis.md) ✅
+- **状态**: 已完成
+- **描述**: 配置项交叉校验与不合理配置拒绝
+
+#### 2026-06-15: 安全与完整性修复
+- **设计规范**: [specs/2026-06-15-security-integrity-fixes-design.md](superpowers/specs/2026-06-15-security-integrity-fixes-design.md) ✅
+- **实施计划**: [plans/2026-06-15-security-integrity-fixes.md](superpowers/plans/2026-06-15-security-integrity-fixes.md) ✅
+- **状态**: 已完成
+- **描述**: 认证、上传与存储路径的安全加固
+
+#### 2026-06-16: 移除 GC 模块
+- **设计规范**: [specs/2026-06-16-remove-gc-module-design.md](superpowers/specs/2026-06-16-remove-gc-module-design.md) ✅
+- **实施计划**: [plans/2026-06-16-remove-gc-module.md](superpowers/plans/2026-06-16-remove-gc-module.md) ✅
+- **状态**: 已完成
+- **描述**: 移除未使用的垃圾回收模块
+
 ## 文档结构
 
 ```
 /data/
 ├── README.md                              # 项目主文档（英文）
 ├── README.zh-CN.md                        # 项目主文档（中文）
+├── LICENSE                                # MIT 许可证
 ├── HF_XET_INTEGRATION_GUIDE.md           # HuggingFace 集成指南
-├── HUB_UPLOAD_DOWNLOAD_TEST_REPORT.md    # 测试报告
-├── async_sqlite_migration_analysis.md    # SQLite 异步迁移分析（已完成）
-├── cas_sqlite_dependency_analysis.md     # CAS SQLite 依赖分析（已完成）
 │
 ├── docs/
 │   ├── README.md                         # 本文档索引
 │   ├── configuration.md                  # 配置指南
 │   ├── architecture.md                   # 架构文档
-│   ├── DOCUMENTATION_SYNC_COMPLETION_REPORT.md  # 文档同步完成报告
-│   ├── CAS_STATE_DB_PATH_ROLLBACK.md     # CAS_STATE_DB_PATH 回滚记录
-│   ├── CONFIG_FIXES_PHASE1.md            # Phase 1 配置修复记录
 │   │
 │   ├── api/                              # API 文档
 │   │   ├── cas-api.md                    # CAS API 参考
@@ -72,27 +84,20 @@
 │       ├── specs/                        # 设计规范
 │       │   ├── 2026-06-09-metrics-dead-code-fix-design.md
 │       │   ├── 2026-06-09-xet-server-hf-testing-design.md
-│       │   └── 2026-06-10-hf-hub-api-design.md
+│       │   ├── 2026-06-10-hf-hub-api-design.md
+│       │   ├── 2026-06-13-config-rationality-analysis-design.md
+│       │   ├── 2026-06-15-security-integrity-fixes-design.md
+│       │   └── 2026-06-16-remove-gc-module-design.md
 │       │
 │       └── plans/                        # 实施计划
 │           ├── 2026-06-09-metrics-dead-code-fix.md
 │           ├── 2026-06-09-xet-server-hf-testing.md
 │           ├── 2026-06-10-cas-modifications.md
-│           └── 2026-06-10-hub-api-service.md
+│           ├── 2026-06-10-hub-api-service.md
+│           ├── 2026-06-13-config-rationality-analysis.md
+│           ├── 2026-06-15-security-integrity-fixes.md
+│           └── 2026-06-16-remove-gc-module.md
 ```
-
-## 分析报告
-
-### 已完成的技术分析
-
-- **[SQLite 异步迁移分析](../async_sqlite_migration_analysis.md)** - TokenStore 从 rusqlite 迁移到 sqlx（✅ 已完成 2026-06-13，commit 1486507）
-- **[CAS SQLite 依赖分析](../cas_sqlite_dependency_analysis.md)** - CAS 移除 SQLite 依赖（✅ 已完成 2026-06-13，commit 2491af1）
-
-### 修复记录
-
-- **[文档同步完成报告](DOCUMENTATION_SYNC_COMPLETION_REPORT.md)** - 60+ 文档问题修复记录（2026-06-12）
-- **[CAS_STATE_DB_PATH 回滚记录](CAS_STATE_DB_PATH_ROLLBACK.md)** - 删除不存在的配置项（2026-06-12）
-- **[Phase 1 配置修复记录](CONFIG_FIXES_PHASE1.md)** - 端口冲突、阈值不匹配等修复（2026-06-12）
 
 ## 快速导航
 
