@@ -3,7 +3,6 @@
 //! POST /v1/xorbs/{prefix}/{hash} - Upload xorb objects (streaming)
 
 use actix_web::{HttpResponse, web};
-use futures_util::StreamExt;
 use serde::Serialize;
 use tracing::{error, info};
 
@@ -84,40 +83,17 @@ pub async fn upload_xorb(
     };
 
     let max_bytes = config.server.max_body_size_bytes() as u64;
-    let mut total_bytes: u64 = 0;
-
-    while let Some(chunk_result) = payload.next().await {
-        let chunk = match chunk_result {
-            Ok(c) => c,
-            Err(e) => {
-                error!("Payload stream error: {}", e);
-                return HttpResponse::BadRequest().json(serde_json::json!({
-                    "error": "Invalid upload stream"
-                }));
-            }
-        };
-
-        total_bytes += chunk.len() as u64;
-        if total_bytes > max_bytes {
-            return HttpResponse::PayloadTooLarge().json(serde_json::json!({
-                "error": format!("Upload exceeds maximum size of {} MB", config.server.max_body_size_mb)
-            }));
-        }
-
-        if let Err(e) = temp_file.write_all(&chunk).await {
-            error!("Failed to write to temp file: {}", e);
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": crate::api::INTERNAL_ERROR_MESSAGE
-            }));
-        }
-    }
-
-    if let Err(e) = temp_file.sync_all().await {
-        error!("Failed to sync temp file: {}", e);
-        return HttpResponse::InternalServerError().json(serde_json::json!({
-            "error": crate::api::INTERNAL_ERROR_MESSAGE
-        }));
-    }
+    let total_bytes = match crate::util::payload_stream::stream_payload_to_temp(
+        &mut payload,
+        &mut temp_file,
+        max_bytes,
+        |_| {},
+    )
+    .await
+    {
+        Ok(n) => n,
+        Err(e) => return e.error_response(),
+    };
 
     // Verify xorb structure and identity from temp file on disk.
     // Run off the async runtime: the check reads and hashes the whole file

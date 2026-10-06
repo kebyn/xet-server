@@ -2,6 +2,7 @@
 
 pub mod disk;
 pub mod download_stream;
+pub mod payload_stream;
 pub mod streaming_hash;
 pub mod temp_file;
 pub mod temp_path;
