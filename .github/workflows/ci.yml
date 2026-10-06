@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Select pinned Rust toolchain
         run: rustup show active-toolchain
       - name: Check formatting
@@ -33,7 +33,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # cargo-audit 0.22 is required for current CVSS 4.0 advisories and has a
       # newer MSRV than the server. It only reads Cargo.lock, so keep this
       # toolchain isolated from the Rust 1.85 build and test job above.
@@ -49,7 +49,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # rust-toolchain.toml pins the working toolchain (currently 1.85.0, equal
       # to the declared rust-version). This job deliberately bypasses the pin
       # with an explicit +1.85.0 so a future toolchain bump cannot silently
@@ -64,7 +64,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Select pinned Rust toolchain
         run: rustup show active-toolchain
       - name: Install cargo-llvm-cov
@@ -91,7 +91,7 @@ jobs:
               out.write(f'Total line coverage: **{pct:.2f}%** ({lines_hit}/{lines_found} lines)\n')
           EOF
       - name: Upload coverage artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-lcov
           path: lcov.info
