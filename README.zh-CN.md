@@ -89,13 +89,16 @@ Xet Server 采用**双进程架构**，由两个独立的服务组成：
 git clone https://github.com/your-org/xet-server.git
 cd xet-server
 
-# 编译（release 模式）
-cargo build --release
+# 编译（release 模式；同时构建两个二进制）
+cargo build --release --workspace --bins
 
 # 二进制文件位置
 # CAS Server: target/release/xet-server
 # Hub API:    target/release/hub-api
 ```
+
+Release tag 产物为可重现构建——字节级复现步骤见任一
+[release 页面](https://github.com/kebyn/xet-server/releases)。
 
 ### 生成认证密钥
 

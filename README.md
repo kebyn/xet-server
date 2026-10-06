@@ -89,13 +89,17 @@ Xet Server uses a **two-process architecture** made up of two independent servic
 git clone https://github.com/your-org/xet-server.git
 cd xet-server
 
-# Build (release mode)
-cargo build --release
+# Build (release mode; builds both workspace binaries)
+cargo build --release --workspace --bins
 
 # Binary locations
 # CAS Server: target/release/xet-server
 # Hub API:    target/release/hub-api
 ```
+
+Release tags are built reproducibly — see any
+[release](https://github.com/kebyn/xet-server/releases) for byte-exact
+reproduction instructions.
 
 ### Generate Authentication Keys
 
