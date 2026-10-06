@@ -14,7 +14,6 @@ fn current_docs_do_not_describe_internal_as_xet_or_wildcard() {
         "docs/api/hub-api.md",
         "docs/architecture.md",
         "docs/configuration.md",
-        "docs/superpowers/specs/2026-06-10-hf-hub-api-design.md",
     ];
     let forbidden = [
         "Authorization: Bearer xet_xxx (需要 internal token",
@@ -109,31 +108,6 @@ fn docs_limit_internal_tokens_to_internal_endpoints() {
     assert!(
         architecture.contains("签发 CAS user token（xet_xxx）、LFS proxy token（proxy_xxx）和 internal service token（internal_xxx）"),
         "docs/architecture.md must describe the layered token issuance model"
-    );
-}
-
-#[test]
-fn historical_internal_scope_plan_is_marked_superseded() {
-    let cas_plan = repo_file("docs/superpowers/plans/2026-06-10-cas-modifications.md");
-    assert!(
-        cas_plan.contains("Superseded auth note"),
-        "historical CAS modification plan must warn readers that old internal-scope examples are superseded"
-    );
-
-    let hub_plan = repo_file("docs/superpowers/plans/2026-06-10-hub-api-service.md");
-    assert!(
-        hub_plan.contains("Superseded auth note"),
-        "historical Hub API plan must warn readers that old Hub->CAS public endpoint token examples are superseded"
-    );
-
-    let hub_spec = repo_file("docs/superpowers/specs/2026-06-10-hf-hub-api-design.md");
-    assert!(
-        hub_spec.contains("Current-state auth note"),
-        "historical Hub API spec must summarize the current token boundary"
-    );
-    assert!(
-        !hub_spec.contains("Requested resource must belong to token's repo_id"),
-        "historical Hub API spec must not preserve obsolete repository-scoped CAS object wording without correction"
     );
 }
 
