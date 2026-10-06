@@ -10,3 +10,4 @@ pub mod migrations;
 pub mod server;
 mod services;
 mod sqlite_pool;
+mod util;

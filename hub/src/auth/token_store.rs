@@ -129,7 +129,7 @@ impl TokenStore {
         let mut salt_bytes = [0u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut salt_bytes);
         let new_salt = hex::encode(salt_bytes);
-        let now = now_secs() as i64;
+        let now = crate::util::unix_now_secs() as i64;
 
         // I2 fix: Use INSERT OR IGNORE to handle concurrent inserts atomically.
         // If another instance inserted first, this is a no-op.
@@ -174,7 +174,7 @@ impl TokenStore {
     ) -> Result<String, sqlx::Error> {
         let token = format!("hf_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
         let token_hash = self.hash_token(&token);
-        let now = now_secs() as i64;
+        let now = crate::util::unix_now_secs() as i64;
 
         let mut tx = self.pool.begin().await?;
 
@@ -225,7 +225,7 @@ impl TokenStore {
     ) -> Result<String, sqlx::Error> {
         let token = format!("hf_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
         let token_hash = self.hash_token(&token);
-        let now = now_secs() as i64;
+        let now = crate::util::unix_now_secs() as i64;
 
         sqlx::query(
             "INSERT INTO tokens (token_hash, user_id, name, scope, created_at) VALUES (?1, ?2, ?3, ?4, ?5)"
@@ -244,7 +244,7 @@ impl TokenStore {
     /// Validate a token. Returns None if invalid/expired/revoked.
     pub async fn validate_token(&self, token: &str) -> Result<Option<TokenInfo>, sqlx::Error> {
         let token_hash = self.hash_token(token);
-        let now = now_secs() as i64;
+        let now = crate::util::unix_now_secs() as i64;
 
         let result: Option<TokenRow> = sqlx::query_as(
             "SELECT u.user_id, u.username, t.name, t.scope, t.expires_at, t.revoked_at
@@ -281,7 +281,7 @@ impl TokenStore {
     /// Revoke a token
     pub async fn revoke_token(&self, token: &str) -> Result<bool, sqlx::Error> {
         let token_hash = self.hash_token(token);
-        let now = now_secs() as i64;
+        let now = crate::util::unix_now_secs() as i64;
 
         let result = sqlx::query(
             "UPDATE tokens SET revoked_at = ?1 WHERE token_hash = ?2 AND revoked_at IS NULL",
@@ -372,14 +372,6 @@ pub struct TokenMetadata {
     pub created_at: u64,
     pub expires_at: Option<u64>,
     pub revoked_at: Option<u64>,
-}
-
-/// Get current Unix timestamp in seconds
-fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
 
 #[cfg(test)]
@@ -491,7 +483,7 @@ mod tests {
         let store = TokenStore::in_memory().await.unwrap();
         let token = "hf_legacy_token";
         let user_id = "user_legacy";
-        let now = now_secs() as i64;
+        let now = crate::util::unix_now_secs() as i64;
 
         let mut hasher = Sha256::new();
         hasher.update(token.as_bytes());
@@ -542,7 +534,7 @@ mod tests {
             .unwrap();
 
         // Set expiration in the past
-        let past_time = now_secs() - 3600; // 1 hour ago
+        let past_time = crate::util::unix_now_secs() - 3600; // 1 hour ago
         store.set_token_expiration(&token, past_time).await.unwrap();
 
         let info = store.validate_token(&token).await.unwrap();

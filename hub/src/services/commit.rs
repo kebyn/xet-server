@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use crate::auth::xet_signer::XetSigner;
 use crate::cas_client::CasClientTrait;
 use crate::commit::content::decode_base64_content;
-use crate::commit::id::{generate_commit_id, now_timestamp};
+use crate::commit::id::generate_commit_id;
 use crate::commit::types::{
     CommitHeader, CommitOperation, CommitResponse, DeletedEntryOperation, FileOperation,
     LfsFileOperation, MAX_INLINE_SIZE,
@@ -125,7 +125,7 @@ impl CommitService {
             String::new()
         };
 
-        let timestamp = now_timestamp();
+        let timestamp = crate::util::unix_now_secs() as i64;
         let commit_id =
             generate_commit_id(repo.id, current_head.as_deref(), &header.summary, timestamp);
 

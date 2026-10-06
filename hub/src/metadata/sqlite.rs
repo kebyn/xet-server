@@ -396,7 +396,7 @@ impl MetadataStore for SqliteMetadataStore {
     ) -> Result<Repo, MetadataError> {
         let repo_type_str = repo_type.to_string();
         let private_int: i64 = if private { 1 } else { 0 };
-        let now = chrono_timestamp();
+        let now = crate::util::unix_now_secs() as i64;
 
         let result = sqlx::query(
             "INSERT INTO repos (name, namespace, repo_type, private, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
@@ -866,14 +866,6 @@ impl MetadataStore for SqliteMetadataStore {
         self.commit_atomic_write(rev, CommitWrite::Changes(changes), expected_parent)
             .await
     }
-}
-
-/// Get current Unix timestamp in seconds
-fn chrono_timestamp() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
 }
 
 #[cfg(test)]
