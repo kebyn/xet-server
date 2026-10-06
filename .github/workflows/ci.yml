@@ -43,3 +43,55 @@ jobs:
         run: cargo +1.88.0 install cargo-audit --version 0.22.2 --locked
       - name: Audit dependencies
         run: cargo +1.88.0 audit
+
+  msrv:
+    name: Verify declared MSRV
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      # rust-toolchain.toml pins the working toolchain (currently 1.85.0, equal
+      # to the declared rust-version). This job deliberately bypasses the pin
+      # with an explicit +1.85.0 so a future toolchain bump cannot silently
+      # break code that still claims to build on the declared MSRV.
+      - name: Install declared MSRV toolchain
+        run: rustup toolchain install 1.85.0 --profile minimal
+      - name: Check on declared MSRV
+        run: cargo +1.85.0 check --workspace --all-targets
+
+  coverage:
+    name: Test coverage
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - name: Generate coverage
+        run: cargo llvm-cov --workspace --all-targets --lcov --output-path lcov.info
+      - name: Summarize coverage
+        run: |
+          python3 - <<'EOF'
+          import os
+
+          lines_hit, lines_found = 0, 0
+          with open('lcov.info') as f:
+              for line in f:
+                  if line.startswith('LH:'):
+                      lines_hit += int(line[3:])
+                  elif line.startswith('LF:'):
+                      lines_found += int(line[3:])
+          pct = 100.0 * lines_hit / lines_found if lines_found else 0.0
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
+              out.write(f'## Test coverage\n\n')
+              out.write(f'Total line coverage: **{pct:.2f}%** ({lines_hit}/{lines_found} lines)\n')
+          EOF
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: lcov.info
