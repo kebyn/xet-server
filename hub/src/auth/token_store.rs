@@ -159,7 +159,13 @@ impl TokenStore {
         Ok(salt)
     }
 
-    /// Create a new user and token (admin setup). Returns the plaintext hf_ token.
+    /// Create a user (if needed) and a fresh token for them. Returns the plaintext hf_ token.
+    ///
+    /// If the username already exists, the token is issued for the existing
+    /// user. The previous implementation derived `user_id` from the *new*
+    /// token hash and used INSERT OR IGNORE for the user row, so a second run
+    /// for an existing username silently skipped the user insert and the
+    /// token insert then violated its foreign key.
     pub async fn create_token(
         &self,
         username: &str,
@@ -169,18 +175,30 @@ impl TokenStore {
         let token = format!("hf_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
         let token_hash = self.hash_token(&token);
         let now = now_secs() as i64;
-        let user_id = format!("user_{}", &token_hash[..16]);
 
         let mut tx = self.pool.begin().await?;
 
-        sqlx::query(
-            "INSERT OR IGNORE INTO users (user_id, username, created_at) VALUES (?1, ?2, ?3)",
-        )
-        .bind(&user_id)
-        .bind(username)
-        .bind(now)
-        .execute(&mut *tx)
-        .await?;
+        let user_id: Option<String> =
+            sqlx::query_scalar("SELECT user_id FROM users WHERE username = ?1")
+                .bind(username)
+                .fetch_optional(&mut *tx)
+                .await?;
+
+        let user_id = match user_id {
+            Some(existing) => existing,
+            None => {
+                let user_id = format!("user_{}", &token_hash[..16]);
+                sqlx::query(
+                    "INSERT INTO users (user_id, username, created_at) VALUES (?1, ?2, ?3)",
+                )
+                .bind(&user_id)
+                .bind(username)
+                .bind(now)
+                .execute(&mut *tx)
+                .await?;
+                user_id
+            }
+        };
 
         sqlx::query(
             "INSERT INTO tokens (token_hash, user_id, name, scope, created_at) VALUES (?1, ?2, ?3, ?4, ?5)"
@@ -399,6 +417,33 @@ mod tests {
         assert_eq!(info.username, "testuser");
         assert_eq!(info.token_name, "test-token");
         assert_eq!(info.scope, "read");
+    }
+
+    #[tokio::test]
+    async fn test_create_token_reissues_for_existing_username() {
+        let store = TokenStore::in_memory().await.unwrap();
+
+        let first = store
+            .create_token("admin", "first-token", "read write")
+            .await
+            .unwrap();
+        // Regression: the second issue for the same username used to fail the
+        // tokens foreign key (INSERT OR IGNORE skipped the existing user while
+        // user_id was derived from the new token hash).
+        let second = store
+            .create_token("admin", "second-token", "read")
+            .await
+            .unwrap();
+
+        for (token, expected_name, expected_scope) in [
+            (first, "first-token", "read write"),
+            (second, "second-token", "read"),
+        ] {
+            let info = store.validate_token(&token).await.unwrap().unwrap();
+            assert_eq!(info.username, "admin");
+            assert_eq!(info.token_name, expected_name);
+            assert_eq!(info.scope, expected_scope);
+        }
     }
 
     #[tokio::test]
