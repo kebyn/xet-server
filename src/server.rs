@@ -357,8 +357,6 @@ pub async fn metrics_endpoint(
     auth: web::Data<AuthVerifier>,
     req: actix_web::HttpRequest,
 ) -> HttpResponse {
-    let start = std::time::Instant::now();
-
     // Extract, verify, and authorize the caller in one step.
     // Metrics are internal-only and require the full internal service token shape.
     if let Err(rej) = require_auth(
@@ -366,12 +364,13 @@ pub async fn metrics_endpoint(
         &auth,
         AuthNeed::Internal("Insufficient scope: requires 'internal'"),
     ) {
-        return rej.respond(start);
+        return rej.respond();
     }
 
+    // Exported before the middleware records this scrape, so a scrape's own
+    // request is excluded from the body it returns (same as before the
+    // middleware refactor).
     let metrics = crate::metrics::GLOBAL_METRICS.export_metrics();
-    crate::metrics::GLOBAL_METRICS.record_request(200);
-    crate::metrics::GLOBAL_METRICS.record_latency(start);
     HttpResponse::Ok()
         .content_type("text/plain; version=0.0.4")
         .body(metrics)

@@ -10,7 +10,6 @@ use tracing::{info, warn};
 use crate::api::auth::AuthVerifier;
 use crate::api::guard::{AuthNeed, require_auth};
 use crate::index::MetadataIndex;
-use crate::metrics::GLOBAL_METRICS;
 use crate::storage::{StorageBackend, StorageError};
 
 /// Error response for internal endpoints
@@ -34,13 +33,10 @@ pub async fn get_blob_state(
     index: web::Data<MetadataIndex>,
     req: actix_web::HttpRequest,
 ) -> HttpResponse {
-    let start = std::time::Instant::now();
     let oid = path.into_inner();
 
     // Validate oid format (should be a hex hash)
     if oid.len() != 64 || !oid.chars().all(|c| c.is_ascii_hexdigit()) {
-        GLOBAL_METRICS.record_request(400);
-        GLOBAL_METRICS.record_latency(start);
         return HttpResponse::BadRequest().json(ErrorResponse {
             error: "Invalid oid format, expected 64-character hex string".to_string(),
         });
@@ -52,14 +48,12 @@ pub async fn get_blob_state(
         &auth,
         AuthNeed::Internal("Internal endpoint requires internal token type and scope"),
     ) {
-        return rej.respond(start);
+        return rej.respond();
     }
 
     // Check MetadataIndex first
     if let Some(size) = index.get_file_size(&oid) {
         info!("Internal state query for {}: xet_only", oid);
-        GLOBAL_METRICS.record_request(200);
-        GLOBAL_METRICS.record_latency(start);
         return HttpResponse::Ok().json(serde_json::json!({
             "state": "xet_only",
             "xet_file_id": oid,
@@ -74,8 +68,6 @@ pub async fn get_blob_state(
     match storage.get_size(&object_key).await {
         Ok(size) => {
             info!("Internal state query for {}: raw_only", oid);
-            GLOBAL_METRICS.record_request(200);
-            GLOBAL_METRICS.record_latency(start);
             HttpResponse::Ok().json(serde_json::json!({
                 "state": "raw_only",
                 "xet_file_id": null,
@@ -84,21 +76,14 @@ pub async fn get_blob_state(
                 "converted_at": null
             }))
         }
-        Err(StorageError::NotFound(_)) => {
-            GLOBAL_METRICS.record_request(404);
-            GLOBAL_METRICS.record_latency(start);
-            HttpResponse::NotFound().json(ErrorResponse {
-                error: format!("Blob not found: {}", oid),
-            })
-        }
+        Err(StorageError::NotFound(_)) => HttpResponse::NotFound().json(ErrorResponse {
+            error: format!("Blob not found: {}", oid),
+        }),
         Err(error) => {
             // I3 fix: Log internal error details but don't leak them to the client.
             // The error message could contain file paths, S3 bucket names, or other
             // infrastructure details that shouldn't be exposed even on internal endpoints.
             warn!("Storage error checking blob {}: {}", oid, error);
-            GLOBAL_METRICS.record_request(500);
-            GLOBAL_METRICS.record_error();
-            GLOBAL_METRICS.record_latency(start);
             HttpResponse::InternalServerError().json(ErrorResponse {
                 error: crate::api::INTERNAL_ERROR_MESSAGE.to_string(),
             })
@@ -121,13 +106,10 @@ pub async fn head_blob(
     index: web::Data<MetadataIndex>,
     req: actix_web::HttpRequest,
 ) -> HttpResponse {
-    let start = std::time::Instant::now();
     let oid = path.into_inner();
 
     // Validate oid format
     if oid.len() != 64 || !oid.chars().all(|c| c.is_ascii_hexdigit()) {
-        GLOBAL_METRICS.record_request(400);
-        GLOBAL_METRICS.record_latency(start);
         return HttpResponse::BadRequest().json(ErrorResponse {
             error: "Invalid oid format, expected 64-character hex string".to_string(),
         });
@@ -139,13 +121,11 @@ pub async fn head_blob(
         &auth,
         AuthNeed::Internal("Internal endpoint requires internal token type and scope"),
     ) {
-        return rej.respond(start);
+        return rej.respond();
     }
 
     // Check MetadataIndex first
     if let Some(size) = index.get_file_size(&oid) {
-        GLOBAL_METRICS.record_request(200);
-        GLOBAL_METRICS.record_latency(start);
         return HttpResponse::Ok()
             .insert_header(("X-Storage-State", "xet_only"))
             .insert_header(("X-File-Id", oid.as_str()))
@@ -156,24 +136,13 @@ pub async fn head_blob(
     // Check raw blob
     let object_key = format!("lfs/objects/{}", oid);
     match storage.get_size(&object_key).await {
-        Ok(size) => {
-            GLOBAL_METRICS.record_request(200);
-            GLOBAL_METRICS.record_latency(start);
-            HttpResponse::Ok()
-                .insert_header(("X-Storage-State", "raw_only"))
-                .insert_header(("X-Blob-Size", size.to_string()))
-                .finish()
-        }
-        Err(StorageError::NotFound(_)) => {
-            GLOBAL_METRICS.record_request(404);
-            GLOBAL_METRICS.record_latency(start);
-            HttpResponse::NotFound().finish()
-        }
+        Ok(size) => HttpResponse::Ok()
+            .insert_header(("X-Storage-State", "raw_only"))
+            .insert_header(("X-Blob-Size", size.to_string()))
+            .finish(),
+        Err(StorageError::NotFound(_)) => HttpResponse::NotFound().finish(),
         Err(error) => {
             warn!("Storage error checking blob {}: {}", oid, error);
-            GLOBAL_METRICS.record_request(500);
-            GLOBAL_METRICS.record_error();
-            GLOBAL_METRICS.record_latency(start);
             HttpResponse::InternalServerError().finish()
         }
     }

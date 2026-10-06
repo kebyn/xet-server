@@ -32,13 +32,10 @@ pub async fn upload_xorb(
     config: web::Data<ServerConfig>,
     req: actix_web::HttpRequest,
 ) -> HttpResponse {
-    let start = std::time::Instant::now();
     let (prefix, hash_str) = path.into_inner();
 
     // Validate prefix
     if prefix != "default" {
-        GLOBAL_METRICS.record_request(400);
-        GLOBAL_METRICS.record_latency(start);
         return HttpResponse::BadRequest().json(serde_json::json!({
             "error": "Invalid prefix, expected 'default'"
         }));
@@ -48,8 +45,6 @@ pub async fn upload_xorb(
     let expected_hash = match MerkleHash::from_hex(&hash_str) {
         Ok(h) => h,
         Err(e) => {
-            GLOBAL_METRICS.record_request(400);
-            GLOBAL_METRICS.record_latency(start);
             return HttpResponse::BadRequest().json(serde_json::json!({
                 "error": format!("Invalid hash format: {}", e)
             }));
@@ -58,7 +53,7 @@ pub async fn upload_xorb(
 
     // Extract, verify, and authorize the caller in one step.
     if let Err(rej) = require_auth(&req, &auth, AuthNeed::Scope("write")) {
-        return rej.respond(start);
+        return rej.respond();
     }
 
     // M7 fix: Use a more reasonable pre-check threshold instead of max_body_size_bytes.
@@ -72,9 +67,6 @@ pub async fn upload_xorb(
     );
     if let Err(e) = crate::util::disk::ensure_dir_and_check_space(&temp_dir, check_bytes).await {
         error!("Insufficient disk space: {}", e);
-        GLOBAL_METRICS.record_request(507);
-        GLOBAL_METRICS.record_error();
-        GLOBAL_METRICS.record_latency(start);
         return HttpResponse::InsufficientStorage().json(serde_json::json!({
             "error": "Insufficient storage"
         }));
@@ -85,9 +77,6 @@ pub async fn upload_xorb(
         Ok(tf) => tf,
         Err(e) => {
             error!("Failed to create temp file: {}", e);
-            GLOBAL_METRICS.record_request(500);
-            GLOBAL_METRICS.record_error();
-            GLOBAL_METRICS.record_latency(start);
             return HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": crate::api::INTERNAL_ERROR_MESSAGE
             }));
@@ -102,8 +91,6 @@ pub async fn upload_xorb(
             Ok(c) => c,
             Err(e) => {
                 error!("Payload stream error: {}", e);
-                GLOBAL_METRICS.record_request(400);
-                GLOBAL_METRICS.record_latency(start);
                 return HttpResponse::BadRequest().json(serde_json::json!({
                     "error": "Invalid upload stream"
                 }));
@@ -112,8 +99,6 @@ pub async fn upload_xorb(
 
         total_bytes += chunk.len() as u64;
         if total_bytes > max_bytes {
-            GLOBAL_METRICS.record_request(413);
-            GLOBAL_METRICS.record_latency(start);
             return HttpResponse::PayloadTooLarge().json(serde_json::json!({
                 "error": format!("Upload exceeds maximum size of {} MB", config.server.max_body_size_mb)
             }));
@@ -121,9 +106,6 @@ pub async fn upload_xorb(
 
         if let Err(e) = temp_file.write_all(&chunk).await {
             error!("Failed to write to temp file: {}", e);
-            GLOBAL_METRICS.record_request(500);
-            GLOBAL_METRICS.record_error();
-            GLOBAL_METRICS.record_latency(start);
             return HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": crate::api::INTERNAL_ERROR_MESSAGE
             }));
@@ -132,9 +114,6 @@ pub async fn upload_xorb(
 
     if let Err(e) = temp_file.sync_all().await {
         error!("Failed to sync temp file: {}", e);
-        GLOBAL_METRICS.record_request(500);
-        GLOBAL_METRICS.record_error();
-        GLOBAL_METRICS.record_latency(start);
         return HttpResponse::InternalServerError().json(serde_json::json!({
             "error": crate::api::INTERNAL_ERROR_MESSAGE
         }));
@@ -157,8 +136,6 @@ pub async fn upload_xorb(
                 temp_path.display(),
                 e
             );
-            GLOBAL_METRICS.record_request(400);
-            GLOBAL_METRICS.record_latency(start);
             return HttpResponse::BadRequest().json(serde_json::json!({
                 "error": "Xorb verification failed"
             }));
@@ -169,9 +146,6 @@ pub async fn upload_xorb(
                 temp_path.display(),
                 join_err
             );
-            GLOBAL_METRICS.record_request(500);
-            GLOBAL_METRICS.record_error();
-            GLOBAL_METRICS.record_latency(start);
             return HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": crate::api::INTERNAL_ERROR_MESSAGE
             }));
@@ -179,8 +153,6 @@ pub async fn upload_xorb(
     };
 
     if xorb_info.xorb_hash != expected_hash {
-        GLOBAL_METRICS.record_request(400);
-        GLOBAL_METRICS.record_latency(start);
         return HttpResponse::BadRequest().json(serde_json::json!({
             "error": format!("Hash mismatch: expected {}, got {}", expected_hash.to_hex(), xorb_info.xorb_hash.to_hex())
         }));
@@ -201,9 +173,6 @@ pub async fn upload_xorb(
         Ok(exists) => exists,
         Err(e) => {
             error!("Failed to check xorb existence: {}", e);
-            GLOBAL_METRICS.record_request(500);
-            GLOBAL_METRICS.record_error();
-            GLOBAL_METRICS.record_latency(start);
             return HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": crate::api::INTERNAL_ERROR_MESSAGE
             }));
@@ -211,9 +180,7 @@ pub async fn upload_xorb(
     };
 
     if already_exists {
-        GLOBAL_METRICS.record_request(200);
         GLOBAL_METRICS.record_storage_operation();
-        GLOBAL_METRICS.record_latency(start);
         // temp_file auto-cleaned by Drop
         return HttpResponse::Ok().json(XorbUploadResponse {
             was_inserted: false,
@@ -224,9 +191,6 @@ pub async fn upload_xorb(
     // source cleanup to TempFile's RAII ownership.
     if let Err(e) = temp_file.store(storage.get_ref().as_ref(), &xorb_key).await {
         error!("Failed to store xorb: {}", e);
-        GLOBAL_METRICS.record_request(500);
-        GLOBAL_METRICS.record_error();
-        GLOBAL_METRICS.record_latency(start);
         return HttpResponse::InternalServerError().json(serde_json::json!({
             "error": crate::api::INTERNAL_ERROR_MESSAGE
         }));
@@ -234,10 +198,8 @@ pub async fn upload_xorb(
 
     info!("Uploaded xorb {} ({} bytes)", xorb_hash_hex, total_bytes);
 
-    GLOBAL_METRICS.record_request(200);
     GLOBAL_METRICS.record_storage_operation();
     GLOBAL_METRICS.record_upload_bytes(total_bytes);
-    GLOBAL_METRICS.record_latency(start);
 
     HttpResponse::Ok().json(XorbUploadResponse { was_inserted: true })
 }
@@ -250,13 +212,10 @@ pub async fn download_xorb(
     config: web::Data<ServerConfig>,
     req: actix_web::HttpRequest,
 ) -> HttpResponse {
-    let start = std::time::Instant::now();
     let (prefix, hash_str) = path.into_inner();
 
     // Validate prefix
     if prefix != "default" {
-        GLOBAL_METRICS.record_request(400);
-        GLOBAL_METRICS.record_latency(start);
         return HttpResponse::BadRequest().json(serde_json::json!({
             "error": "Invalid prefix, expected 'default'"
         }));
@@ -267,8 +226,6 @@ pub async fn download_xorb(
     let xorb_hash = match MerkleHash::from_hex(&hash_str) {
         Ok(h) => h,
         Err(e) => {
-            GLOBAL_METRICS.record_request(400);
-            GLOBAL_METRICS.record_latency(start);
             return HttpResponse::BadRequest().json(serde_json::json!({
                 "error": format!("Invalid hash format: {}", e)
             }));
@@ -278,7 +235,7 @@ pub async fn download_xorb(
 
     // Extract, verify, and authorize the caller in one step.
     if let Err(rej) = require_auth(&req, &auth, AuthNeed::Scope("read")) {
-        return rej.respond(start);
+        return rej.respond();
     }
 
     // Prefer zero-copy local streaming. Remote backends stream into a guarded
@@ -291,8 +248,6 @@ pub async fn download_xorb(
             let file = match tokio::fs::File::open(&path).await {
                 Ok(f) => f,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    GLOBAL_METRICS.record_request(404);
-                    GLOBAL_METRICS.record_latency(start);
                     return HttpResponse::NotFound().json(serde_json::json!({
                         "error": format!("Xorb not found: {}", hash_str)
                     }));
@@ -303,9 +258,6 @@ pub async fn download_xorb(
                         path.display(),
                         e
                     );
-                    GLOBAL_METRICS.record_request(500);
-                    GLOBAL_METRICS.record_error();
-                    GLOBAL_METRICS.record_latency(start);
                     return HttpResponse::InternalServerError().json(serde_json::json!({
                         "error": crate::api::INTERNAL_ERROR_MESSAGE
                     }));
@@ -314,17 +266,12 @@ pub async fn download_xorb(
             let metadata = match file.metadata().await {
                 Ok(m) => m,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    GLOBAL_METRICS.record_request(404);
-                    GLOBAL_METRICS.record_latency(start);
                     return HttpResponse::NotFound().json(serde_json::json!({
                         "error": format!("Xorb not found: {}", hash_str)
                     }));
                 }
                 Err(e) => {
                     error!("Failed to get xorb file metadata: {}", e);
-                    GLOBAL_METRICS.record_request(500);
-                    GLOBAL_METRICS.record_error();
-                    GLOBAL_METRICS.record_latency(start);
                     return HttpResponse::InternalServerError().json(serde_json::json!({
                         "error": crate::api::INTERNAL_ERROR_MESSAGE
                     }));
@@ -332,9 +279,6 @@ pub async fn download_xorb(
             };
             if !metadata.is_file() {
                 error!("Xorb storage path is not a file: {}", path.display());
-                GLOBAL_METRICS.record_request(500);
-                GLOBAL_METRICS.record_error();
-                GLOBAL_METRICS.record_latency(start);
                 return HttpResponse::InternalServerError().json(serde_json::json!({
                     "error": crate::api::INTERNAL_ERROR_MESSAGE
                 }));
@@ -346,10 +290,8 @@ pub async fn download_xorb(
             let body = actix_web::body::SizedStream::new(file_size, stream);
 
             info!("Streaming xorb {} ({} bytes)", hash_str, file_size);
-            GLOBAL_METRICS.record_request(200);
             GLOBAL_METRICS.record_storage_operation();
             GLOBAL_METRICS.record_download_bytes(file_size);
-            GLOBAL_METRICS.record_latency(start);
 
             HttpResponse::Ok()
                 .content_type("application/octet-stream")
@@ -367,17 +309,12 @@ pub async fn download_xorb(
             {
                 Ok(download) => download,
                 Err(StorageError::NotFound(_)) => {
-                    GLOBAL_METRICS.record_request(404);
-                    GLOBAL_METRICS.record_latency(start);
                     return HttpResponse::NotFound().json(serde_json::json!({
                         "error": format!("Xorb not found: {}", hash_str)
                     }));
                 }
                 Err(e) => {
                     error!("Failed to stream remote xorb {}: {}", hash_str, e);
-                    GLOBAL_METRICS.record_request(500);
-                    GLOBAL_METRICS.record_error();
-                    GLOBAL_METRICS.record_latency(start);
                     return HttpResponse::InternalServerError().json(serde_json::json!({
                         "error": crate::api::INTERNAL_ERROR_MESSAGE
                     }));
@@ -385,26 +322,17 @@ pub async fn download_xorb(
             };
 
             let body = actix_web::body::SizedStream::new(file_size, stream);
-            GLOBAL_METRICS.record_request(200);
             GLOBAL_METRICS.record_storage_operation();
             GLOBAL_METRICS.record_download_bytes(file_size);
-            GLOBAL_METRICS.record_latency(start);
             HttpResponse::Ok()
                 .content_type("application/octet-stream")
                 .body(body)
         }
-        Err(StorageError::NotFound(_)) => {
-            GLOBAL_METRICS.record_request(404);
-            GLOBAL_METRICS.record_latency(start);
-            HttpResponse::NotFound().json(serde_json::json!({
-                "error": format!("Xorb not found: {}", hash_str)
-            }))
-        }
+        Err(StorageError::NotFound(_)) => HttpResponse::NotFound().json(serde_json::json!({
+            "error": format!("Xorb not found: {}", hash_str)
+        })),
         Err(e) => {
             error!("Failed to get path for xorb {}: {}", hash_str, e);
-            GLOBAL_METRICS.record_request(500);
-            GLOBAL_METRICS.record_error();
-            GLOBAL_METRICS.record_latency(start);
             HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": crate::api::INTERNAL_ERROR_MESSAGE
             }))

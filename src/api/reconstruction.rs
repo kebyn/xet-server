@@ -91,23 +91,19 @@ pub async fn get_reconstruction_v1(
     auth: web::Data<AuthVerifier>,
     req: actix_web::HttpRequest,
 ) -> HttpResponse {
-    let start = std::time::Instant::now();
-
     // Extract, verify, and authorize the caller in one step.
     if let Err(rej) = require_auth(
         &req,
         &auth,
         AuthNeed::ScopeMsg("read", "Insufficient scope, 'read' required"),
     ) {
-        return rej.respond(start);
+        return rej.respond();
     }
 
     let file_id = path.into_inner();
 
     // Validate file_id format (should be a hex hash)
     if file_id.len() != 64 || !file_id.chars().all(|c| c.is_ascii_hexdigit()) {
-        GLOBAL_METRICS.record_request(400);
-        GLOBAL_METRICS.record_latency(start);
         return HttpResponse::BadRequest().json(serde_json::json!({
             "error": "Invalid file_id format, expected 64-character hex string"
         }));
@@ -117,8 +113,6 @@ pub async fn get_reconstruction_v1(
         Ok(hash) => hash,
         Err(e) => {
             error!("Invalid file_id {}: {}", file_id, e);
-            GLOBAL_METRICS.record_request(400);
-            GLOBAL_METRICS.record_latency(start);
             return HttpResponse::BadRequest().json(serde_json::json!({
                 "error": "Invalid file_id format, expected 64-character hex string"
             }));
@@ -130,15 +124,11 @@ pub async fn get_reconstruction_v1(
     let file_refs = match index.get_file_refs(&file_id) {
         Some(refs) if !refs.is_empty() => refs,
         None => {
-            GLOBAL_METRICS.record_request(404);
-            GLOBAL_METRICS.record_latency(start);
             return HttpResponse::NotFound().json(serde_json::json!({
                 "error": "File not found"
             }));
         }
         Some(_) => {
-            GLOBAL_METRICS.record_request(404);
-            GLOBAL_METRICS.record_latency(start);
             return HttpResponse::NotFound().json(serde_json::json!({
                 "error": "File not found"
             }));
@@ -228,9 +218,6 @@ pub async fn get_reconstruction_v1(
                     .as_deref()
                     .unwrap_or("no verified shard reference could be planned")
             );
-            GLOBAL_METRICS.record_request(500);
-            GLOBAL_METRICS.record_error();
-            GLOBAL_METRICS.record_latency(start);
             return HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": crate::api::INTERNAL_ERROR_MESSAGE
             }));
@@ -242,9 +229,7 @@ pub async fn get_reconstruction_v1(
 
     let response = ReconstructionResponseV1 { file_id, xorbs };
 
-    GLOBAL_METRICS.record_request(200);
     GLOBAL_METRICS.record_download_bytes(total_download_bytes);
-    GLOBAL_METRICS.record_latency(start);
 
     HttpResponse::Ok().json(response)
 }
@@ -259,23 +244,19 @@ pub async fn get_reconstruction(
     auth: web::Data<AuthVerifier>,
     req: actix_web::HttpRequest,
 ) -> HttpResponse {
-    let start = std::time::Instant::now();
-
     // Extract, verify, and authorize the caller in one step.
     if let Err(rej) = require_auth(
         &req,
         &auth,
         AuthNeed::ScopeMsg("read", "Insufficient scope, 'read' required"),
     ) {
-        return rej.respond(start);
+        return rej.respond();
     }
 
     let file_id = path.into_inner();
 
     // Validate file_id format (should be a hex hash)
     if file_id.len() != 64 || !file_id.chars().all(|c| c.is_ascii_hexdigit()) {
-        GLOBAL_METRICS.record_request(400);
-        GLOBAL_METRICS.record_latency(start);
         return HttpResponse::BadRequest().json(serde_json::json!({
             "error": "Invalid file_id format, expected 64-character hex string"
         }));
@@ -285,8 +266,6 @@ pub async fn get_reconstruction(
         Ok(hash) => hash,
         Err(e) => {
             error!("Invalid file_id {}: {}", file_id, e);
-            GLOBAL_METRICS.record_request(400);
-            GLOBAL_METRICS.record_latency(start);
             return HttpResponse::BadRequest().json(serde_json::json!({
                 "error": "Invalid file_id format, expected 64-character hex string"
             }));
@@ -298,15 +277,11 @@ pub async fn get_reconstruction(
     let file_refs = match index.get_file_refs(&file_id) {
         Some(refs) if !refs.is_empty() => refs,
         None => {
-            GLOBAL_METRICS.record_request(404);
-            GLOBAL_METRICS.record_latency(start);
             return HttpResponse::NotFound().json(serde_json::json!({
                 "error": "File not found"
             }));
         }
         Some(_) => {
-            GLOBAL_METRICS.record_request(404);
-            GLOBAL_METRICS.record_latency(start);
             return HttpResponse::NotFound().json(serde_json::json!({
                 "error": "File not found"
             }));
@@ -395,9 +370,6 @@ pub async fn get_reconstruction(
                     .as_deref()
                     .unwrap_or("no verified shard reference could be planned")
             );
-            GLOBAL_METRICS.record_request(500);
-            GLOBAL_METRICS.record_error();
-            GLOBAL_METRICS.record_latency(start);
             return HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": crate::api::INTERNAL_ERROR_MESSAGE
             }));
@@ -413,9 +385,7 @@ pub async fn get_reconstruction(
         fetch_info,
     };
 
-    GLOBAL_METRICS.record_request(200);
     GLOBAL_METRICS.record_download_bytes(total_download_bytes);
-    GLOBAL_METRICS.record_latency(start);
 
     HttpResponse::Ok().json(response)
 }

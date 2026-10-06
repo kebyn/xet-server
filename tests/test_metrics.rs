@@ -121,6 +121,9 @@ async fn test_upload_records_metrics() {
 
     let app = test::init_service(
         App::new()
+            .wrap(actix_web::middleware::from_fn(
+                xet_server::middleware::metrics_middleware,
+            ))
             .app_data(web::Data::new(storage))
             .app_data(web::Data::new(auth_verifier))
             .app_data(web::Data::new(config))

@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 use crate::api::auth::AuthVerifier;
 use crate::api::guard::{AuthNeed, require_auth};
 use crate::index::MetadataIndex;
-use crate::metrics::GLOBAL_METRICS;
 use crate::storage::StorageBackend;
 
 #[derive(Serialize, Deserialize)]
@@ -27,23 +26,19 @@ pub async fn query_chunk_dedup(
     auth: web::Data<AuthVerifier>,
     req: actix_web::HttpRequest,
 ) -> HttpResponse {
-    let start = std::time::Instant::now();
-
     // Extract, verify, and authorize the caller in one step.
     if let Err(rej) = require_auth(
         &req,
         &auth,
         AuthNeed::ScopeMsg("read", "Insufficient scope, 'read' required"),
     ) {
-        return rej.respond(start);
+        return rej.respond();
     }
 
     let (prefix, hash) = path.into_inner();
 
     // Validate prefix
     if prefix != "default" {
-        GLOBAL_METRICS.record_request(400);
-        GLOBAL_METRICS.record_latency(start);
         return HttpResponse::BadRequest().json(serde_json::json!({
             "error": "Invalid prefix, expected 'default'"
         }));
@@ -51,8 +46,6 @@ pub async fn query_chunk_dedup(
 
     // Validate hash format (should be a hex hash)
     if hash.len() != 64 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
-        GLOBAL_METRICS.record_request(400);
-        GLOBAL_METRICS.record_latency(start);
         return HttpResponse::BadRequest().json(serde_json::json!({
             "error": "Invalid hash format, expected 64-character hex string"
         }));
@@ -77,9 +70,6 @@ pub async fn query_chunk_dedup(
                 },
                 Err(e) => {
                     tracing::error!("Failed to check deduplicated xorb {}: {}", xorb_hash, e);
-                    GLOBAL_METRICS.record_request(500);
-                    GLOBAL_METRICS.record_error();
-                    GLOBAL_METRICS.record_latency(start);
                     return HttpResponse::InternalServerError().json(serde_json::json!({
                         "error": crate::api::INTERNAL_ERROR_MESSAGE
                     }));
@@ -93,9 +83,6 @@ pub async fn query_chunk_dedup(
             chunk_index: None,
         },
     };
-
-    GLOBAL_METRICS.record_request(200);
-    GLOBAL_METRICS.record_latency(start);
 
     HttpResponse::Ok().json(response)
 }

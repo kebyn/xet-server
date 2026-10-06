@@ -11,14 +11,11 @@
 //! shapes (`{"error": ..}` and the Git-LFS `{"message": ..}`). Handlers with a
 //! bespoke body match on the variant and render directly.
 
-use std::time::Instant;
-
 use actix_web::{HttpRequest, HttpResponse};
 
 use crate::api::auth::{
     AuthVerifier, XetClaims, authorize_endpoint, extract_token_from_request, is_internal_token,
 };
-use crate::metrics::GLOBAL_METRICS;
 
 /// What a handler requires of the caller.
 ///
@@ -133,19 +130,19 @@ impl AuthReject {
         }
     }
 
-    /// Record request/latency metrics and return the standard `{"error": ..}` body.
-    pub fn respond(self, start: Instant) -> HttpResponse {
+    /// Return the standard `{"error": ..}` body.
+    ///
+    /// Request/latency metrics are recorded by the HTTP middleware.
+    pub fn respond(self) -> HttpResponse {
         let (code, msg) = self.error_parts();
-        GLOBAL_METRICS.record_request(code);
-        GLOBAL_METRICS.record_latency(start);
         Self::build(code, serde_json::json!({ "error": msg }))
     }
 
-    /// Record request/latency metrics and return the Git-LFS `{"message": ..}` body.
-    pub fn respond_message(self, start: Instant) -> HttpResponse {
+    /// Return the Git-LFS `{"message": ..}` body.
+    ///
+    /// Request/latency metrics are recorded by the HTTP middleware.
+    pub fn respond_message(self) -> HttpResponse {
         let (code, msg) = self.message_parts();
-        GLOBAL_METRICS.record_request(code);
-        GLOBAL_METRICS.record_latency(start);
         Self::build(code, serde_json::json!({ "message": msg }))
     }
 }

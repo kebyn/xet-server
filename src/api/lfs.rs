@@ -94,13 +94,10 @@ pub async fn upload_lfs_object(
     config: web::Data<ServerConfig>,
     req: actix_web::HttpRequest,
 ) -> HttpResponse {
-    let start = std::time::Instant::now();
     let oid = path.into_inner();
 
     // Validate oid format (should be a hex hash)
     if oid.len() != 64 || !oid.chars().all(|c| c.is_ascii_hexdigit()) {
-        GLOBAL_METRICS.record_request(400);
-        GLOBAL_METRICS.record_latency(start);
         return HttpResponse::BadRequest().json(serde_json::json!({
             "error": "Invalid oid format, expected 64-character hex string"
         }));
@@ -116,7 +113,7 @@ pub async fn upload_lfs_object(
             message: "Insufficient scope or invalid LFS upload token",
         },
     ) {
-        return rej.respond(start);
+        return rej.respond();
     }
 
     // M7 fix: Use a more reasonable pre-check threshold (see xorb.rs for rationale).
@@ -127,9 +124,6 @@ pub async fn upload_lfs_object(
     );
     if let Err(e) = crate::util::disk::ensure_dir_and_check_space(&temp_dir, check_bytes).await {
         error!("Insufficient disk space: {}", e);
-        GLOBAL_METRICS.record_request(507);
-        GLOBAL_METRICS.record_error();
-        GLOBAL_METRICS.record_latency(start);
         return HttpResponse::InsufficientStorage().json(serde_json::json!({
             "error": "Insufficient storage"
         }));
@@ -141,9 +135,6 @@ pub async fn upload_lfs_object(
         Ok(tf) => tf,
         Err(e) => {
             error!("Failed to create temp file: {}", e);
-            GLOBAL_METRICS.record_request(500);
-            GLOBAL_METRICS.record_error();
-            GLOBAL_METRICS.record_latency(start);
             return HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": crate::api::INTERNAL_ERROR_MESSAGE
             }));
@@ -159,8 +150,6 @@ pub async fn upload_lfs_object(
             Ok(c) => c,
             Err(e) => {
                 error!("Payload stream error: {}", e);
-                GLOBAL_METRICS.record_request(400);
-                GLOBAL_METRICS.record_latency(start);
                 // temp_file auto-cleaned by Drop
                 return HttpResponse::BadRequest().json(serde_json::json!({
                     "error": "Invalid upload stream"
@@ -170,8 +159,6 @@ pub async fn upload_lfs_object(
 
         total_bytes += chunk.len() as u64;
         if total_bytes > max_bytes {
-            GLOBAL_METRICS.record_request(413);
-            GLOBAL_METRICS.record_latency(start);
             return HttpResponse::PayloadTooLarge().json(serde_json::json!({
                 "error": format!("Upload exceeds maximum size of {} MB", config.server.max_body_size_mb)
             }));
@@ -180,9 +167,6 @@ pub async fn upload_lfs_object(
         hasher.update(&chunk);
         if let Err(e) = temp_file.write_all(&chunk).await {
             error!("Failed to write to temp file: {}", e);
-            GLOBAL_METRICS.record_request(500);
-            GLOBAL_METRICS.record_error();
-            GLOBAL_METRICS.record_latency(start);
             return HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": crate::api::INTERNAL_ERROR_MESSAGE
             }));
@@ -192,9 +176,6 @@ pub async fn upload_lfs_object(
     // Ensure all data is on disk before hashing/storage
     if let Err(e) = temp_file.sync_all().await {
         error!("Failed to sync temp file: {}", e);
-        GLOBAL_METRICS.record_request(500);
-        GLOBAL_METRICS.record_error();
-        GLOBAL_METRICS.record_latency(start);
         return HttpResponse::InternalServerError().json(serde_json::json!({
             "error": crate::api::INTERNAL_ERROR_MESSAGE
         }));
@@ -210,8 +191,6 @@ pub async fn upload_lfs_object(
     } else if sha256_hash == oid {
         info!("Upload verified: OID matches SHA-256 hash (Git LFS client)");
     } else {
-        GLOBAL_METRICS.record_request(400);
-        GLOBAL_METRICS.record_latency(start);
         return HttpResponse::BadRequest().json(serde_json::json!({
             "error": format!(
                 "Hash mismatch: OID {} does not match BLAKE3 ({}) or SHA-256 ({})",
@@ -227,9 +206,6 @@ pub async fn upload_lfs_object(
         Ok(exists) => exists,
         Err(e) => {
             error!("Failed to check object existence: {}", e);
-            GLOBAL_METRICS.record_request(500);
-            GLOBAL_METRICS.record_error();
-            GLOBAL_METRICS.record_latency(start);
             return HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": crate::api::INTERNAL_ERROR_MESSAGE
             }));
@@ -237,9 +213,7 @@ pub async fn upload_lfs_object(
     };
 
     if already_exists {
-        GLOBAL_METRICS.record_request(200);
         GLOBAL_METRICS.record_storage_operation();
-        GLOBAL_METRICS.record_latency(start);
         // temp_file auto-cleaned by Drop (object already in storage)
         return HttpResponse::Ok().json(serde_json::json!({
             "message": "Object already exists"
@@ -253,9 +227,6 @@ pub async fn upload_lfs_object(
         .await
     {
         error!("Failed to store object: {}", e);
-        GLOBAL_METRICS.record_request(500);
-        GLOBAL_METRICS.record_error();
-        GLOBAL_METRICS.record_latency(start);
         return HttpResponse::InternalServerError().json(serde_json::json!({
             "error": crate::api::INTERNAL_ERROR_MESSAGE
         }));
@@ -263,10 +234,8 @@ pub async fn upload_lfs_object(
 
     info!("Uploaded LFS object {} ({} bytes)", oid, total_bytes);
 
-    GLOBAL_METRICS.record_request(200);
     GLOBAL_METRICS.record_storage_operation();
     GLOBAL_METRICS.record_upload_bytes(total_bytes);
-    GLOBAL_METRICS.record_latency(start);
 
     HttpResponse::Ok().json(serde_json::json!({
         "message": "Object uploaded successfully"
@@ -292,13 +261,10 @@ pub async fn download_lfs_object(
     config: web::Data<ServerConfig>,
     req: actix_web::HttpRequest,
 ) -> HttpResponse {
-    let start = std::time::Instant::now();
     let oid = path.into_inner();
 
     // Validate oid format
     if oid.len() != 64 || !oid.chars().all(|c| c.is_ascii_hexdigit()) {
-        GLOBAL_METRICS.record_request(400);
-        GLOBAL_METRICS.record_latency(start);
         return HttpResponse::BadRequest().json(serde_json::json!({
             "error": "Invalid oid format, expected 64-character hex string"
         }));
@@ -314,14 +280,14 @@ pub async fn download_lfs_object(
             message: "Insufficient scope or invalid LFS download token",
         },
     ) {
-        return rej.respond(start);
+        return rej.respond();
     }
 
     let object_key = format!("lfs/objects/{}", oid);
     match storage.exists(&object_key).await {
         Ok(true) => {
             // Raw blob exists — serve it and trigger lazy conversion in background
-            match serve_raw_blob(&oid, storage.clone(), config.clone(), start).await {
+            match serve_raw_blob(&oid, storage.clone(), config.clone()).await {
                 RawBlobResult::Served(response) => {
                     if conversion_config.enabled && converting.try_acquire(&oid) {
                         let pipeline = crate::conversion::ConversionPipeline::new(
@@ -381,9 +347,6 @@ pub async fn download_lfs_object(
         Ok(false) => {}
         Err(e) => {
             error!("Failed to check raw LFS object {}: {}", oid, e);
-            GLOBAL_METRICS.record_request(500);
-            GLOBAL_METRICS.record_error();
-            GLOBAL_METRICS.record_latency(start);
             return HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": crate::api::INTERNAL_ERROR_MESSAGE
             }));
@@ -392,11 +355,9 @@ pub async fn download_lfs_object(
 
     if let Some(file_refs) = index.get_file_refs(&oid) {
         let temp_dir = config.storage.resolve_reconstruction_temp_dir();
-        return serve_verified_xet_reconstruction(&oid, file_refs, storage, temp_dir, start).await;
+        return serve_verified_xet_reconstruction(&oid, file_refs, storage, temp_dir).await;
     }
 
-    GLOBAL_METRICS.record_request(404);
-    GLOBAL_METRICS.record_latency(start);
     HttpResponse::NotFound().json(serde_json::json!({
         "error": format!("Object not found: {}", oid)
     }))

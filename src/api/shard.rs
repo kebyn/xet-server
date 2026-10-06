@@ -36,11 +36,9 @@ pub async fn upload_shard(
     config: web::Data<ServerConfig>,
     req: actix_web::HttpRequest,
 ) -> HttpResponse {
-    let start = std::time::Instant::now();
-
     // Extract, verify, and authorize the caller in one step.
     if let Err(rej) = require_auth(&req, &auth, AuthNeed::Scope("write")) {
-        return rej.respond(start);
+        return rej.respond();
     }
 
     // Stream payload to temp file with incremental BLAKE3 hashing
@@ -53,9 +51,6 @@ pub async fn upload_shard(
     );
     if let Err(e) = crate::util::disk::ensure_dir_and_check_space(&temp_dir, check_bytes).await {
         error!("Insufficient disk space: {}", e);
-        GLOBAL_METRICS.record_request(507);
-        GLOBAL_METRICS.record_error();
-        GLOBAL_METRICS.record_latency(start);
         return HttpResponse::InsufficientStorage().json(serde_json::json!({
             "error": "Insufficient storage"
         }));
@@ -64,9 +59,6 @@ pub async fn upload_shard(
         Ok(tf) => tf,
         Err(e) => {
             error!("Failed to create temp file: {}", e);
-            GLOBAL_METRICS.record_request(500);
-            GLOBAL_METRICS.record_error();
-            GLOBAL_METRICS.record_latency(start);
             return HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": crate::api::INTERNAL_ERROR_MESSAGE
             }));
@@ -82,8 +74,6 @@ pub async fn upload_shard(
             Ok(c) => c,
             Err(e) => {
                 error!("Payload stream error: {}", e);
-                GLOBAL_METRICS.record_request(400);
-                GLOBAL_METRICS.record_latency(start);
                 return HttpResponse::BadRequest().json(serde_json::json!({
                     "error": "Invalid upload stream"
                 }));
@@ -92,8 +82,6 @@ pub async fn upload_shard(
 
         total_bytes += chunk.len() as u64;
         if total_bytes > max_bytes {
-            GLOBAL_METRICS.record_request(413);
-            GLOBAL_METRICS.record_latency(start);
             return HttpResponse::PayloadTooLarge().json(serde_json::json!({
                 "error": format!("Upload exceeds maximum size of {} MB", config.server.max_body_size_mb)
             }));
@@ -102,9 +90,6 @@ pub async fn upload_shard(
         hasher.update(&chunk);
         if let Err(e) = temp_file.write_all(&chunk).await {
             error!("Failed to write to temp file: {}", e);
-            GLOBAL_METRICS.record_request(500);
-            GLOBAL_METRICS.record_error();
-            GLOBAL_METRICS.record_latency(start);
             return HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": crate::api::INTERNAL_ERROR_MESSAGE
             }));
@@ -113,9 +98,6 @@ pub async fn upload_shard(
 
     if let Err(e) = temp_file.sync_all().await {
         error!("Failed to sync temp file: {}", e);
-        GLOBAL_METRICS.record_request(500);
-        GLOBAL_METRICS.record_error();
-        GLOBAL_METRICS.record_latency(start);
         return HttpResponse::InternalServerError().json(serde_json::json!({
             "error": crate::api::INTERNAL_ERROR_MESSAGE
         }));
@@ -131,17 +113,12 @@ pub async fn upload_shard(
             Ok(Ok(s)) => s,
             Ok(Err(e)) => {
                 error!("Failed to parse shard for indexing: {}", e);
-                GLOBAL_METRICS.record_request(400);
-                GLOBAL_METRICS.record_latency(start);
                 return HttpResponse::BadRequest().json(serde_json::json!({
                     "error": "Invalid shard format"
                 }));
             }
             Err(join_err) => {
                 error!("Shard parse task failed: {}", join_err);
-                GLOBAL_METRICS.record_request(500);
-                GLOBAL_METRICS.record_error();
-                GLOBAL_METRICS.record_latency(start);
                 return HttpResponse::InternalServerError().json(serde_json::json!({
                     "error": crate::api::INTERNAL_ERROR_MESSAGE
                 }));
@@ -157,9 +134,6 @@ pub async fn upload_shard(
         Ok(exists) => exists,
         Err(e) => {
             error!("Failed to check shard existence: {}", e);
-            GLOBAL_METRICS.record_request(500);
-            GLOBAL_METRICS.record_error();
-            GLOBAL_METRICS.record_latency(start);
             return HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": crate::api::INTERNAL_ERROR_MESSAGE
             }));
@@ -181,16 +155,11 @@ pub async fn upload_shard(
                 if matches!(&e, crate::shard_io::ShardIoError::Parse { source, .. }
                     if !matches!(source, crate::error::XetError::IoError(_)))
                 {
-                    GLOBAL_METRICS.record_request(400);
-                    GLOBAL_METRICS.record_latency(start);
                     return HttpResponse::BadRequest().json(serde_json::json!({
                         "error": "Invalid existing shard format"
                     }));
                 }
 
-                GLOBAL_METRICS.record_request(500);
-                GLOBAL_METRICS.record_error();
-                GLOBAL_METRICS.record_latency(start);
                 return HttpResponse::InternalServerError().json(serde_json::json!({
                     "error": crate::api::INTERNAL_ERROR_MESSAGE
                 }));
@@ -202,8 +171,6 @@ pub async fn upload_shard(
                 "Existing shard {} has mismatched stored content hash {}",
                 shard_id, stored_shard_id
             );
-            GLOBAL_METRICS.record_request(400);
-            GLOBAL_METRICS.record_latency(start);
             return HttpResponse::BadRequest().json(serde_json::json!({
                 "error": "Existing shard content does not match requested shard id"
             }));
@@ -222,8 +189,6 @@ pub async fn upload_shard(
                     "Shard validation failed for existing shard {}: {}",
                     shard_id, e
                 );
-                GLOBAL_METRICS.record_request(400);
-                GLOBAL_METRICS.record_latency(start);
                 return HttpResponse::BadRequest().json(serde_json::json!({
                     "error": "Shard validation failed"
                 }));
@@ -234,16 +199,12 @@ pub async fn upload_shard(
                 "Metadata index rejected existing shard {}: {}",
                 shard_id, error
             );
-            GLOBAL_METRICS.record_request(409);
-            GLOBAL_METRICS.record_latency(start);
             return HttpResponse::Conflict().json(serde_json::json!({
                 "error": format!("Metadata index conflict: {}", error)
             }));
         }
 
-        GLOBAL_METRICS.record_request(200);
         GLOBAL_METRICS.record_storage_operation();
-        GLOBAL_METRICS.record_latency(start);
         return HttpResponse::Ok().json(ShardUploadResponse {
             was_inserted: false,
             shard_id,
@@ -262,8 +223,6 @@ pub async fn upload_shard(
         Ok(registration) => registration,
         Err(e) => {
             error!("Shard validation failed for shard {}: {}", shard_id, e);
-            GLOBAL_METRICS.record_request(400);
-            GLOBAL_METRICS.record_latency(start);
             return HttpResponse::BadRequest().json(serde_json::json!({
                 "error": "Shard validation failed"
             }));
@@ -277,9 +236,6 @@ pub async fn upload_shard(
         .await
     {
         error!("Failed to store shard: {}", e);
-        GLOBAL_METRICS.record_request(500);
-        GLOBAL_METRICS.record_error();
-        GLOBAL_METRICS.record_latency(start);
         return HttpResponse::InternalServerError().json(serde_json::json!({
             "error": crate::api::INTERNAL_ERROR_MESSAGE
         }));
@@ -289,8 +245,6 @@ pub async fn upload_shard(
     let chunk_count = registration.chunks.len();
     if let Err(error) = index.register_verified_shard(registration) {
         error!("Metadata index rejected shard {}: {}", shard_id, error);
-        GLOBAL_METRICS.record_request(409);
-        GLOBAL_METRICS.record_latency(start);
         return HttpResponse::Conflict().json(serde_json::json!({
             "error": format!("Metadata index conflict: {}", error)
         }));
@@ -301,10 +255,8 @@ pub async fn upload_shard(
         shard_id, file_count, chunk_count
     );
 
-    GLOBAL_METRICS.record_request(200);
     GLOBAL_METRICS.record_storage_operation();
     GLOBAL_METRICS.record_upload_bytes(total_bytes);
-    GLOBAL_METRICS.record_latency(start);
 
     HttpResponse::Ok().json(ShardUploadResponse {
         was_inserted: true,

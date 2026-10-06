@@ -11,7 +11,6 @@ pub(super) async fn serve_verified_xet_reconstruction(
     file_refs: Vec<crate::index::FileShardRef>,
     storage: web::Data<Box<dyn StorageBackend>>,
     temp_dir: std::path::PathBuf,
-    start: std::time::Instant,
 ) -> HttpResponse {
     let reconstruction =
         match reconstruct_verified_file_to_temp(oid, file_refs, &***storage, &temp_dir).await {
@@ -19,15 +18,10 @@ pub(super) async fn serve_verified_xet_reconstruction(
             Err(e) => {
                 error!("Verified xet reconstruction failed for {}: {}", oid, e);
                 if matches!(e, ReconstructionError::Stale(_)) {
-                    GLOBAL_METRICS.record_request(404);
-                    GLOBAL_METRICS.record_latency(start);
                     return HttpResponse::NotFound().json(serde_json::json!({
                         "error": format!("Object not found: {}", oid)
                     }));
                 }
-                GLOBAL_METRICS.record_request(500);
-                GLOBAL_METRICS.record_error();
-                GLOBAL_METRICS.record_latency(start);
                 return HttpResponse::InternalServerError().json(serde_json::json!({
                     "error": crate::api::INTERNAL_ERROR_MESSAGE
                 }));
@@ -45,9 +39,6 @@ pub(super) async fn serve_verified_xet_reconstruction(
                 path.display(),
                 e
             );
-            GLOBAL_METRICS.record_request(500);
-            GLOBAL_METRICS.record_error();
-            GLOBAL_METRICS.record_latency(start);
             return HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": crate::api::INTERNAL_ERROR_MESSAGE
             }));
@@ -57,10 +48,8 @@ pub(super) async fn serve_verified_xet_reconstruction(
     let stream = crate::util::GuardedFileStream::new(ReaderStream::new(file), guard);
     let body = actix_web::body::SizedStream::new(size, stream);
 
-    GLOBAL_METRICS.record_request(200);
     GLOBAL_METRICS.record_storage_operation();
     GLOBAL_METRICS.record_download_bytes(size);
-    GLOBAL_METRICS.record_latency(start);
 
     HttpResponse::Ok()
         .content_type("application/octet-stream")

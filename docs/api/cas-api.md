@@ -584,9 +584,9 @@ download_bytes_total 2147483648
 # TYPE errors_total counter
 errors_total 42
 
-# HELP active_connections Current number of active connections
-# TYPE active_connections gauge
-active_connections 15
+# HELP active_requests Current number of in-flight requests
+# TYPE active_requests gauge
+active_requests 15
 
 # HELP request_latency_us_total Total request latency in microseconds
 # TYPE request_latency_us_total counter
@@ -597,10 +597,16 @@ request_latency_us_total 5000000
 request_latency_count 1234
 ```
 
-**示例**：
+**示例**（`/metrics` 需要 internal 令牌）：
 ```bash
-curl "http://localhost:8081/metrics"
+curl -H "Authorization: Bearer ${INTERNAL_TOKEN}" "http://localhost:8081/metrics"
 ```
+
+**记录语义**：请求计数、状态桶、错误计数（5xx）与延迟由 HTTP 中间件统一记录；
+`/health` 与 `/ready` 不计入业务请求指标（但仍计入 `active_requests`）。
+Governor 429 限速拒绝、路由 404 与请求体超限 413 同样会被计数。
+`storage_operations_total`、`upload_bytes_total`、`download_bytes_total` 为业务维度，
+仅在相应存储操作发生时由 handler 记录。
 
 ---
 

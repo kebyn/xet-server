@@ -23,7 +23,6 @@ pub(super) async fn serve_raw_blob(
     oid: &str,
     storage: web::Data<Box<dyn StorageBackend>>,
     config: web::Data<ServerConfig>,
-    start: std::time::Instant,
 ) -> RawBlobResult {
     let object_key = format!("lfs/objects/{}", oid);
     let verify_integrity = config.storage.verify_download_integrity;
@@ -41,9 +40,6 @@ pub(super) async fn serve_raw_blob(
                         path.display(),
                         e
                     );
-                    GLOBAL_METRICS.record_request(500);
-                    GLOBAL_METRICS.record_error();
-                    GLOBAL_METRICS.record_latency(start);
                     return RawBlobResult::Error(HttpResponse::InternalServerError().json(
                         serde_json::json!({
                             "error": crate::api::INTERNAL_ERROR_MESSAGE
@@ -58,9 +54,6 @@ pub(super) async fn serve_raw_blob(
                 }
                 Err(e) => {
                     error!("Failed to get file metadata: {}", e);
-                    GLOBAL_METRICS.record_request(500);
-                    GLOBAL_METRICS.record_error();
-                    GLOBAL_METRICS.record_latency(start);
                     return RawBlobResult::Error(HttpResponse::InternalServerError().json(
                         serde_json::json!({
                             "error": crate::api::INTERNAL_ERROR_MESSAGE
@@ -70,9 +63,6 @@ pub(super) async fn serve_raw_blob(
             };
             if !metadata.is_file() {
                 error!("LFS storage path is not a file: {}", path.display());
-                GLOBAL_METRICS.record_request(500);
-                GLOBAL_METRICS.record_error();
-                GLOBAL_METRICS.record_latency(start);
                 return RawBlobResult::Error(HttpResponse::InternalServerError().json(
                     serde_json::json!({
                         "error": crate::api::INTERNAL_ERROR_MESSAGE
@@ -91,10 +81,8 @@ pub(super) async fn serve_raw_blob(
                     "Streaming LFS object {} ({} bytes) with integrity verification",
                     oid, file_size
                 );
-                GLOBAL_METRICS.record_request(200);
                 GLOBAL_METRICS.record_storage_operation();
                 GLOBAL_METRICS.record_download_bytes(file_size);
-                GLOBAL_METRICS.record_latency(start);
 
                 RawBlobResult::Served(
                     HttpResponse::Ok()
@@ -105,10 +93,8 @@ pub(super) async fn serve_raw_blob(
                 let body = actix_web::body::SizedStream::new(file_size, base_stream);
 
                 info!("Streaming LFS object {} ({} bytes)", oid, file_size);
-                GLOBAL_METRICS.record_request(200);
                 GLOBAL_METRICS.record_storage_operation();
                 GLOBAL_METRICS.record_download_bytes(file_size);
-                GLOBAL_METRICS.record_latency(start);
 
                 RawBlobResult::Served(
                     HttpResponse::Ok()
@@ -131,9 +117,6 @@ pub(super) async fn serve_raw_blob(
                 Err(StorageError::NotFound(_)) => return RawBlobResult::Missing,
                 Err(e) => {
                     error!("Failed to stream remote LFS object {}: {}", oid, e);
-                    GLOBAL_METRICS.record_request(500);
-                    GLOBAL_METRICS.record_error();
-                    GLOBAL_METRICS.record_latency(start);
                     return RawBlobResult::Error(HttpResponse::InternalServerError().json(
                         serde_json::json!({
                             "error": crate::api::INTERNAL_ERROR_MESSAGE
@@ -142,10 +125,8 @@ pub(super) async fn serve_raw_blob(
                 }
             };
 
-            GLOBAL_METRICS.record_request(200);
             GLOBAL_METRICS.record_storage_operation();
             GLOBAL_METRICS.record_download_bytes(file_size);
-            GLOBAL_METRICS.record_latency(start);
 
             if verify_integrity {
                 let stream = IntegrityVerifyingStream::new(base_stream, oid.to_string());
@@ -167,9 +148,6 @@ pub(super) async fn serve_raw_blob(
         Err(StorageError::NotFound(_)) => RawBlobResult::Missing,
         Err(e) => {
             error!("Failed to get path for {}: {}", oid, e);
-            GLOBAL_METRICS.record_request(500);
-            GLOBAL_METRICS.record_error();
-            GLOBAL_METRICS.record_latency(start);
             RawBlobResult::Error(HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": crate::api::INTERNAL_ERROR_MESSAGE
             })))
@@ -226,6 +204,8 @@ where
                             "Integrity check FAILED for {}: computed {} != expected {} ({} bytes streamed)",
                             self.expected_oid, computed_hash, self.expected_oid, self.bytes_hashed
                         );
+                        // Streamed integrity failure after a 200 was already
+                        // recorded — errors_total still counts it.
                         GLOBAL_METRICS.record_error();
                         return Poll::Ready(Some(Err(std::io::Error::new(
                             std::io::ErrorKind::InvalidData,
@@ -312,7 +292,6 @@ mod tests {
             &"a".repeat(64),
             web::Data::new(storage),
             web::Data::new(config),
-            std::time::Instant::now(),
         )
         .await;
 

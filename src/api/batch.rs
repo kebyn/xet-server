@@ -12,7 +12,6 @@ use tracing::info;
 use crate::api::auth::{AuthVerifier, extract_token_from_request};
 use crate::api::guard::{AuthNeed, require_auth};
 use crate::config::ServerConfig;
-use crate::metrics::GLOBAL_METRICS;
 
 #[derive(Debug, Deserialize)]
 pub struct BatchRequest {
@@ -77,8 +76,6 @@ pub async fn batch_operation(
     config: web::Data<ServerConfig>,
     req: actix_web::HttpRequest,
 ) -> HttpResponse {
-    let start = std::time::Instant::now();
-
     info!(
         "Batch operation request: {} ({} objects)",
         body.operation,
@@ -89,8 +86,6 @@ pub async fn batch_operation(
         "upload" => "write",
         "download" => "read",
         _ => {
-            GLOBAL_METRICS.record_request(400);
-            GLOBAL_METRICS.record_latency(start);
             return HttpResponse::BadRequest().json(serde_json::json!({
                 "message": format!("Unknown operation: {}", body.operation)
             }));
@@ -109,8 +104,6 @@ pub async fn batch_operation(
 
     // Bound logical cardinality — PayloadConfig bounds body bytes but not object count.
     if body.objects.len() > MAX_BATCH_SIZE {
-        GLOBAL_METRICS.record_request(400);
-        GLOBAL_METRICS.record_latency(start);
         return HttpResponse::BadRequest().json(serde_json::json!({
             "message": format!("Too many objects: {} exceeds limit of {}", body.objects.len(), MAX_BATCH_SIZE)
         }));
@@ -124,8 +117,6 @@ pub async fn batch_operation(
         .as_ref()
         .filter(|transfers| !transfers.is_empty() && !transfers.iter().any(|t| t == "basic"));
     if let Some(transfers) = unsupported_transfers {
-        GLOBAL_METRICS.record_request(400);
-        GLOBAL_METRICS.record_latency(start);
         return HttpResponse::BadRequest().json(serde_json::json!({
             "message": format!(
                 "Unsupported transfer protocol: {:?}. This server only supports 'basic'.",
@@ -138,7 +129,7 @@ pub async fn batch_operation(
     // Scope depends on the LFS operation; batch uses the Git-LFS {"message"} body shape.
     let claims = match require_auth(&req, &auth, AuthNeed::Scope(required_scope)) {
         Ok(c) => c,
-        Err(rej) => return rej.respond_message(start),
+        Err(rej) => return rej.respond_message(),
     };
     // require_auth verified a token is present; re-extract it for the proxy-signing
     // fallback path below (passes the caller's token through when CAS cannot sign proxies).
@@ -277,9 +268,6 @@ pub async fn batch_operation(
         transfer: "basic".to_string(),
         objects: response_objects,
     };
-
-    GLOBAL_METRICS.record_request(200);
-    GLOBAL_METRICS.record_latency(start);
 
     HttpResponse::Ok().json(response)
 }

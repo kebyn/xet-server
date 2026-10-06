@@ -26,8 +26,8 @@ pub struct Metrics {
     /// 错误计数
     pub errors_total: AtomicU64,
 
-    /// 活跃连接数
-    pub active_connections: AtomicU64,
+    /// 当前处理中的请求数（in-flight，非 TCP 连接数）
+    pub active_requests: AtomicU64,
 
     /// 请求延迟总和（微秒）
     pub request_latency_us: AtomicU64,
@@ -52,7 +52,7 @@ impl Metrics {
             upload_bytes: AtomicU64::new(0),
             download_bytes: AtomicU64::new(0),
             errors_total: AtomicU64::new(0),
-            active_connections: AtomicU64::new(0),
+            active_requests: AtomicU64::new(0),
             request_latency_us: AtomicU64::new(0),
             request_latency_count: AtomicU64::new(0),
         }
@@ -93,14 +93,14 @@ impl Metrics {
         self.errors_total.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// 增加活跃连接数
-    pub fn connection_opened(&self) {
-        self.active_connections.fetch_add(1, Ordering::Relaxed);
+    /// 增加处理中的请求数
+    pub fn request_started(&self) {
+        self.active_requests.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// 减少活跃连接数
-    pub fn connection_closed(&self) {
-        self.active_connections.fetch_sub(1, Ordering::Relaxed);
+    /// 减少处理中的请求数
+    pub fn request_completed(&self) {
+        self.active_requests.fetch_sub(1, Ordering::Relaxed);
     }
 
     /// 记录请求延迟
@@ -109,17 +109,6 @@ impl Metrics {
         let us = elapsed.as_micros() as u64;
         self.request_latency_us.fetch_add(us, Ordering::Relaxed);
         self.request_latency_count.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// 获取平均请求延迟（微秒）
-    pub fn average_latency_us(&self) -> f64 {
-        let total = self.request_latency_us.load(Ordering::Relaxed);
-        let count = self.request_latency_count.load(Ordering::Relaxed);
-        if count == 0 {
-            0.0
-        } else {
-            total as f64 / count as f64
-        }
     }
 
     /// 将所有指标导出为字符串格式（Prometheus 兼容）
@@ -178,12 +167,12 @@ impl Metrics {
             self.errors_total.load(Ordering::Relaxed)
         ));
 
-        // 活跃连接数
-        output.push_str("# HELP active_connections Current number of active connections\n");
-        output.push_str("# TYPE active_connections gauge\n");
+        // 处理中的请求数
+        output.push_str("# HELP active_requests Current number of in-flight requests\n");
+        output.push_str("# TYPE active_requests gauge\n");
         output.push_str(&format!(
-            "active_connections {}\n",
-            self.active_connections.load(Ordering::Relaxed)
+            "active_requests {}\n",
+            self.active_requests.load(Ordering::Relaxed)
         ));
 
         // 请求延迟（总计和计数，用于 Prometheus 计算平均值）
@@ -286,15 +275,15 @@ mod tests {
     }
 
     #[test]
-    fn test_connection_tracking() {
+    fn test_in_flight_request_tracking() {
         let metrics = Metrics::new();
 
-        metrics.connection_opened();
-        metrics.connection_opened();
-        assert_eq!(metrics.active_connections.load(Ordering::Relaxed), 2);
+        metrics.request_started();
+        metrics.request_started();
+        assert_eq!(metrics.active_requests.load(Ordering::Relaxed), 2);
 
-        metrics.connection_closed();
-        assert_eq!(metrics.active_connections.load(Ordering::Relaxed), 1);
+        metrics.request_completed();
+        assert_eq!(metrics.active_requests.load(Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -305,10 +294,12 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(10));
         metrics.record_latency(start);
 
-        let avg = metrics.average_latency_us();
+        let total = metrics.request_latency_us.load(Ordering::Relaxed);
+        let count = metrics.request_latency_count.load(Ordering::Relaxed);
+        assert_eq!(count, 1);
         assert!(
-            avg >= 10000.0,
-            "Average latency should be at least 10ms (10000us)"
+            total >= 10_000,
+            "recorded latency should be at least 10ms (10000us)"
         );
     }
 
