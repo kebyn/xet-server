@@ -86,7 +86,7 @@ Xet Server uses a **two-process architecture** made up of two independent servic
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/xet-server.git
+git clone https://github.com/kebyn/xet-server.git
 cd xet-server
 
 # Build (release mode; builds both workspace binaries)
@@ -496,6 +496,5 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 📞 Support
 
-- 📧 Email: support@example.com
-- 💬 Issues: [GitHub Issues](https://github.com/your-org/xet-server/issues)
+- 💬 Issues: [GitHub Issues](https://github.com/kebyn/xet-server/issues)
 - 📚 Docs: [full documentation](docs/)

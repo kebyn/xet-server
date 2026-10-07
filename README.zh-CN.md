@@ -86,7 +86,7 @@ Xet Server 采用**双进程架构**，由两个独立的服务组成：
 
 ```bash
 # 克隆仓库
-git clone https://github.com/your-org/xet-server.git
+git clone https://github.com/kebyn/xet-server.git
 cd xet-server
 
 # 编译（release 模式；同时构建两个二进制）
@@ -443,6 +443,5 @@ cargo fmt
 
 ## 📞 支持
 
-- 📧 Email: support@example.com
-- 💬 Issues: [GitHub Issues](https://github.com/your-org/xet-server/issues)
+- 💬 Issues: [GitHub Issues](https://github.com/kebyn/xet-server/issues)
 - 📚 Docs: [完整文档](docs/)
