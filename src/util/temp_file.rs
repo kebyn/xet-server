@@ -28,11 +28,10 @@ impl TempFile {
     /// Creates the directory if it doesn't exist.
     pub async fn create(temp_dir: &Path) -> StorageResult<Self> {
         fs::create_dir_all(temp_dir).await.map_err(|e| {
-            StorageError::Internal(format!(
-                "Failed to create temp dir {}: {}",
-                temp_dir.display(),
-                e
-            ))
+            StorageError::internal_with_source(
+                format!("Failed to create temp dir {}", temp_dir.display()),
+                e,
+            )
         })?;
 
         // Use UUID v4 for unpredictable temp file names.
@@ -42,11 +41,10 @@ impl TempFile {
 
         let path = temp_dir.join(format!("upload-{}.tmp", unique_id));
         let file = fs::File::create(&path).await.map_err(|e| {
-            StorageError::Internal(format!(
-                "Failed to create temp file {}: {}",
-                path.display(),
-                e
-            ))
+            StorageError::internal_with_source(
+                format!("Failed to create temp file {}", path.display()),
+                e,
+            )
         })?;
 
         Ok(Self {
@@ -62,26 +60,28 @@ impl TempFile {
 
     /// Write data to the temp file.
     pub async fn write_all(&mut self, data: &[u8]) -> StorageResult<()> {
-        let file = self.file.as_mut().ok_or_else(|| {
-            StorageError::Internal("TempFile already closed for storage".to_string())
-        })?;
+        let file = self
+            .file
+            .as_mut()
+            .ok_or_else(|| StorageError::internal("TempFile already closed for storage"))?;
         file.write_all(data)
             .await
-            .map_err(|e| StorageError::Internal(format!("Failed to write to temp file: {}", e)))
+            .map_err(|e| StorageError::internal_with_source("Failed to write to temp file", e))
     }
 
     /// Flush and fsync the temp file to disk.
     /// Must be called before `store()` to ensure data durability.
     pub async fn sync_all(&mut self) -> StorageResult<()> {
-        let file = self.file.as_mut().ok_or_else(|| {
-            StorageError::Internal("TempFile already closed for storage".to_string())
-        })?;
+        let file = self
+            .file
+            .as_mut()
+            .ok_or_else(|| StorageError::internal("TempFile already closed for storage"))?;
         file.flush()
             .await
-            .map_err(|e| StorageError::Internal(format!("Failed to flush temp file: {}", e)))?;
+            .map_err(|e| StorageError::internal_with_source("Failed to flush temp file", e))?;
         file.sync_all()
             .await
-            .map_err(|e| StorageError::Internal(format!("Failed to fsync temp file: {}", e)))
+            .map_err(|e| StorageError::internal_with_source("Failed to fsync temp file", e))
     }
 
     /// Close and store the temporary file while retaining cleanup ownership.
@@ -143,7 +143,9 @@ mod tests {
             tokio::fs::copy(path, &self.destination)
                 .await
                 .map(|_| ())
-                .map_err(|error| StorageError::Internal(error.to_string()))
+                .map_err(|error| {
+                    StorageError::internal_with_source("failed to copy temp file", error)
+                })
         }
 
         async fn get(&self, _key: &str) -> StorageResult<Bytes> {

@@ -754,8 +754,12 @@ async fn head_forbidden_surfaces_as_internal_not_not_found() {
 
     let error = storage.exists("obj").await.unwrap_err();
     assert!(
-        matches!(error, StorageError::Internal(_)),
+        matches!(error, StorageError::Internal { .. }),
         "unexpected error: {error}"
+    );
+    assert!(
+        std::error::Error::source(&error).is_some(),
+        "S3 SDK error source should be preserved"
     );
 }
 

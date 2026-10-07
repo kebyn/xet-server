@@ -64,7 +64,7 @@ impl FlakyStorage {
             self.remaining.fetch_sub(1, Ordering::SeqCst);
             return Some(match self.inject {
                 InjectedFailure::Transient => {
-                    StorageError::Internal(format!("injected transient failure for {key}"))
+                    StorageError::internal(format!("injected transient failure for {key}"))
                 }
                 InjectedFailure::Missing => StorageError::NotFound(key.to_string()),
             });

@@ -17,11 +17,40 @@ pub enum StorageError {
     #[error("Object not found: {0}")]
     NotFound(String),
 
-    #[error("Storage error: {0}")]
-    Internal(String),
+    #[error("Storage error: {message}")]
+    Internal {
+        message: String,
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
+    },
 
     #[error("Invalid argument: {0}")]
     InvalidArgument(String),
+}
+
+impl StorageError {
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self::Internal {
+            message: message.into(),
+            source: None,
+        }
+    }
+
+    pub fn internal_with_source<E>(message: impl Into<String>, source: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        let message = message.into();
+        // The source's Display text is embedded in `message` so that `StorageError`'s
+        // own Display (via thiserror) is self-contained. It is also stored as the
+        // `#[source]` field so that chain-aware reporters can walk it. This means
+        // tools like `anyhow`'s `{:#}` will show the cause twice. That duplication
+        // is intentional: simpler Display output is worth it for this codebase.
+        Self::Internal {
+            message: format!("{message}: {source}"),
+            source: Some(Box::new(source)),
+        }
+    }
 }
 
 pub type StorageResult<T> = Result<T, StorageError>;
@@ -56,7 +85,7 @@ pub trait StorageBackend: Send + Sync {
             key
         );
         let data = tokio::fs::read(path).await.map_err(|e| {
-            StorageError::Internal(format!("Failed to read file {}: {}", path.display(), e))
+            StorageError::internal_with_source(format!("Failed to read file {}", path.display()), e)
         })?;
         self.put(key, Bytes::from(data)).await
     }
@@ -117,7 +146,7 @@ pub trait StorageBackend: Send + Sync {
         );
         let data = self.get(key).await?;
         tokio::fs::write(dest, &data).await.map_err(|e| {
-            StorageError::Internal(format!("Failed to write to {}: {}", dest.display(), e))
+            StorageError::internal_with_source(format!("Failed to write to {}", dest.display()), e)
         })?;
         Ok(())
     }
@@ -213,7 +242,33 @@ mod tests {
     use super::{StorageBackend, StorageError};
     use crate::storage::local::LocalStorage;
     use bytes::Bytes;
+    use std::error::Error;
     use tempfile::tempdir;
+
+    #[test]
+    fn internal_error_has_no_source() {
+        let error = StorageError::internal("quota exceeded");
+        assert_eq!(error.to_string(), "Storage error: quota exceeded");
+        assert!(error.source().is_none(), "internal() should have no source");
+    }
+
+    #[test]
+    fn internal_error_preserves_source_chain() {
+        let source = std::io::Error::other("disk failure");
+        let error = StorageError::internal_with_source("write failed", source);
+
+        assert_eq!(
+            error.to_string(),
+            "Storage error: write failed: disk failure"
+        );
+        assert_eq!(
+            error
+                .source()
+                .expect("source should be preserved")
+                .to_string(),
+            "disk failure"
+        );
+    }
 
     #[tokio::test]
     async fn download_to_path_with_retries_recovers_after_transient_failure() {

@@ -59,26 +59,26 @@ fn validate_next_continuation_token(
     is_truncated: bool,
 ) -> StorageResult<Option<String>> {
     if !is_truncated && next.is_some() {
-        return Err(StorageError::Internal(
-            "S3 listing returned a continuation token for a complete page".to_string(),
+        return Err(StorageError::internal(
+            "S3 listing returned a continuation token for a complete page",
         ));
     }
     let Some(token) = next else {
         if is_truncated {
-            return Err(StorageError::Internal(
-                "S3 listing was truncated without a continuation token".to_string(),
+            return Err(StorageError::internal(
+                "S3 listing was truncated without a continuation token",
             ));
         }
         return Ok(None);
     };
     if token.is_empty() {
-        return Err(StorageError::Internal(
-            "S3 listing returned an empty continuation token".to_string(),
+        return Err(StorageError::internal(
+            "S3 listing returned an empty continuation token",
         ));
     }
     if !seen.insert(token.to_string()) {
-        return Err(StorageError::Internal(
-            "S3 listing repeated a continuation token".to_string(),
+        return Err(StorageError::internal(
+            "S3 listing repeated a continuation token",
         ));
     }
     Ok(Some(token.to_string()))
@@ -246,16 +246,14 @@ impl S3Storage {
 
         // Gracefully handle missing credentials instead of panicking
         let access_key_id = std::env::var("AWS_ACCESS_KEY_ID").map_err(|_| {
-            StorageError::Internal(
-                "AWS_ACCESS_KEY_ID environment variable must be set for S3 storage backend"
-                    .to_string(),
+            StorageError::internal(
+                "AWS_ACCESS_KEY_ID environment variable must be set for S3 storage backend",
             )
         })?;
 
         let secret_access_key = std::env::var("AWS_SECRET_ACCESS_KEY").map_err(|_| {
-            StorageError::Internal(
-                "AWS_SECRET_ACCESS_KEY environment variable must be set for S3 storage backend"
-                    .to_string(),
+            StorageError::internal(
+                "AWS_SECRET_ACCESS_KEY environment variable must be set for S3 storage backend",
             )
         })?;
 
@@ -310,15 +308,13 @@ impl S3Storage {
             .send()
             .await
             .map_err(|e| {
-                StorageError::Internal(format!("S3 create_multipart_upload failed: {}", e))
+                StorageError::internal_with_source("S3 create_multipart_upload failed", e)
             })?;
 
         let upload_id = create_output
             .upload_id()
             .ok_or_else(|| {
-                StorageError::Internal(
-                    "S3 create_multipart_upload returned no upload_id".to_string(),
-                )
+                StorageError::internal("S3 create_multipart_upload returned no upload_id")
             })?
             .to_string();
 
@@ -424,7 +420,7 @@ impl S3Storage {
         part_size: u64,
     ) -> StorageResult<Vec<CompletedPart>> {
         let mut file = File::open(path).await.map_err(|e| {
-            StorageError::Internal(format!("Failed to open file for multipart upload: {}", e))
+            StorageError::internal_with_source("Failed to open file for multipart upload", e)
         })?;
 
         let mut parts = Vec::new();
@@ -439,7 +435,7 @@ impl S3Storage {
                 )));
             }
             let remaining = file_size.checked_sub(offset).ok_or_else(|| {
-                StorageError::Internal("Multipart upload offset exceeded file size".to_string())
+                StorageError::internal("Multipart upload offset exceeded file size")
             })?;
             let to_read = usize::try_from(remaining.min(part_size)).map_err(|_| {
                 StorageError::InvalidArgument(
@@ -455,21 +451,17 @@ impl S3Storage {
             let mut read_total = 0;
             while read_total < to_read {
                 let n = file.read(&mut part_buf[read_total..]).await.map_err(|e| {
-                    StorageError::Internal(format!("Failed to read upload file: {}", e))
+                    StorageError::internal_with_source("Failed to read upload file", e)
                 })?;
                 if n == 0 {
                     let read_offset = offset
                         .checked_add(u64::try_from(read_total).map_err(|_| {
-                            StorageError::Internal(
-                                "Multipart read offset does not fit in u64".to_string(),
-                            )
+                            StorageError::internal("Multipart read offset does not fit in u64")
                         })?)
                         .ok_or_else(|| {
-                            StorageError::Internal(
-                                "Multipart read offset overflowed u64".to_string(),
-                            )
+                            StorageError::internal("Multipart read offset overflowed u64")
                         })?;
-                    return Err(StorageError::Internal(format!(
+                    return Err(StorageError::internal(format!(
                         "Unexpected EOF at offset {} (expected {} more bytes)",
                         read_offset,
                         to_read - read_total
@@ -491,7 +483,10 @@ impl S3Storage {
                 .send()
                 .await
                 .map_err(|e| {
-                    StorageError::Internal(format!("S3 upload_part {} failed: {}", part_number, e))
+                    StorageError::internal_with_source(
+                        format!("S3 upload_part {} failed", part_number),
+                        e,
+                    )
                 })?;
 
             let completed_part = CompletedPart::builder()
@@ -500,22 +495,18 @@ impl S3Storage {
                 .build();
 
             parts.push(completed_part);
-            part_number = part_number.checked_add(1).ok_or_else(|| {
-                StorageError::Internal("Multipart part number overflowed i32".to_string())
-            })?;
+            part_number = part_number
+                .checked_add(1)
+                .ok_or_else(|| StorageError::internal("Multipart part number overflowed i32"))?;
             offset = offset
                 .checked_add(u64::try_from(to_read).map_err(|_| {
-                    StorageError::Internal("Multipart read size does not fit in u64".to_string())
+                    StorageError::internal("Multipart read size does not fit in u64")
                 })?)
-                .ok_or_else(|| {
-                    StorageError::Internal("Multipart upload offset overflowed u64".to_string())
-                })?;
+                .ok_or_else(|| StorageError::internal("Multipart upload offset overflowed u64"))?;
         }
 
         if parts.is_empty() {
-            return Err(StorageError::Internal(
-                "Multipart upload produced no parts".to_string(),
-            ));
+            return Err(StorageError::internal("Multipart upload produced no parts"));
         }
 
         Ok(parts)
@@ -530,9 +521,8 @@ fn multipart_part_size(file_size: u64) -> StorageResult<u64> {
         )));
     }
 
-    let part_limit = u64::try_from(MAX_MULTIPART_PARTS).map_err(|_| {
-        StorageError::Internal("Multipart part limit does not fit in u64".to_string())
-    })?;
+    let part_limit = u64::try_from(MAX_MULTIPART_PARTS)
+        .map_err(|_| StorageError::internal("Multipart part limit does not fit in u64"))?;
     let required_size = file_size / part_limit + u64::from(!file_size.is_multiple_of(part_limit));
     Ok(PART_SIZE.max(required_size))
 }
@@ -612,7 +602,7 @@ impl StorageBackend for S3Storage {
             .body(data.into())
             .send()
             .await
-            .map_err(|e| StorageError::Internal(format!("S3 put failed: {}", e)))?;
+            .map_err(|e| StorageError::internal_with_source("S3 put failed", e))?;
 
         Ok(())
     }
@@ -625,14 +615,14 @@ impl StorageBackend for S3Storage {
     async fn put_from_path(&self, key: &str, path: &Path) -> StorageResult<()> {
         let file_size = tokio::fs::metadata(path)
             .await
-            .map_err(|e| StorageError::Internal(format!("Failed to read file metadata: {}", e)))?
+            .map_err(|e| StorageError::internal_with_source("Failed to read file metadata", e))?
             .len();
 
         if file_size < MULTIPART_THRESHOLD {
             // Small file: simple put_object
             let data = tokio::fs::read(path)
                 .await
-                .map_err(|e| StorageError::Internal(format!("Failed to read file: {}", e)))?;
+                .map_err(|e| StorageError::internal_with_source("Failed to read file", e))?;
             return self.put(key, Bytes::from(data)).await;
         }
 
@@ -652,7 +642,7 @@ impl StorageBackend for S3Storage {
                 if e.code() == Some("NoSuchKey") || e.code() == Some("NotFound") {
                     StorageError::NotFound(key.to_string())
                 } else {
-                    StorageError::Internal(format!("S3 get failed: {}", e))
+                    StorageError::internal_with_source("S3 get failed", e)
                 }
             })?;
 
@@ -660,7 +650,7 @@ impl StorageBackend for S3Storage {
             .body
             .collect()
             .await
-            .map_err(|e| StorageError::Internal(format!("Failed to read body: {}", e)))?
+            .map_err(|e| StorageError::internal_with_source("Failed to read body", e))?
             .into_bytes();
 
         Ok(data)
@@ -687,7 +677,7 @@ impl StorageBackend for S3Storage {
                 if e.code() == Some("NoSuchKey") || e.code() == Some("NotFound") {
                     StorageError::NotFound(key.to_string())
                 } else {
-                    StorageError::Internal(format!("S3 get failed: {}", e))
+                    StorageError::internal_with_source("S3 get failed", e)
                 }
             })?;
 
@@ -696,11 +686,10 @@ impl StorageBackend for S3Storage {
         // collisions between concurrent downloads to the same destination.
         if let Some(parent) = dest.parent() {
             tokio::fs::create_dir_all(parent).await.map_err(|error| {
-                StorageError::Internal(format!(
-                    "Failed to create download directory {}: {}",
-                    parent.display(),
-                    error
-                ))
+                StorageError::internal_with_source(
+                    format!("Failed to create download directory {}", parent.display()),
+                    error,
+                )
             })?;
         }
 
@@ -713,11 +702,10 @@ impl StorageBackend for S3Storage {
         });
 
         let mut file = File::create(temp_dest.path()).await.map_err(|e| {
-            StorageError::Internal(format!(
-                "Failed to create file {}: {}",
-                temp_dest.path().display(),
-                e
-            ))
+            StorageError::internal_with_source(
+                format!("Failed to create file {}", temp_dest.path().display()),
+                e,
+            )
         })?;
 
         // Stream the body directly to file without collecting into memory
@@ -725,24 +713,22 @@ impl StorageBackend for S3Storage {
         let download_result: Result<(), StorageError> = async {
             while let Some(chunk) = body.next().await {
                 let chunk = chunk.map_err(|e| {
-                    StorageError::Internal(format!("Failed to read S3 stream: {}", e))
+                    StorageError::internal_with_source("Failed to read S3 stream", e)
                 })?;
                 file.write_all(&chunk).await.map_err(|e| {
-                    StorageError::Internal(format!(
-                        "Failed to write to {}: {}",
-                        temp_dest.path().display(),
-                        e
-                    ))
+                    StorageError::internal_with_source(
+                        format!("Failed to write to {}", temp_dest.path().display()),
+                        e,
+                    )
                 })?;
             }
 
             // Flush to ensure all data is written
             file.flush().await.map_err(|e| {
-                StorageError::Internal(format!(
-                    "Failed to flush {}: {}",
-                    temp_dest.path().display(),
-                    e
-                ))
+                StorageError::internal_with_source(
+                    format!("Failed to flush {}", temp_dest.path().display()),
+                    e,
+                )
             })?;
 
             Ok(())
@@ -753,11 +739,10 @@ impl StorageBackend for S3Storage {
 
         // Atomic rename from temp to final destination
         if let Err(error) = tokio::fs::rename(temp_dest.path(), dest).await {
-            return Err(StorageError::Internal(format!(
-                "Failed to rename temp file to {}: {}",
-                dest.display(),
-                error
-            )));
+            return Err(StorageError::internal_with_source(
+                format!("Failed to rename temp file to {}", dest.display()),
+                error,
+            ));
         }
 
         Ok(())
@@ -774,7 +759,7 @@ impl StorageBackend for S3Storage {
         {
             Ok(_) => Ok(true),
             Err(e) if e.code() == Some("NotFound") || e.code() == Some("NoSuchKey") => Ok(false),
-            Err(e) => Err(StorageError::Internal(format!("S3 head failed: {}", e))),
+            Err(e) => Err(StorageError::internal_with_source("S3 head failed", e)),
         }
     }
 
@@ -785,7 +770,7 @@ impl StorageBackend for S3Storage {
             .key(key)
             .send()
             .await
-            .map_err(|e| StorageError::Internal(format!("S3 delete failed: {}", e)))?;
+            .map_err(|e| StorageError::internal_with_source("S3 delete failed", e))?;
 
         Ok(())
     }
@@ -834,13 +819,13 @@ impl StorageBackend for S3Storage {
                     request = request.continuation_token(token);
                 }
                 let response = request.send().await.map_err(|error| {
-                    StorageError::Internal(format!("S3 list_objects_v2 failed: {}", error))
+                    StorageError::internal_with_source("S3 list_objects_v2 failed", error)
                 })?;
                 let page_limit = usize::try_from(LIST_PAGE_SIZE).map_err(|_| {
-                    StorageError::Internal("S3 list page size does not fit in usize".to_string())
+                    StorageError::internal("S3 list page size does not fit in usize")
                 })?;
                 if response.contents().len() > page_limit {
-                    return Err(StorageError::Internal(format!(
+                    return Err(StorageError::internal(format!(
                         "S3 listing returned {} objects, exceeding requested page size {}",
                         response.contents().len(),
                         page_limit
@@ -876,15 +861,15 @@ impl StorageBackend for S3Storage {
                 if e.code() == Some("NotFound") || e.code() == Some("NoSuchKey") {
                     StorageError::NotFound(key.to_string())
                 } else {
-                    StorageError::Internal(format!("S3 head_object failed: {}", e))
+                    StorageError::internal_with_source("S3 head_object failed", e)
                 }
             })?;
 
-        let content_length = result.content_length().ok_or_else(|| {
-            StorageError::Internal("S3 HEAD response omitted Content-Length".to_string())
-        })?;
+        let content_length = result
+            .content_length()
+            .ok_or_else(|| StorageError::internal("S3 HEAD response omitted Content-Length"))?;
         u64::try_from(content_length).map_err(|_| {
-            StorageError::Internal(format!(
+            StorageError::internal(format!(
                 "S3 HEAD returned a negative Content-Length: {}",
                 content_length
             ))

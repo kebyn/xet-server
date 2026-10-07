@@ -246,12 +246,12 @@ mod tests {
     #[async_trait]
     impl StorageBackend for StreamingOnlyStorage {
         async fn put(&self, _key: &str, _data: Bytes) -> StorageResult<()> {
-            Err(StorageError::Internal("unexpected put".to_string()))
+            Err(StorageError::internal("unexpected put"))
         }
 
         async fn get(&self, _key: &str) -> StorageResult<Bytes> {
-            Err(StorageError::Internal(
-                "unbounded get must not be used for downloads".to_string(),
+            Err(StorageError::internal(
+                "unbounded get must not be used for downloads",
             ))
         }
 
@@ -269,9 +269,9 @@ mod tests {
 
         async fn download_to_path(&self, _key: &str, dest: &Path) -> StorageResult<()> {
             self.download_called.store(true, Ordering::SeqCst);
-            tokio::fs::write(dest, &self.data)
-                .await
-                .map_err(|error| StorageError::Internal(error.to_string()))
+            tokio::fs::write(dest, &self.data).await.map_err(|error| {
+                StorageError::internal_with_source("failed to write LFS download", error)
+            })
         }
     }
 

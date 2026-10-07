@@ -272,7 +272,9 @@ fn cached_xorb_guard<'a>(
 fn map_storage_error(key: &str, error: StorageError) -> ReconstructionError {
     match error {
         StorageError::NotFound(_) => ReconstructionError::Stale(format!("missing {}", key)),
-        StorageError::Internal(e) => ReconstructionError::Storage(format!("{}: {}", key, e)),
+        StorageError::Internal { message, .. } => {
+            ReconstructionError::Storage(format!("{}: {}", key, message))
+        }
         StorageError::InvalidArgument(e) => ReconstructionError::Storage(format!("{}: {}", key, e)),
     }
 }

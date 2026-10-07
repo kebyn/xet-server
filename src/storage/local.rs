@@ -14,20 +14,24 @@ use crate::util::TempPathGuard;
 async fn copy_then_rename(source: &Path, dest: &Path) -> StorageResult<()> {
     let temp_dest = TempPathGuard::new(unique_temp_path(dest));
     fs::copy(source, temp_dest.path()).await.map_err(|e| {
-        StorageError::Internal(format!(
-            "Failed to copy {} → {}: {}",
-            source.display(),
-            temp_dest.path().display(),
-            e
-        ))
+        StorageError::internal_with_source(
+            format!(
+                "Failed to copy {} → {}",
+                source.display(),
+                temp_dest.path().display()
+            ),
+            e,
+        )
     })?;
     fs::rename(temp_dest.path(), dest).await.map_err(|e| {
-        StorageError::Internal(format!(
-            "Failed to rename {} → {}: {}",
-            temp_dest.path().display(),
-            dest.display(),
-            e
-        ))
+        StorageError::internal_with_source(
+            format!(
+                "Failed to rename {} → {}",
+                temp_dest.path().display(),
+                dest.display()
+            ),
+            e,
+        )
     })?;
     Ok(())
 }
@@ -60,11 +64,13 @@ async fn reject_symlink_components(base_path: &Path, path: &Path) -> StorageResu
             ));
         }
         Err(error) => {
-            return Err(StorageError::Internal(format!(
-                "Failed to inspect local storage root {}: {}",
-                base_path.display(),
-                error
-            )));
+            return Err(StorageError::internal_with_source(
+                format!(
+                    "Failed to inspect local storage root {}",
+                    base_path.display()
+                ),
+                error,
+            ));
         }
     }
 
@@ -85,11 +91,10 @@ async fn reject_symlink_components(base_path: &Path, path: &Path) -> StorageResu
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(error) => {
-                return Err(StorageError::Internal(format!(
-                    "Failed to inspect local storage path {}: {}",
-                    current.display(),
-                    error
-                )));
+                return Err(StorageError::internal_with_source(
+                    format!("Failed to inspect local storage path {}", current.display()),
+                    error,
+                ));
             }
         }
     }
@@ -102,11 +107,10 @@ async fn canonicalize_confined(base_path: &Path, path: &Path) -> StorageResult<P
         if error.kind() == std::io::ErrorKind::NotFound {
             StorageError::NotFound(path.to_string_lossy().into_owned())
         } else {
-            StorageError::Internal(format!(
-                "Failed to resolve local storage path {}: {}",
-                path.display(),
-                error
-            ))
+            StorageError::internal_with_source(
+                format!("Failed to resolve local storage path {}", path.display()),
+                error,
+            )
         }
     })?;
     ensure_resolved_within_base(base_path, resolved)
@@ -125,18 +129,16 @@ impl LocalStorage {
             ));
         }
         std::fs::create_dir_all(&path).map_err(|error| {
-            StorageError::Internal(format!(
-                "Failed to create local storage root {}: {}",
-                path.display(),
-                error
-            ))
+            StorageError::internal_with_source(
+                format!("Failed to create local storage root {}", path.display()),
+                error,
+            )
         })?;
         let base_path = std::fs::canonicalize(&path).map_err(|error| {
-            StorageError::Internal(format!(
-                "Failed to resolve local storage root {}: {}",
-                path.display(),
-                error
-            ))
+            StorageError::internal_with_source(
+                format!("Failed to resolve local storage root {}", path.display()),
+                error,
+            )
         })?;
         Ok(Self { base_path })
     }
@@ -196,7 +198,7 @@ impl LocalStorage {
         reject_symlink_components(&self.base_path, parent).await?;
         fs::create_dir_all(parent)
             .await
-            .map_err(|error| StorageError::Internal(format!("Failed to create dirs: {error}")))?;
+            .map_err(|error| StorageError::internal_with_source("Failed to create dirs", error))?;
         canonicalize_confined(&self.base_path, parent).await?;
         Ok(())
     }
@@ -218,12 +220,12 @@ impl StorageBackend for LocalStorage {
         // Write to temp file
         fs::write(temp_path.path(), &data)
             .await
-            .map_err(|e| StorageError::Internal(format!("Failed to write temp file: {}", e)))?;
+            .map_err(|e| StorageError::internal_with_source("Failed to write temp file", e))?;
 
         // Atomic rename
-        fs::rename(temp_path.path(), &path).await.map_err(|e| {
-            StorageError::Internal(format!("Failed to rename temp to final: {}", e))
-        })?;
+        fs::rename(temp_path.path(), &path)
+            .await
+            .map_err(|e| StorageError::internal_with_source("Failed to rename temp to final", e))?;
 
         Ok(())
     }
@@ -266,7 +268,7 @@ impl StorageBackend for LocalStorage {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 Err(StorageError::NotFound(key.to_string()))
             }
-            Err(e) => Err(StorageError::Internal(format!("Failed to read: {}", e))),
+            Err(e) => Err(StorageError::internal_with_source("Failed to read", e)),
         }
     }
 
@@ -303,13 +305,13 @@ impl StorageBackend for LocalStorage {
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent)
                 .await
-                .map_err(|e| StorageError::Internal(format!("Failed to create dirs: {}", e)))?;
+                .map_err(|e| StorageError::internal_with_source("Failed to create dirs", e))?;
         }
 
         match fs::metadata(&source).await {
             Ok(meta) if meta.is_file() => {}
             Ok(_) => {
-                return Err(StorageError::Internal(format!(
+                return Err(StorageError::internal(format!(
                     "Object path is not a file: {}",
                     source.display()
                 )));
@@ -318,11 +320,10 @@ impl StorageBackend for LocalStorage {
                 return Err(StorageError::NotFound(key.to_string()));
             }
             Err(e) => {
-                return Err(StorageError::Internal(format!(
-                    "Failed to stat object {}: {}",
-                    source.display(),
-                    e
-                )));
+                return Err(StorageError::internal_with_source(
+                    format!("Failed to stat object {}", source.display()),
+                    e,
+                ));
             }
         }
 
@@ -351,7 +352,7 @@ impl StorageBackend for LocalStorage {
         match fs::remove_file(&path).await {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(StorageError::Internal(format!("Failed to delete: {}", e))),
+            Err(e) => Err(StorageError::internal_with_source("Failed to delete", e)),
         }
     }
 
@@ -391,11 +392,10 @@ impl StorageBackend for LocalStorage {
                     Ok(directory) => state.directories.push(directory),
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
                     Err(error) => {
-                        return Err(StorageError::Internal(format!(
-                            "Failed to read dir {}: {}",
-                            root.display(),
-                            error
-                        )));
+                        return Err(StorageError::internal_with_source(
+                            format!("Failed to read dir {}", root.display()),
+                            error,
+                        ));
                     }
                 }
             }
@@ -405,7 +405,7 @@ impl StorageBackend for LocalStorage {
                     return Ok(None);
                 };
                 let entry = directory.next_entry().await.map_err(|error| {
-                    StorageError::Internal(format!("Failed to read dir entry: {}", error))
+                    StorageError::internal_with_source("Failed to read dir entry", error)
                 })?;
                 let Some(entry) = entry else {
                     state.directories.pop();
@@ -414,7 +414,7 @@ impl StorageBackend for LocalStorage {
 
                 let path = entry.path();
                 let file_type = entry.file_type().await.map_err(|error| {
-                    StorageError::Internal(format!("Failed to get file type: {}", error))
+                    StorageError::internal_with_source("Failed to get file type", error)
                 })?;
                 if file_type.is_dir() {
                     let path = match canonicalize_confined(&state.base_path, &path).await {
@@ -426,11 +426,10 @@ impl StorageBackend for LocalStorage {
                         Ok(directory) => state.directories.push(directory),
                         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                         Err(error) => {
-                            return Err(StorageError::Internal(format!(
-                                "Failed to read dir {}: {}",
-                                path.display(),
-                                error
-                            )));
+                            return Err(StorageError::internal_with_source(
+                                format!("Failed to read dir {}", path.display()),
+                                error,
+                            ));
                         }
                     }
                     continue;
@@ -442,10 +441,7 @@ impl StorageBackend for LocalStorage {
                 let key = path
                     .strip_prefix(&state.base_path)
                     .map_err(|error| {
-                        StorageError::Internal(format!(
-                            "Failed to compute relative path: {}",
-                            error
-                        ))
+                        StorageError::internal_with_source("Failed to compute relative path", error)
                     })?
                     .to_string_lossy()
                     .to_string();
@@ -472,10 +468,10 @@ impl StorageBackend for LocalStorage {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 Err(StorageError::NotFound(key.to_string()))
             }
-            Err(e) => Err(StorageError::Internal(format!(
-                "Failed to get metadata: {}",
-                e
-            ))),
+            Err(e) => Err(StorageError::internal_with_source(
+                "Failed to get metadata",
+                e,
+            )),
         }
     }
 }

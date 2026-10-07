@@ -420,8 +420,8 @@ mod tests {
         }
 
         async fn list_objects(&self, _prefix: &str) -> StorageResult<Vec<String>> {
-            Err(StorageError::Internal(
-                "index rebuild must not collect the complete key list".to_string(),
+            Err(StorageError::internal(
+                "index rebuild must not collect the complete key list",
             ))
         }
 

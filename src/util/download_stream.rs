@@ -20,42 +20,48 @@ pub async fn download_to_temp_stream(
     file_prefix: &str,
 ) -> StorageResult<(u64, GuardedFileStream<ReaderStream<tokio::fs::File>>)> {
     tokio::fs::create_dir_all(temp_dir).await.map_err(|error| {
-        StorageError::Internal(format!(
-            "Failed to create download temp directory {}: {}",
-            temp_dir.display(),
-            error
-        ))
+        StorageError::internal_with_source(
+            format!(
+                "Failed to create download temp directory {}",
+                temp_dir.display()
+            ),
+            error,
+        )
     })?;
 
     let expected_size = storage.get_size(key).await?;
-    check_disk_space(temp_dir, expected_size).map_err(StorageError::Internal)?;
+    check_disk_space(temp_dir, expected_size).map_err(StorageError::internal)?;
 
     let guard =
         TempPathGuard::new(temp_dir.join(format!("{}-{}.tmp", file_prefix, uuid::Uuid::new_v4())));
     storage.download_to_path(key, guard.path()).await?;
 
     let file = tokio::fs::File::open(guard.path()).await.map_err(|error| {
-        StorageError::Internal(format!(
-            "Failed to open downloaded object {}: {}",
-            guard.path().display(),
-            error
-        ))
+        StorageError::internal_with_source(
+            format!(
+                "Failed to open downloaded object {}",
+                guard.path().display()
+            ),
+            error,
+        )
     })?;
     let metadata = file.metadata().await.map_err(|error| {
-        StorageError::Internal(format!(
-            "Failed to stat downloaded object {}: {}",
-            guard.path().display(),
-            error
-        ))
+        StorageError::internal_with_source(
+            format!(
+                "Failed to stat downloaded object {}",
+                guard.path().display()
+            ),
+            error,
+        )
     })?;
     if !metadata.is_file() {
-        return Err(StorageError::Internal(
-            "Downloaded storage object is not a regular file".to_string(),
+        return Err(StorageError::internal(
+            "Downloaded storage object is not a regular file",
         ));
     }
     let actual_size = metadata.len();
     if actual_size != expected_size {
-        return Err(StorageError::Internal(format!(
+        return Err(StorageError::internal(format!(
             "Downloaded object size mismatch: backend declared {}, received {}",
             expected_size, actual_size
         )));
@@ -111,9 +117,7 @@ mod tests {
         }
 
         async fn get(&self, _key: &str) -> StorageResult<Bytes> {
-            Err(StorageError::Internal(
-                "bounded download must not call get".to_string(),
-            ))
+            Err(StorageError::internal("bounded download must not call get"))
         }
 
         async fn exists(&self, _key: &str) -> StorageResult<bool> {
@@ -129,9 +133,9 @@ mod tests {
         }
 
         async fn download_to_path(&self, _key: &str, dest: &Path) -> StorageResult<()> {
-            tokio::fs::write(dest, &self.data)
-                .await
-                .map_err(|error| StorageError::Internal(error.to_string()))
+            tokio::fs::write(dest, &self.data).await.map_err(|error| {
+                StorageError::internal_with_source("failed to write download", error)
+            })
         }
     }
 
@@ -175,7 +179,7 @@ mod tests {
             Ok(_) => panic!("declared and downloaded sizes must match"),
             Err(error) => error,
         };
-        assert!(matches!(error, StorageError::Internal(_)));
+        assert!(matches!(error, StorageError::Internal { .. }));
         assert_temp_dir_eventually_empty(temp_dir.path()).await;
     }
 }

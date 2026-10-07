@@ -119,8 +119,8 @@ mod tests {
         }
 
         async fn exists(&self, _key: &str) -> StorageResult<bool> {
-            Err(StorageError::Internal(
-                "S3 endpoint http://minio.internal secret-bucket".to_string(),
+            Err(StorageError::internal(
+                "S3 endpoint http://minio.internal secret-bucket",
             ))
         }
 
