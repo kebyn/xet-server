@@ -805,3 +805,46 @@ async fn dropping_storage_aborts_inflight_multipart_uploads() {
     // Let the parked part handler finish so the mock server can shut down.
     state.lock().unwrap().unblock = true;
 }
+
+#[tokio::test]
+#[serial]
+async fn storage_shutdown_aborts_inflight_multipart_uploads() {
+    let _creds = dummy_aws_credentials();
+    let (endpoint, state) = start_mock_s3().await;
+    let storage = Arc::new(make_storage(&endpoint).await);
+
+    state.lock().unwrap().block_parts = true;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_patterned_file(&dir, "large.bin", MULTIPART_FILE_SIZE);
+    let task = {
+        let storage = storage.clone();
+        tokio::spawn(async move { storage.put_from_path("inflight", &path).await })
+    };
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while state.lock().unwrap().initiates == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "multipart upload never initiated"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    storage
+        .shutdown()
+        .await
+        .expect("storage shutdown should abort the active upload");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while state.lock().unwrap().aborts.is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "storage shutdown never aborted the upload"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    state.lock().unwrap().unblock = true;
+    task.abort();
+}

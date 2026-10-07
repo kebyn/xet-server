@@ -64,6 +64,14 @@ pub trait StorageBackend: Send + Sync {
         Ok(())
     }
 
+    /// Flush or abort backend work before the server exits.
+    ///
+    /// Backends without asynchronous shutdown work may keep the default no-op
+    /// implementation.
+    async fn shutdown(&self) -> StorageResult<()> {
+        Ok(())
+    }
+
     /// Store an object
     async fn put(&self, key: &str, data: Bytes) -> StorageResult<()>;
 

@@ -363,21 +363,22 @@ impl S3Storage {
             }
             Err(e) => {
                 upload_guard.abort().await;
-                Err(StorageError::Internal(format!(
-                    "S3 complete_multipart_upload failed: {}",
-                    e
-                )))
+                Err(StorageError::internal_with_source(
+                    "S3 complete_multipart_upload failed",
+                    e,
+                ))
             }
         }
     }
 
     /// Abort all in-flight multipart uploads.
     ///
-    /// Called automatically on Drop. Can also be called explicitly during
-    /// graceful shutdown to ensure cleanup before the runtime exits.
+    /// Called by the storage shutdown hook during graceful server shutdown and
+    /// can also be invoked explicitly. Drop remains a best-effort fallback.
     ///
-    pub async fn abort_all_active_uploads(&self) {
+    pub async fn abort_all_active_uploads(&self) -> StorageResult<()> {
         let uploads = self.active_uploads.drain();
+        let mut first_error = None;
 
         for (upload_id, key) in uploads {
             tracing::info!(
@@ -401,8 +402,16 @@ impl S3Storage {
                     "Failed to abort multipart upload during shutdown; retaining for retry"
                 );
                 self.active_uploads.register(upload_id, key);
+                if first_error.is_none() {
+                    first_error = Some(StorageError::internal_with_source(
+                        "Failed to abort one or more multipart uploads during shutdown",
+                        error,
+                    ));
+                }
             }
         }
+
+        first_error.map_or(Ok(()), Err)
     }
 
     /// Read file in PART_SIZE chunks and upload each as an S3 part.
@@ -531,8 +540,8 @@ fn multipart_part_size(file_size: u64) -> StorageResult<u64> {
 /// from accumulating storage costs.
 ///
 /// This is a best-effort safety net for runtime-driven shutdown while multipart
-/// uploads are in progress. Under normal graceful shutdown, callers
-/// should invoke `abort_all_active_uploads()` explicitly before dropping the backend.
+/// uploads are in progress. Normal graceful shutdown invokes the storage
+/// backend shutdown hook before the backend is dropped.
 ///
 /// Note: Drop is synchronous, so it spawns an asynchronous abort task. If the
 /// tokio runtime is already shut down, the aborts may
@@ -590,8 +599,12 @@ impl StorageBackend for S3Storage {
             .bucket(&self.bucket)
             .send()
             .await
-            .map_err(|e| StorageError::Internal(format!("S3 head_bucket failed: {}", e)))?;
+            .map_err(|e| StorageError::internal_with_source("S3 head_bucket failed", e))?;
         Ok(())
+    }
+
+    async fn shutdown(&self) -> StorageResult<()> {
+        self.abort_all_active_uploads().await
     }
 
     async fn put(&self, key: &str, data: Bytes) -> StorageResult<()> {

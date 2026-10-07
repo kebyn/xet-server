@@ -205,7 +205,8 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
         period.as_secs_f64()
     );
 
-    HttpServer::new(move || {
+    let shutdown_storage = storage.clone();
+    let server_result = HttpServer::new(move || {
         App::new()
             .wrap(Logger::default())
             .wrap(from_fn(metrics_middleware))
@@ -292,7 +293,22 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
     })
     .bind(&bind_addr)?
     .run()
-    .await
+    .await;
+
+    if let Err(shutdown_error) = shutdown_storage.shutdown().await {
+        tracing::error!(
+            error = %shutdown_error,
+            "Storage backend shutdown cleanup failed"
+        );
+        if server_result.is_ok() {
+            return Err(std::io::Error::other(format!(
+                "Storage backend shutdown cleanup failed: {}",
+                shutdown_error
+            )));
+        }
+    }
+
+    server_result
 }
 
 pub async fn health_check() -> HttpResponse {
