@@ -106,11 +106,16 @@ fn commit_error_response(err: CommitServiceError) -> HttpResponse {
             );
             let mut status_code = actix_web::http::StatusCode::from_u16(status)
                 .unwrap_or(actix_web::http::StatusCode::BAD_GATEWAY);
-            if status_code.is_server_error() {
+            // 5xx from CAS is coerced to 502 — except a timeout (504), which
+            // is preserved as a retryable signal.
+            let mut error_type = "CasError";
+            if status_code == actix_web::http::StatusCode::GATEWAY_TIMEOUT {
+                error_type = "GatewayTimeout";
+            } else if status_code.is_server_error() {
                 status_code = actix_web::http::StatusCode::BAD_GATEWAY;
             }
             HttpResponse::build(status_code)
-                .json(error_json(CAS_ERROR_MESSAGE.to_string(), "CasError"))
+                .json(error_json(CAS_ERROR_MESSAGE.to_string(), error_type))
         }
         CommitServiceError::BadGateway(message) => {
             bad_gateway_error_response("Commit CAS verification failed", message, "CasError")
@@ -413,6 +418,13 @@ mod tests {
                 },
                 actix_web::http::StatusCode::BAD_GATEWAY,
             ),
+            (
+                CommitServiceError::CasUpload {
+                    status: 504,
+                    message: "CAS request timed out: http://private-cas:8081".to_string(),
+                },
+                actix_web::http::StatusCode::GATEWAY_TIMEOUT,
+            ),
         ] {
             let response = commit_error_response(error);
             assert_eq!(response.status(), expected_status);
@@ -424,6 +436,20 @@ mod tests {
             assert!(!body.to_string().contains("private-cas"));
             assert!(!body.to_string().contains("bucket"));
         }
+
+        // A timeout keeps its 504 (the only 5xx not coerced to 502) and
+        // reports the GatewayTimeout error_type.
+        let response = commit_error_response(CommitServiceError::CasUpload {
+            status: 504,
+            message: "CAS request timed out: http://private-cas:8081".to_string(),
+        });
+        assert_eq!(response.status(), 504);
+        let body = actix_web::body::to_bytes(response.into_body())
+            .await
+            .expect("error response body should be readable");
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error_type"], "GatewayTimeout");
+        assert_eq!(body["error"], "Upstream CAS request failed");
     }
 
     // Test commit with invalid LFS OID format (defense-in-depth validation)

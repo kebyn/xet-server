@@ -451,3 +451,81 @@ async fn test_streaming_lfs_upload_oversized_returns_413() {
         "CAS oversized rejection (413) should be relayed to client"
     );
 }
+
+#[actix_web::test]
+async fn test_streaming_lfs_upload_timeout_returns_504() {
+    // A CAS whose PUT answers after 2 seconds, against a 1-second client
+    // timeout: the upload must surface as a sanitized 504 GatewayTimeout.
+    let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = std_listener.local_addr().unwrap();
+    let cas_url = format!("http://127.0.0.1:{}", addr.port());
+    let server = actix_web::HttpServer::new(move || {
+        actix_web::App::new().route(
+            "/lfs/objects/{oid}",
+            web::put().to(move |mut payload: web::Payload| async move {
+                use futures_util::StreamExt;
+                let mut total = 0u64;
+                while let Some(chunk) = payload.next().await {
+                    if let Ok(chunk) = chunk {
+                        total += chunk.len() as u64;
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                actix_web::HttpResponse::Ok()
+                    .json(serde_json::json!({"message": "ok", "received_bytes": total}))
+            }),
+        )
+    })
+    .listen(std_listener)
+    .unwrap()
+    .run();
+    tokio::spawn(server);
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let mut csprng = OsRng;
+    let signing_key = SigningKey::generate(&mut csprng);
+    let xet_signer = Arc::new(XetSigner::new(signing_key, "test-key", 3600, 300));
+    let cas_client = Arc::new(
+        CasClient::new(&CasSettings {
+            base_url: cas_url,
+            internal_timeout_seconds: 1,
+            max_download_size: 512 * 1024 * 1024,
+            health_check_timeout_seconds: 10,
+        })
+        .expect("CAS client should be created"),
+    );
+    let mut config = HubConfig::default();
+    let upload_temp_dir = tempfile::tempdir().unwrap();
+    config.storage.upload_temp_dir = upload_temp_dir.path().to_str().unwrap().to_string();
+
+    let content = b"small but timing out".to_vec();
+    let oid = hex::encode(Sha256::digest(&content));
+    let (proxy_token, _) = xet_signer
+        .sign_proxy("testuser", &oid, "upload", "", "")
+        .unwrap();
+
+    let app = test::init_service(
+        App::new()
+            .app_data(web::PayloadConfig::default().limit(2 * 1024 * 1024))
+            .app_data(web::Data::new(xet_signer.clone()))
+            .app_data(web::Data::new(cas_client.clone()))
+            .app_data(web::Data::new(config.clone()))
+            .route(
+                "/lfs/objects/{oid}",
+                web::put().to(hub_api::api::lfs_proxy::lfs_upload),
+            ),
+    )
+    .await;
+
+    let req = test::TestRequest::put()
+        .uri(&format!("/lfs/objects/{}", oid))
+        .insert_header(("Authorization", format!("Bearer {}", proxy_token)))
+        .set_payload(content)
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), actix_web::http::StatusCode::GATEWAY_TIMEOUT);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["error"], "Upstream CAS request failed");
+    assert_eq!(body["error_type"], "GatewayTimeout");
+}

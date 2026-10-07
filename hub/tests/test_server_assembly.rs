@@ -51,6 +51,18 @@ async fn wait_for_listener(addr: SocketAddr) {
 
 /// Mock CAS: records every inline upload as `(oid, Authorization header)`.
 async fn start_mock_cas() -> (String, Arc<Mutex<Vec<(String, String)>>>) {
+    start_mock_cas_inner(None).await
+}
+
+/// Like [`start_mock_cas`] but the inline-upload PUT stalls — used by the
+/// upload-timeout test.
+async fn start_mock_cas_with_slow_put() -> (String, Arc<Mutex<Vec<(String, String)>>>) {
+    start_mock_cas_inner(Some(Duration::from_secs(2))).await
+}
+
+async fn start_mock_cas_inner(
+    put_delay: Option<Duration>,
+) -> (String, Arc<Mutex<Vec<(String, String)>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let uploads: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
@@ -64,6 +76,9 @@ async fn start_mock_cas() -> (String, Arc<Mutex<Vec<(String, String)>>>) {
                 web::put().to(move |path: web::Path<String>, req: HttpRequest| {
                     let uploads = uploads.clone();
                     async move {
+                        if let Some(delay) = put_delay {
+                            tokio::time::sleep(delay).await;
+                        }
                         let auth = req
                             .headers()
                             .get("Authorization")
@@ -290,6 +305,45 @@ async fn commit_cas_verification_timeout_returns_504() {
         "{{\"key\":\"header\",\"value\":{{\"summary\":\"slow cas\",\"parentRevision\":null}}}}\n\
          {{\"key\":\"lfsFile\",\"value\":{{\"path\":\"model.bin\",\"oid\":\"{}\",\"size\":3}}}}",
         "a".repeat(64)
+    );
+    let req = test::TestRequest::post()
+        .uri("/api/models/testuser/assembly-model/commit/main")
+        .peer_addr(peer())
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .insert_header(("Content-Type", "application/x-ndjson"))
+        .set_payload(body)
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), actix_web::http::StatusCode::GATEWAY_TIMEOUT);
+
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["error"], "Upstream CAS request failed");
+    assert_eq!(body["error_type"], "GatewayTimeout");
+}
+
+#[actix_web::test]
+async fn commit_inline_upload_timeout_returns_504() {
+    let (cas_url, _uploads) = start_mock_cas_with_slow_put().await;
+    let (deps, token_store, metadata) = real_deps_with_timeout(&cas_url, 1).await;
+    let token = token_store
+        .create_token("testuser", "assembly-token", "write")
+        .await
+        .unwrap();
+    metadata
+        .create_repo("testuser", "assembly-model", RepoType::Model, false)
+        .await
+        .unwrap();
+
+    let app = test::init_service(build_app(deps)).await;
+
+    // The inline-file commit reaches PUT /lfs/objects/{oid}, which the mock
+    // answers after 2s — past the 1s client timeout.
+    let content = STANDARD.encode("timeout");
+    let body = format!(
+        "{{\"key\":\"header\",\"value\":{{\"summary\":\"slow cas upload\",\"parentRevision\":null}}}}\n\
+         {{\"key\":\"file\",\"value\":{{\"path\":\"config.json\",\"content\":\"{}\"}}}}",
+        content
     );
     let req = test::TestRequest::post()
         .uri("/api/models/testuser/assembly-model/commit/main")

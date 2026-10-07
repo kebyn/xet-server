@@ -386,7 +386,7 @@ Commit API 的 NDJSON 有以下顺序和快照语义：
    - `path`: 文件路径（必需）
    - `content`: Base64 编码的文件内容（必需）
    - 可以带 `base64:` 前缀，也可以不带
-   - Hub 会使用短期 `xet_xxx` user token（`write` scope）将内容写入 CAS `/lfs/objects/{oid}`，然后把 OID 记录到元数据
+   - Hub 会使用短期 `xet_xxx` user token（`write` scope）将内容写入 CAS `/lfs/objects/{oid}`，然后把 OID 记录到元数据；上传超过 `HUB_CAS_TIMEOUT_SECS` 时返回脱敏的 `504 Gateway Timeout`（`error_type` 为 `GatewayTimeout`），其他 CAS 失败返回脱敏的 `502 Bad Gateway`
 
 3. **LfsFile**（LFS 文件，已上传到 CAS）：
    ```json
@@ -856,6 +856,8 @@ Content-Type: application/vnd.git-lfs+json
 3. Hub 将 CAS action URL 改写为 Hub URL，并替换为短期 `proxy_xxx` action token
 4. 客户端使用 `proxy_xxx` token 访问 Hub 的 `/lfs/objects/{oid}`，Hub 验证后将同一个 `proxy_xxx` token 转发给 CAS
 
+**错误**：CAS 网络故障或非法响应返回脱敏的 `502 Bad Gateway`；请求超过 `HUB_CAS_TIMEOUT_SECS`（连接、响应或响应体读取超时）返回脱敏的 `504 Gateway Timeout`（`error_type` 为 `GatewayTimeout`）。
+
 ### LFS 对象下载/上传
 
 **端点**：`GET/PUT /lfs/objects/{oid}`
@@ -870,6 +872,7 @@ Authorization: Bearer proxy_xxx
 **响应**：
 - `200 OK`: 返回对象数据
 - `401 Unauthorized`: proxy token 缺失、过期或 OID/operation 不匹配
+- `504 Gateway Timeout`: 转发 CAS 超过 `HUB_CAS_TIMEOUT_SECS` 超时（脱敏，`error_type` 为 `GatewayTimeout`）
 
 ---
 
@@ -898,7 +901,7 @@ CAS 网络故障、非法响应、超出 Hub 响应上限或上游 5xx 对客户
 
 部分 commit/LFS 端点为兼容既有契约会使用 `CasError` 作为 502 的 `error_type`；稳定保证是状态码和通用 `error` 文案。CAS 返回的 4xx 状态会保留，但响应正文仍会脱敏。
 
-请求超过 `HUB_CAS_TIMEOUT_SECS`（连接、响应或响应体读取超时）时返回 **504 Gateway Timeout**，`error_type` 为 `GatewayTimeout`，`error` 文案与 502 相同的脱敏保证同样适用（不回显 CAS URL）：
+覆盖端点：resolve 小文件直读、commit 的 LFS 验证与 inline 上传、LFS batch、LFS 对象上传/下载。请求超过 `HUB_CAS_TIMEOUT_SECS`（连接、响应或响应体读取超时）时返回 **504 Gateway Timeout**，`error_type` 为 `GatewayTimeout`，`error` 文案与 502 相同的脱敏保证同样适用（不回显 CAS URL）；CAS 主动返回的真 504 也会透传：
 
 ```json
 {"error":"Upstream CAS request failed","error_type":"GatewayTimeout"}
@@ -917,7 +920,7 @@ CAS 网络故障、非法响应、超出 Hub 响应上限或上游 5xx 对客户
 | 422 | `unprocessable_entity` | 无法处理的实体 |
 | 500 | `InternalError` | 服务器内部错误；详细原因仅记录在服务端日志 |
 | 502 | `BadGateway` / `CasError` | CAS 请求失败；不返回 CAS URL 或 upstream body |
-| 504 | `GatewayTimeout` | CAS 请求超过 `HUB_CAS_TIMEOUT_SECS` 超时；同样脱敏 |
+| 504 | `GatewayTimeout` | CAS 请求超过 `HUB_CAS_TIMEOUT_SECS` 超时（发送或响应体读取）；resolve 直读 / commit LFS 验证与上传 / LFS batch / LFS 对象端点均适用；同样脱敏 |
 
 ---
 

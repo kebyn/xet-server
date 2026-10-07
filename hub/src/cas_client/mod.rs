@@ -30,6 +30,15 @@ fn cas_read_error(context: &str, error: ResponseBodyError) -> HubError {
     }
 }
 
+/// Classify an upload send failure: timeouts carry status 504 so the API
+/// mappings can answer Gateway Timeout; other transport failures stay 502.
+fn cas_upload_send_error(e: reqwest::Error) -> CasUploadError {
+    CasUploadError {
+        status: if e.is_timeout() { 504 } else { 502 },
+        message: format!("CAS request failed: {}", e),
+    }
+}
+
 fn cas_send_error(e: reqwest::Error) -> HubError {
     if e.is_timeout() {
         HubError::CasTimeout(e)
@@ -199,10 +208,7 @@ impl CasClientTrait for CasClient {
             .body(data)
             .send()
             .await
-            .map_err(|e| CasUploadError {
-                status: 502,
-                message: format!("CAS request failed: {}", e),
-            })?;
+            .map_err(cas_upload_send_error)?;
 
         let status = resp.status().as_u16();
         if resp.status().is_success() {
@@ -337,10 +343,7 @@ impl CasClient {
             .body(body)
             .send()
             .await
-            .map_err(|e| CasUploadError {
-                status: 502,
-                message: format!("CAS request failed: {}", e),
-            })?;
+            .map_err(cas_upload_send_error)?;
 
         let status = resp.status().as_u16();
         if resp.status().is_success() {

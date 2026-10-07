@@ -261,3 +261,70 @@ async fn lfs_download_forwards_client_proxy_token_to_cas_object_endpoint() {
     let body = test::read_body(resp).await;
     assert_eq!(body.as_ref(), content.as_slice());
 }
+
+#[actix_web::test]
+async fn lfs_batch_timeout_returns_sanitized_504() {
+    let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = std_listener.local_addr().unwrap();
+    let server = actix_web::HttpServer::new(move || {
+        actix_web::App::new().route(
+            "/objects/batch",
+            web::post().to(|| async {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                HttpResponse::Ok().json(serde_json::json!({
+                    "transfer": "basic",
+                    "objects": []
+                }))
+            }),
+        )
+    })
+    .listen(std_listener)
+    .unwrap()
+    .run();
+    tokio::spawn(server);
+    wait_for_listener(addr).await;
+    let cas_url = format!("http://127.0.0.1:{}", addr.port());
+
+    let token_store = Arc::new(TokenStore::in_memory().await.unwrap());
+    let hf_token = token_store
+        .create_token("testuser", "read-token", "read")
+        .await
+        .unwrap();
+    let cas_client = Arc::new(
+        CasClient::new(&CasSettings {
+            base_url: cas_url,
+            internal_timeout_seconds: 1,
+            ..CasSettings::default()
+        })
+        .expect("CAS client should be created"),
+    );
+
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(token_store))
+            .app_data(web::Data::new(test_signer()))
+            .app_data(web::Data::new(cas_client))
+            .app_data(web::Data::new(HubConfig::default()))
+            .route(
+                "/objects/batch",
+                web::post().to(hub_api::api::lfs_proxy::lfs_batch),
+            ),
+    )
+    .await;
+
+    let req = test::TestRequest::post()
+        .uri("/objects/batch")
+        .insert_header(("Authorization", format!("Bearer {hf_token}")))
+        .insert_header(("Content-Type", "application/vnd.git-lfs+json"))
+        .set_json(serde_json::json!({
+            "operation": "download",
+            "objects": [{"oid": "a".repeat(64), "size": 3}]
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), actix_web::http::StatusCode::GATEWAY_TIMEOUT);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["error"], "Upstream CAS request failed");
+    assert_eq!(body["error_type"], "GatewayTimeout");
+}

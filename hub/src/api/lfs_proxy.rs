@@ -130,6 +130,11 @@ fn lfs_batch_error_response(err: LfsBatchServiceError) -> HttpResponse {
         LfsBatchServiceError::BadGateway(message) => {
             bad_gateway_error_response("LFS batch CAS request failed", message, "BadGateway")
         }
+        LfsBatchServiceError::GatewayTimeout(message) => gateway_timeout_error_response(
+            "LFS batch CAS request timed out",
+            message,
+            "GatewayTimeout",
+        ),
         LfsBatchServiceError::Internal(message) => {
             internal_error_response("LFS batch request failed", message)
         }
@@ -212,12 +217,17 @@ fn lfs_upload_service_error_response(
             );
             let mut status_code = actix_web::http::StatusCode::from_u16(status)
                 .unwrap_or(actix_web::http::StatusCode::BAD_GATEWAY);
-            if status_code.is_server_error() {
+            // 5xx from CAS is coerced to 502 — except a timeout (504), which
+            // is preserved as a retryable signal.
+            let mut error_type = "CasError";
+            if status_code == actix_web::http::StatusCode::GATEWAY_TIMEOUT {
+                error_type = "GatewayTimeout";
+            } else if status_code.is_server_error() {
                 status_code = actix_web::http::StatusCode::BAD_GATEWAY;
             }
             HttpResponse::build(status_code).json(serde_json::json!({
                 "error": CAS_ERROR_MESSAGE,
-                "error_type": "CasError"
+                "error_type": error_type
             }))
         }
     }
@@ -342,5 +352,36 @@ pub async fn lfs_download(
             ),
             _ => bad_gateway_error_response("LFS download from CAS failed", e, "BadGateway"),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::lfs_upload_service_error_response;
+    use crate::services::lfs_upload::LfsUploadServiceError;
+
+    #[actix_web::test]
+    async fn upload_error_mapping_preserves_504_and_caps_other_5xx() {
+        for (status, expected_status, expected_type) in [
+            (504u16, 504u16, "GatewayTimeout"),
+            (500, 502, "CasError"),
+            (503, 502, "CasError"),
+        ] {
+            let response = lfs_upload_service_error_response(
+                LfsUploadServiceError::Cas {
+                    status,
+                    message: format!("upstream {}", status),
+                },
+                &"a".repeat(64),
+                "unused",
+            );
+            assert_eq!(response.status().as_u16(), expected_status);
+            let body = actix_web::body::to_bytes(response.into_body())
+                .await
+                .expect("error response body should be readable");
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["error"], "Upstream CAS request failed");
+            assert_eq!(body["error_type"], expected_type);
+        }
     }
 }

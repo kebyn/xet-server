@@ -35,6 +35,7 @@ pub(crate) enum LfsBatchServiceError {
     Validation(String),
     Authorization(String),
     BadGateway(String),
+    GatewayTimeout(String),
     Internal(String),
 }
 
@@ -127,7 +128,10 @@ impl LfsBatchService {
             .cas_client
             .proxy_batch(request.body, &cas_batch_token)
             .await
-            .map_err(|err| LfsBatchServiceError::BadGateway(err.to_string()))?;
+            .map_err(|err| match &err {
+                HubError::CasTimeout(_) => LfsBatchServiceError::GatewayTimeout(err.to_string()),
+                _ => LfsBatchServiceError::BadGateway(err.to_string()),
+            })?;
 
         rewrite_batch_urls(
             &mut response,
