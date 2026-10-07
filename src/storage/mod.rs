@@ -9,6 +9,9 @@ use thiserror::Error;
 pub mod local;
 pub mod s3;
 
+#[cfg(test)]
+pub(crate) mod flaky;
+
 #[derive(Error, Debug)]
 pub enum StorageError {
     #[error("Object not found: {0}")]
@@ -120,6 +123,57 @@ pub trait StorageBackend: Send + Sync {
     }
 }
 
+/// Bounded retry delays for transient storage errors: 100 ms after the
+/// first attempt, 500 ms after the second. Storage errors are ambiguous
+/// between transient blips (network) and permanent failures; the small
+/// bound makes a misclassification cost ~600 ms.
+pub(crate) const TRANSIENT_STORAGE_RETRY_DELAYS: &[std::time::Duration] = &[
+    std::time::Duration::from_millis(100),
+    std::time::Duration::from_millis(500),
+];
+
+/// A storage failure is worth retrying unless the object is simply missing —
+/// retrying an absent key only burns the delay budget.
+pub(crate) fn is_transient_storage_error(error: &StorageError) -> bool {
+    !matches!(error, StorageError::NotFound(_))
+}
+
+/// Download `key` to `dest` with bounded retries for transient storage
+/// errors.
+///
+/// `dest` is reused across attempts: backends stage through a unique temp
+/// file and rename (or overwrite the destination), so a retry never observes
+/// a partial previous attempt.
+pub(crate) async fn download_to_path_with_retries(
+    storage: &dyn StorageBackend,
+    key: &str,
+    dest: &Path,
+) -> StorageResult<()> {
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        match storage.download_to_path(key, dest).await {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if attempt <= TRANSIENT_STORAGE_RETRY_DELAYS.len()
+                    && is_transient_storage_error(&error) =>
+            {
+                let delay = TRANSIENT_STORAGE_RETRY_DELAYS[attempt - 1];
+                tracing::warn!(
+                    "Transient storage error downloading {} (attempt {}/{}): {}; retrying in {:?}",
+                    key,
+                    attempt,
+                    TRANSIENT_STORAGE_RETRY_DELAYS.len() + 1,
+                    error,
+                    delay
+                );
+                tokio::time::sleep(delay).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 pub async fn create_storage(
     config: &crate::config::StorageConfig,
 ) -> StorageResult<Box<dyn StorageBackend>> {
@@ -149,5 +203,54 @@ pub async fn create_storage(
             "Unknown backend: {}",
             config.backend
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::download_to_path_with_retries;
+    use super::flaky::{FlakyStorage, InjectedFailure};
+    use super::{StorageBackend, StorageError};
+    use crate::storage::local::LocalStorage;
+    use bytes::Bytes;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn download_to_path_with_retries_recovers_after_transient_failure() {
+        let dir = tempdir().unwrap();
+        let inner = LocalStorage::new(dir.path().to_str().unwrap()).unwrap();
+        inner
+            .put("obj", Bytes::from_static(b"payload"))
+            .await
+            .unwrap();
+
+        let (flaky, attempts) =
+            FlakyStorage::new(inner, "obj".to_string(), InjectedFailure::Transient, 1);
+        let dest = dir.path().join("downloaded");
+        download_to_path_with_retries(&flaky, "obj", &dest)
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::read(&dest).unwrap(), b"payload");
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn download_to_path_with_retries_does_not_retry_missing() {
+        let dir = tempdir().unwrap();
+        let inner = LocalStorage::new(dir.path().to_str().unwrap()).unwrap();
+
+        let (flaky, attempts) = FlakyStorage::new(
+            inner,
+            "obj".to_string(),
+            InjectedFailure::Missing,
+            usize::MAX,
+        );
+        let dest = dir.path().join("never");
+        assert!(matches!(
+            download_to_path_with_retries(&flaky, "obj", &dest).await,
+            Err(StorageError::NotFound(_))
+        ));
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }

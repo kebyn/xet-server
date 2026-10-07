@@ -145,19 +145,19 @@ async fn reconstruct_single_file_ref_to_temp(
                 planned.xorb_hash.to_hex(),
                 uuid::Uuid::new_v4()
             )));
-            storage
-                .download_to_path(
-                    &key,
-                    guard.try_path().map_err(|e| {
-                        ReconstructionError::TempIo(format!(
-                            "failed to resolve xorb temp file {}: {}",
-                            planned.xorb_hash.to_hex(),
-                            e
-                        ))
-                    })?,
-                )
-                .await
-                .map_err(|e| map_storage_error(&key, e))?;
+            crate::storage::download_to_path_with_retries(
+                storage,
+                &key,
+                guard.try_path().map_err(|e| {
+                    ReconstructionError::TempIo(format!(
+                        "failed to resolve xorb temp file {}: {}",
+                        planned.xorb_hash.to_hex(),
+                        e
+                    ))
+                })?,
+            )
+            .await
+            .map_err(|e| map_storage_error(&key, e))?;
             entry.insert(guard);
         }
 
@@ -512,5 +512,60 @@ mod tests {
 
         assert!(matches!(err, ReconstructionError::Integrity(_)));
         assert!(err.to_string().contains(&missing_hash.to_hex()));
+    }
+
+    #[tokio::test]
+    async fn reconstruction_retries_transient_xorb_download() {
+        use crate::storage::flaky::{FlakyStorage, InjectedFailure};
+
+        let raw = b"reconstruction survives a transient xorb blip";
+        let file_oid = format!("{:x}", Sha256::digest(raw));
+        let dir = tempdir().unwrap();
+        let local = LocalStorage::new(dir.path().to_str().unwrap()).unwrap();
+
+        let (shard_data, xorb_hash) = build_single_file_shard(raw, CompressionScheme::None);
+        let shard_id = compute_data_hash(&shard_data).to_hex();
+        let xorb_data = {
+            let mut xb = XorbBuilder::new(CompressionScheme::None);
+            xb.add_chunk(raw).unwrap();
+            xb.build().unwrap().data
+        };
+        let xorb_key = format!("xorbs/{}", xorb_hash.to_hex());
+        local
+            .put(&xorb_key, bytes::Bytes::from(xorb_data))
+            .await
+            .unwrap();
+        local
+            .put(
+                &format!("shards/{}", shard_id),
+                bytes::Bytes::from(shard_data),
+            )
+            .await
+            .unwrap();
+
+        let (flaky, attempts) =
+            FlakyStorage::new(local, xorb_key.clone(), InjectedFailure::Transient, 1);
+        let storage: Box<dyn StorageBackend> = Box::new(flaky);
+
+        let result = reconstruct_verified_file_to_temp(
+            &file_oid,
+            vec![FileShardRef {
+                shard_id,
+                file_index: 0,
+                file_size: raw.len() as u64,
+            }],
+            &*storage,
+            dir.path(),
+        )
+        .await
+        .expect("the retried xorb download must let reconstruction succeed");
+
+        let bytes = tokio::fs::read(result.path()).await.unwrap();
+        assert_eq!(bytes, raw);
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "exactly one xorb download retry must happen"
+        );
     }
 }

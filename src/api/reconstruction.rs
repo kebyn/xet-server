@@ -484,4 +484,119 @@ mod tests {
         assert_eq!(info["storage_path"], format!("xorbs/{}", xorb_hash_hex));
         assert_eq!(info["size"].as_u64(), Some(xorb_size));
     }
+
+    #[tokio::test]
+    async fn reconstruction_retries_transient_shard_fetch_and_returns_200() {
+        use crate::format::compression::CompressionScheme;
+        use crate::format::shard_builder::{FileSegment, ShardBuilder, XorbChunkBuildEntry};
+        use crate::format::xorb_builder::XorbBuilder;
+        use crate::hash::compute_data_hash;
+        use crate::index::{VerifiedChunkMapping, VerifiedFileMapping, VerifiedShardRegistration};
+        use crate::storage::flaky::{FlakyStorage, InjectedFailure};
+        use crate::types::MerkleHash;
+
+        let dir = tempdir().unwrap();
+        let local = LocalStorage::new(dir.path().to_str().unwrap()).unwrap();
+        let (kp, auth, config) = create_test_config();
+        let token = create_test_token(&kp, "read");
+        let index = MetadataIndex::new();
+
+        let raw = b"transient shard fetch must be retried, not failed";
+        let raw_hash = compute_data_hash(raw);
+        let file_hash = MerkleHash::from([7u8; 32]);
+        let mut xb = XorbBuilder::new(CompressionScheme::None);
+        let (serialized_hash, _compressed_len) = xb.add_chunk(raw).unwrap();
+        let xorb = xb.build().unwrap();
+
+        let mut sb = ShardBuilder::new();
+        let xorb_index = sb
+            .add_xorb_with_raw_chunk_hashes(
+                xorb.xorb_hash,
+                xorb.total_uncompressed_size as u32,
+                xorb.total_compressed_size as u32,
+                vec![XorbChunkBuildEntry {
+                    chunk_hash: serialized_hash,
+                    chunk_byte_range_start: 0,
+                    unpacked_segment_bytes: raw.len() as u32,
+                }],
+                vec![raw_hash],
+            )
+            .unwrap();
+        sb.add_file(
+            file_hash,
+            vec![FileSegment {
+                xorb_hash: xorb.xorb_hash,
+                xorb_index,
+                chunk_index_start: 0,
+                chunk_index_end: 1,
+                unpacked_segment_bytes: raw.len() as u32,
+            }],
+        );
+        let shard_data = sb.build().unwrap();
+        let shard_id = compute_data_hash(&shard_data).to_hex();
+        local
+            .put(
+                &format!("xorbs/{}", xorb.xorb_hash.to_hex()),
+                bytes::Bytes::from(xorb.data),
+            )
+            .await
+            .unwrap();
+        local
+            .put(
+                &format!("shards/{}", shard_id),
+                bytes::Bytes::from(shard_data),
+            )
+            .await
+            .unwrap();
+        index
+            .register_verified_shard(VerifiedShardRegistration {
+                shard_id: shard_id.clone(),
+                files: vec![VerifiedFileMapping {
+                    file_hash,
+                    file_index: 0,
+                    file_size: raw.len() as u64,
+                }],
+                chunks: vec![VerifiedChunkMapping {
+                    chunk_hash: raw_hash,
+                    xorb_hash: xorb.xorb_hash,
+                    chunk_index: 0,
+                }],
+            })
+            .unwrap();
+
+        // The first shard fetch fails with a transient storage error; the
+        // bounded retry in parse_shard_from_storage must recover.
+        let (flaky, attempts) = FlakyStorage::new(
+            local,
+            format!("shards/{}", shard_id),
+            InjectedFailure::Transient,
+            1,
+        );
+        let storage: Box<dyn StorageBackend> = Box::new(flaky);
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(index))
+                .app_data(web::Data::new(storage))
+                .app_data(web::Data::new(config))
+                .app_data(web::Data::new(auth))
+                .route(
+                    "/v2/reconstructions/{file_id}",
+                    web::get().to(get_reconstruction),
+                ),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri(&format!("/v2/reconstructions/{}", file_hash.to_hex()))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "exactly one shard fetch retry must happen"
+        );
+    }
 }

@@ -73,15 +73,15 @@ pub async fn validate_shard_for_index(
         ));
         let temp_guard = TempPathGuard::new(temp_path);
 
-        storage
-            .download_to_path(
-                &xorb_key,
-                temp_guard.try_path().map_err(|e| {
-                    format!("Failed to resolve xorb temp path {}: {}", xorb_hash_hex, e)
-                })?,
-            )
-            .await
-            .map_err(|e| format!("Failed to download xorb {}: {}", xorb_hash_hex, e))?;
+        crate::storage::download_to_path_with_retries(
+            storage,
+            &xorb_key,
+            temp_guard.try_path().map_err(|e| {
+                format!("Failed to resolve xorb temp path {}: {}", xorb_hash_hex, e)
+            })?,
+        )
+        .await
+        .map_err(|e| format!("Failed to download xorb {}: {}", xorb_hash_hex, e))?;
 
         // Verify off the async runtime: whole-file synchronous reads and
         // hashing would stall a tokio worker (same rationale as
@@ -666,6 +666,36 @@ mod tests {
         assert!(
             err.contains("xorb") && err.contains("count"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_shard_retries_transient_xorb_download() {
+        use crate::storage::flaky::{FlakyStorage, InjectedFailure};
+
+        let raw_chunk = b"single chunk whose xorb fetch blips once";
+        let declared_file_hash = sha256_merkle_hash(raw_chunk);
+        let (xorb_data, shard, xorb_hash, _raw_chunk_hash) =
+            build_one_chunk_xorb_and_shard(raw_chunk, declared_file_hash);
+
+        let storage_dir = tempdir().unwrap();
+        let temp_dir = tempdir().unwrap();
+        let local = LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap();
+        let xorb_key = format!("xorbs/{}", xorb_hash.to_hex());
+        local.put(&xorb_key, Bytes::from(xorb_data)).await.unwrap();
+
+        let (flaky, attempts) =
+            FlakyStorage::new(local, xorb_key.clone(), InjectedFailure::Transient, 1);
+
+        let shard_id = "retry-shard";
+        let registration = validate_shard_for_index(shard_id, &shard, &flaky, temp_dir.path())
+            .await
+            .expect("the retried xorb download must let validation pass");
+        assert_eq!(registration.shard_id, shard_id);
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "exactly one xorb download retry must happen"
         );
     }
 }
