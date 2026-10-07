@@ -260,6 +260,10 @@ impl S3Storage {
         })?;
 
         let mut config_builder = Config::builder()
+            // aws-sdk-s3 1.152+ requires an explicit behavior version (or the
+            // behavior-version-latest cargo feature); without it the client
+            // panics on the first request.
+            .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
             .region(aws_sdk_s3::config::Region::new(region.to_string()))
             .credentials_provider(Credentials::new(
                 access_key_id,
@@ -916,6 +920,16 @@ mod tests {
 
         let error = multipart_part_size(MAX_S3_OBJECT_SIZE + 1).unwrap_err();
         assert!(matches!(error, StorageError::InvalidArgument(_)));
+    }
+
+    #[test]
+    fn multipart_part_size_accepts_the_object_limit_exactly() {
+        // Exactly 5 TiB is still allowed: parts scale up to ceil(5 TiB / 10
+        // 000) so the upload stays within S3's 10 000-part limit.
+        assert_eq!(
+            multipart_part_size(MAX_S3_OBJECT_SIZE).unwrap(),
+            MAX_S3_OBJECT_SIZE / 10_000 + 1
+        );
     }
 
     #[test]
