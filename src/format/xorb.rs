@@ -264,7 +264,7 @@ pub fn verify_xorb(data: &[u8]) -> XetResult<()> {
     let hashes_ident = XorbObjectInfoV1::IDENT_HASHES;
     let mut footer_start = None;
 
-    // C3 fix: Search from the END backwards, consistent with verify_xorb_from_file.
+    // Search from the END backwards, consistent with verify_xorb_from_file.
     // Searching backwards prevents false positives if chunk data happens to contain
     // the IDENT_HASHES magic bytes ("XBLBHSH") — those would appear before the real footer.
     let max_start = data.len().saturating_sub(7);

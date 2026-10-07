@@ -35,7 +35,7 @@ impl TempFile {
             ))
         })?;
 
-        // M3 fix: Use UUID v4 for unpredictable temp file names.
+        // Use UUID v4 for unpredictable temp file names.
         // Previous implementation used timestamp + atomic counter which was predictable.
         // UUID v4 uses cryptographically secure random number generator.
         let unique_id = uuid::Uuid::new_v4().to_string();

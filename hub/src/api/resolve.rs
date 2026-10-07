@@ -220,7 +220,7 @@ mod tests {
             .await
             .unwrap();
 
-        // M2: Create XetSigner for testing proxy token generation
+        // Create XetSigner for testing proxy token generation
         let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
         let xet_signer = std::sync::Arc::new(crate::auth::xet_signer::XetSigner::new(
             signing_key,
@@ -262,7 +262,7 @@ mod tests {
                 .app_data(web::Data::new(token_store.clone()))
                 .app_data(web::Data::new(metadata.clone()))
                 .app_data(web::Data::new(config.clone()))
-                // M2: Register XetSigner to test proxy token generation
+                // Register XetSigner to test proxy token generation
                 .app_data(web::Data::new(xet_signer.clone()))
                 .route(
                     "/{ns}/{repo}/resolve/{revision}/{path}",
@@ -281,7 +281,7 @@ mod tests {
         assert_eq!(resp.status().as_u16(), 302);
         let location = resp.headers().get("Location").unwrap().to_str().unwrap();
         assert!(location.contains("hash123"));
-        // I-3: Proxy tokens use base64url encoding (URL-safe), no percent-encoding needed
+        // Proxy tokens use base64url encoding (URL-safe), no percent-encoding needed
         assert!(
             location.contains("?token=proxy_"),
             "Redirect URL should contain proxy token: {}",

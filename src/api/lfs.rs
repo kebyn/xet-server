@@ -114,7 +114,7 @@ pub async fn upload_lfs_object(
         return rej.respond();
     }
 
-    // M7 fix: Use a more reasonable pre-check threshold (see xorb.rs for rationale).
+    // Use a more reasonable pre-check threshold (see xorb.rs for rationale).
     let temp_dir = config.storage.resolve_upload_temp_dir();
     let check_bytes = std::cmp::min(
         config.server.max_body_size_bytes() as u64,
@@ -274,7 +274,7 @@ pub async fn download_lfs_object(
                         let converting_clone = converting.clone();
                         let oid_clone = oid.clone();
                         tokio::spawn(async move {
-                            // I4 fix: Use scope guard to ensure OID lock is always released,
+                            // Use scope guard to ensure OID lock is always released,
                             // even if convert() panics. Previously, a panic would skip the
                             // release() call, permanently locking the OID until server restart.
                             struct OidGuard {

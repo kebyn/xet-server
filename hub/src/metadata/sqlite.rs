@@ -204,7 +204,7 @@ impl SqliteMetadataStore {
         Ok(Self { pool })
     }
 
-    /// M2 fix: Create a metadata store using a shared connection pool.
+    /// Create a metadata store using a shared connection pool.
     /// This reduces total SQLite connections when both TokenStore and MetadataStore
     /// access the same database file, preventing SQLITE_BUSY under load.
     pub async fn with_pool(pool: SqlitePool) -> Result<Self, MetadataError> {
@@ -465,7 +465,7 @@ impl MetadataStore for SqliteMetadataStore {
     /// content-addressed and deduplicated, orphaned blobs don't affect correctness. A background
     /// GC job could clean up orphaned blobs in the future if storage efficiency becomes a concern.
     async fn delete_repo(&self, repo_id: i64) -> Result<(), MetadataError> {
-        // I5: Wrap deletion in a transaction for atomicity
+        // Wrap deletion in a transaction for atomicity
         let mut tx = self
             .pool
             .begin()
@@ -588,7 +588,7 @@ impl MetadataStore for SqliteMetadataStore {
         repo_id: i64,
         limit: Option<usize>,
     ) -> Result<Vec<Revision>, MetadataError> {
-        // M3 fix: Use recursive CTE instead of N+1 queries.
+        // Use recursive CTE instead of N+1 queries.
         // Single SQL query walks the entire parent chain from HEAD.
         // Use i64::MAX - 1 to avoid overflow when casting from usize.
         let effective_limit = limit.map(|l| l as i64).unwrap_or(i64::MAX - 1);

@@ -336,7 +336,7 @@ pub async fn get_reconstruction(
             }
 
             let xorb_size = xorb_entry.num_bytes_in_xorb as u64;
-            // C1 fix: Use xorbs/{hash} format to match conversion pipeline and LFS download.
+            // Use xorbs/{hash} format to match conversion pipeline and LFS download.
             let storage_path = format!("xorbs/{}", xorb_hash);
 
             // Only add to xorbs vec if not seen before

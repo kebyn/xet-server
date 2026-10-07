@@ -115,7 +115,7 @@ pub struct StorageConfig {
     /// whole objects in memory. Defaults to OS temp dir + "xet-reconstruction".
     /// Configure via `XET_RECONSTRUCTION_TEMP_DIR` environment variable.
     pub reconstruction_temp_dir: Option<String>,
-    /// I3: Enable integrity verification on LFS downloads.
+    /// Enable integrity verification on LFS downloads.
     /// When enabled, the server streams the file through SHA-256 hasher before sending
     /// to verify the content matches the OID. This catches storage corruption (bit rot)
     /// but adds CPU overhead. Disable for maximum performance on trusted storage.
@@ -130,7 +130,7 @@ impl StorageConfig {
         } else if let Some(local_path) = &self.local_path {
             PathBuf::from(local_path).join(".tmp")
         } else {
-            // I1 fix: Use /var/tmp for S3 backend fallback.
+            // Use /var/tmp for S3 backend fallback.
             // /var/tmp is preferred over /tmp because:
             // 1. Not cleared on reboot (persists across restarts)
             // 2. Usually on a larger partition than /tmp
@@ -164,7 +164,7 @@ pub struct AuthConfig {
     pub public_keys: Vec<PublicKeyConfig>,
     /// List of trusted key IDs (kid values) that are accepted
     pub trusted_kids: Vec<String>,
-    /// I5 fix: Optional path to private key PEM for signing proxy tokens.
+    /// Optional path to private key PEM for signing proxy tokens.
     /// When set, CAS batch API generates short-lived proxy tokens instead of
     /// passing through the user's long-lived token. This prevents long-lived
     /// token leakage in batch API responses.
@@ -356,12 +356,12 @@ impl Default for ServerConfig {
                 verify_download_integrity: false, // Disabled by default for performance
             },
             auth: AuthConfig {
-                // M2 fix: Use /etc/xet instead of /tmp for better security
+                // Use /etc/xet instead of /tmp for better security
                 // /tmp is world-writable and vulnerable to symlink attacks
                 public_key_path: "/etc/xet/public-key.pem".to_string(), // Production default
                 public_keys: Vec::new(),
                 trusted_kids: vec!["hub-key-1".to_string()], // Changed from "test-kid" to match Hub default
-                private_key_path: None, // I5 fix: Optional, set CAS_PRIVATE_KEY_PATH to enable proxy token generation
+                private_key_path: None, // Optional, set CAS_PRIVATE_KEY_PATH to enable proxy token generation
                 signing_kid: None,
             },
             conversion: ConversionConfig::default(),
@@ -423,10 +423,10 @@ impl ServerConfig {
     }
 
     /// Validate configuration parameters.
-    /// M1 fix: Returns Result instead of panicking for better error handling.
-    /// I4 fix: Prevent zero values that would cause service unavailability.
+    /// Returns Result instead of panicking for better error handling.
+    /// Prevent zero values that would cause service unavailability.
     fn validate(&self) -> Result<(), String> {
-        // I4 fix: Validate base URL once at config load time
+        // Validate base URL once at config load time
         self.server.validate_base_url()?;
 
         if self.server.rate_limit_rpm == 0 {
@@ -507,7 +507,7 @@ impl ServerConfig {
         if self.conversion.max_conversion_size == 0 {
             return Err("XET_MAX_CONVERSION_SIZE must be > 0".to_string());
         }
-        // I13 fix: Validate min_conversion_size <= max_conversion_size
+        // Validate min_conversion_size <= max_conversion_size
         if self.conversion.min_conversion_size > self.conversion.max_conversion_size {
             return Err(format!(
                 "XET_MIN_CONVERSION_SIZE ({}) must be <= XET_MAX_CONVERSION_SIZE ({}). \
@@ -540,7 +540,7 @@ impl ServerConfig {
             Self::parse_bool_env("XET_VERIFY_DOWNLOAD_INTEGRITY", false)?;
 
         // CAS-specific auth configuration
-        // M2 fix: Use /etc/xet instead of /tmp for better security
+        // Use /etc/xet instead of /tmp for better security
         let public_key_path = std::env::var("CAS_PUBLIC_KEY_PATH")
             .unwrap_or_else(|_| "/etc/xet/public-key.pem".to_string());
         let public_keys = match std::env::var("CAS_PUBLIC_KEYS") {
@@ -565,7 +565,7 @@ impl ServerConfig {
                 return Err("CAS_TRUSTED_KIDS must contain valid Unicode".to_string());
             }
         };
-        // I5 fix: Optional private key for signing proxy tokens in batch API responses
+        // Optional private key for signing proxy tokens in batch API responses
         let private_key_path = std::env::var("CAS_PRIVATE_KEY_PATH").ok();
         let signing_kid = std::env::var("CAS_SIGNING_KID").ok();
 

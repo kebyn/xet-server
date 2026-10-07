@@ -200,7 +200,7 @@ impl Default for Metrics {
     }
 }
 
-// M1 fix: Remove redundant Arc wrapper. lazy_static already provides global shared
+// Remove redundant Arc wrapper. lazy_static already provides global shared
 // access via &'static reference. All call sites use method calls (record_request etc.)
 // which work with auto-deref on &Metrics.
 lazy_static::lazy_static! {

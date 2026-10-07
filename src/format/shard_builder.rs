@@ -314,7 +314,7 @@ impl ShardBuilder {
             .serialize(&mut footer_cursor)
             .map_err(XetError::IoError)?;
 
-        // M8 fix: Use proper error instead of debug_assert_eq! which is a no-op in release builds.
+        // Use proper error instead of debug_assert_eq! which is a no-op in release builds.
         // Shard binary size correctness is critical for data integrity — detect mismatches
         // in all build configurations, not just debug.
         if buf.len() != total_size {

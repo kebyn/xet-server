@@ -42,7 +42,7 @@ pub async fn upload_shard(
 
     // Stream payload to temp file with incremental BLAKE3 hashing
     let temp_dir = config.storage.resolve_upload_temp_dir();
-    // M7 fix: use the same pre-check threshold as the xorb/LFS upload paths
+    // use the same pre-check threshold as the xorb/LFS upload paths
     // (min(max_body_size, 100MB)) so all upload entry points behave alike.
     let check_bytes = std::cmp::min(
         config.server.max_body_size_bytes() as u64,

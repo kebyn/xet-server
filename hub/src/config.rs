@@ -14,14 +14,14 @@ pub struct ServerSettings {
     /// Configure via `HUB_RATE_LIMIT_RPM` environment variable.
     /// Default: 120 RPM.
     pub rate_limit_rpm: u32,
-    /// M5 fix: Cached base URL computed at config load time, avoiding repeated clone+trim.
+    /// Cached base URL computed at config load time, avoiding repeated clone+trim.
     #[serde(skip)]
     cached_base_url: Option<String>,
 }
 
 impl ServerSettings {
     /// Get the base URL for the server.
-    /// M5 fix: Returns cached value if available, otherwise computes it.
+    /// Returns cached value if available, otherwise computes it.
     pub fn base_url(&self) -> String {
         if let Some(ref cached) = self.cached_base_url {
             return cached.clone();
@@ -136,11 +136,11 @@ impl Default for CasSettings {
 pub struct StorageSettings {
     pub inline_threshold_bytes: u64,
     /// Directory for temporary files during streaming uploads.
-    /// I1 fix: Use application-specific directory instead of /tmp for security.
+    /// Use application-specific directory instead of /tmp for security.
     /// /tmp is world-writable and vulnerable to symlink attacks.
     /// Configure via HUB_UPLOAD_TEMP_DIR environment variable.
     pub upload_temp_dir: String,
-    /// M2: Maximum upload size in bytes. Defaults to 512MB.
+    /// Maximum upload size in bytes. Defaults to 512MB.
     /// Configure via HUB_MAX_UPLOAD_SIZE environment variable.
     pub max_upload_size: u64,
 }
@@ -149,7 +149,7 @@ impl Default for StorageSettings {
     fn default() -> Self {
         StorageSettings {
             inline_threshold_bytes: 1024 * 1024,               // 1MB
-            upload_temp_dir: "./data/hub-uploads".to_string(), // I1 fix: Use app-specific dir instead of /tmp
+            upload_temp_dir: "./data/hub-uploads".to_string(), // Use app-specific dir instead of /tmp
             max_upload_size: 512 * 1024 * 1024,                // 512MB
         }
     }
@@ -181,8 +181,8 @@ impl HubConfig {
     }
 
     /// Validate configuration parameters.
-    /// M1 fix: Returns Result instead of panicking for better error handling.
-    /// I4 fix: Prevent zero values that would cause service unavailability.
+    /// Returns Result instead of panicking for better error handling.
+    /// Prevent zero values that would cause service unavailability.
     fn validate(&self) -> Result<(), String> {
         if let Some(public_base_url) = &self.server.public_base_url {
             validate_http_url("HUB_PUBLIC_BASE_URL", public_base_url)?;
@@ -337,7 +337,7 @@ impl HubConfig {
             storage: StorageSettings {
                 inline_threshold_bytes: parse_env("HUB_INLINE_THRESHOLD", 1024 * 1024)?,
                 upload_temp_dir: env::var("HUB_UPLOAD_TEMP_DIR")
-                    .unwrap_or_else(|_| "./data/hub-uploads".to_string()), // I1 fix: Use app-specific dir instead of /tmp
+                    .unwrap_or_else(|_| "./data/hub-uploads".to_string()), // Use app-specific dir instead of /tmp
                 max_upload_size: parse_env("HUB_MAX_UPLOAD_SIZE", 512 * 1024 * 1024)?,
             },
         };
@@ -357,7 +357,7 @@ impl HubConfig {
         Self::try_from_env().unwrap_or_else(|e| panic!("Configuration validation failed: {}", e))
     }
 
-    /// M3: Load configuration from a TOML file
+    /// Load configuration from a TOML file
     pub fn from_file(path: &str) -> Result<Self, String> {
         let config = Self::parse_file(path)?;
         config.validate()?;
@@ -370,7 +370,7 @@ impl HubConfig {
         toml::from_str(&content).map_err(|e| format!("Failed to parse config file {}: {}", path, e))
     }
 
-    /// M3: Load configuration from file (if path provided) with environment variable overrides.
+    /// Load configuration from file (if path provided) with environment variable overrides.
     /// Priority: environment variables > file > defaults.
     pub fn try_from_file_or_env() -> Result<Self, String> {
         // Start with file-based config if HUB_CONFIG_FILE is set
@@ -447,12 +447,12 @@ impl HubConfig {
         }
 
         config.validate()?;
-        // M5 fix: Cache computed base URL to avoid repeated allocation
+        // Cache computed base URL to avoid repeated allocation
         config.server.cache_base_url();
         Ok(config)
     }
 
-    /// M3: Load configuration from file (if path provided) with environment variable overrides.
+    /// Load configuration from file (if path provided) with environment variable overrides.
     /// Priority: environment variables > file > defaults.
     ///
     /// Prefer [`HubConfig::try_from_file_or_env`] in production entrypoints so startup

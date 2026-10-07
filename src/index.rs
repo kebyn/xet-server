@@ -192,7 +192,7 @@ impl MetadataIndex {
     /// Rebuild the index by scanning shards in storage.
     /// Called once at server startup.
     ///
-    /// I1/M1 fix: Uses bounded parallelism to fetch and parse shards concurrently,
+    /// Uses bounded parallelism to fetch and parse shards concurrently,
     /// significantly reducing startup time for large storage (thousands of shards).
     /// Processes shards in batches of 10 to balance parallelism with resource usage.
     ///

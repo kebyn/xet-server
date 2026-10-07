@@ -9,7 +9,7 @@ use crate::types::MerkleHash;
 /// Internal tracking for each chunk added to the builder.
 struct ChunkData {
     chunk_hash: MerkleHash,
-    /// M4 fix: Store the serialized chunk bytes (header + compressed data) to avoid
+    /// Store the serialized chunk bytes (header + compressed data) to avoid
     /// re-serializing in build(). Previously, add_chunk() serialized to compute the hash,
     /// then build() re-created the header and serialized again — doubling CPU and allocations.
     serialized_chunk: Vec<u8>,
@@ -122,7 +122,7 @@ impl XorbBuilder {
         let boundary_offsets: Vec<u32> = self.chunks.iter().map(|c| c.boundary_offset).collect();
         let unpacked_offsets: Vec<u32> = self.chunks.iter().map(|c| c.unpacked_offset).collect();
 
-        // M4 fix: Write pre-serialized chunk bytes directly (no re-serialization).
+        // Write pre-serialized chunk bytes directly (no re-serialization).
         // Each chunk was fully serialized (header + compressed data) in add_chunk().
         for chunk in &self.chunks {
             buf.extend_from_slice(&chunk.serialized_chunk);

@@ -128,7 +128,7 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
     let readiness = ReadinessState::new();
 
     // Rebuild MetadataIndex from stored shards (stateless server)
-    // I1 fix: Pass Arc clone for parallel shard fetching
+    // Pass Arc clone for parallel shard fetching
     let rebuild_temp_dir = config.storage.resolve_reconstruction_temp_dir();
     match index
         .rebuild_from_storage(storage.clone(), rebuild_temp_dir)
@@ -209,7 +209,7 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
         App::new()
             .wrap(Logger::default())
             .wrap(from_fn(metrics_middleware))
-            // I3 fix: PayloadConfig bounds non-upload routes (web::Bytes, web::Json).
+            // PayloadConfig bounds non-upload routes (web::Bytes, web::Json).
             // Upload handlers use web::Payload which bypasses this limit and
             // enforce max_body_size_bytes manually via streaming byte counting.
             //

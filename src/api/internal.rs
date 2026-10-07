@@ -85,7 +85,7 @@ pub async fn get_blob_state(
             error: format!("Blob not found: {}", oid),
         }),
         Err(error) => {
-            // I3 fix: Log internal error details but don't leak them to the client.
+            // Log internal error details but don't leak them to the client.
             // The error message could contain file paths, S3 bucket names, or other
             // infrastructure details that shouldn't be exposed even on internal endpoints.
             warn!("Storage error checking blob {}: {}", oid, error);

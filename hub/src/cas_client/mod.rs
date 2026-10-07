@@ -400,7 +400,7 @@ impl CasClient {
     }
 
     /// Download a blob from CAS via LFS endpoint (streaming version)
-    /// I6: Returns a streaming response to avoid loading entire file into memory.
+    /// Returns a streaming response to avoid loading entire file into memory.
     /// Memory usage is O(chunk_size) regardless of file size.
     pub async fn proxy_lfs_download_streaming(
         &self,

@@ -32,7 +32,7 @@ fn repo_to_json(repo: &Repo) -> serde_json::Value {
 }
 
 /// Convert Unix timestamp to ISO 8601 datetime string.
-/// M6 fix: Log warning on invalid timestamp instead of silently returning epoch.
+/// Log warning on invalid timestamp instead of silently returning epoch.
 fn chrono_datetime(timestamp: i64) -> String {
     match DateTime::from_timestamp(timestamp, 0) {
         Some(dt) => dt.format("%Y-%m-%dT%H:%M:%SZ").to_string(),

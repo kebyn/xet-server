@@ -349,7 +349,7 @@ pub fn build_app(
 }
 
 pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
-    // M2 fix: Create one shared SQLite pool for both TokenStore and MetadataStore.
+    // Create one shared SQLite pool for both TokenStore and MetadataStore.
     // SQLite only supports one writer at a time; sharing the configured pool keeps
     // total DB connections bounded across both stores.
     let shared_pool =
@@ -382,7 +382,7 @@ pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
     );
 
     // Initialize xet signer
-    // M9 fix: Check private key file permissions (private keys are more sensitive than public keys).
+    // Check private key file permissions (private keys are more sensitive than public keys).
     // If the private key is world-readable, other users could forge authentication tokens.
     #[cfg(unix)]
     {
@@ -412,7 +412,7 @@ pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
             &config.auth.kid,
             config.auth.token_ttl_seconds,
             config.auth.proxy_token_ttl_seconds,
-            config.auth.internal_token_ttl_seconds, // C1 fix: configurable internal token TTL
+            config.auth.internal_token_ttl_seconds, // configurable internal token TTL
         )
         .map_err(|e| std::io::Error::other(format!("Failed to create xet signer: {}", e)))?,
     );
@@ -424,8 +424,8 @@ pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
     );
 
     // Optional: verify CAS connectivity at startup (async, non-blocking)
-    // M5 fix: Add timeout to prevent health check from hanging indefinitely
-    // M-2 fix: Make timeout configurable via HUB_CAS_HEALTH_CHECK_TIMEOUT_SECS
+    // Add timeout to prevent health check from hanging indefinitely
+    // Make timeout configurable via HUB_CAS_HEALTH_CHECK_TIMEOUT_SECS
     let cas_health = cas_client.clone();
     let health_check_timeout = config.cas.health_check_timeout_seconds;
     tokio::spawn(async move {
@@ -518,13 +518,13 @@ pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
 
     HttpServer::new(move || build_app(deps.clone()))
         .bind(&bind_addr)?
-        // M3 fix: Request timeout prevents slow clients from holding connections indefinitely
+        // Request timeout prevents slow clients from holding connections indefinitely
         .client_request_timeout(std::time::Duration::from_secs(300))
         .client_disconnect_timeout(std::time::Duration::from_secs(5))
         .run()
         .await?;
 
-    // I3 fix: Gracefully close connection pool on shutdown to flush pending transactions
+    // Gracefully close connection pool on shutdown to flush pending transactions
     shared_pool_for_shutdown.close().await;
     tracing::info!("Database connection pool closed");
 

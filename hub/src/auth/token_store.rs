@@ -32,7 +32,7 @@ struct TokenRow {
 /// Async SQLite-based token store with connection pooling
 pub struct TokenStore {
     pool: SqlitePool,
-    /// M4: Server-side salt for token hashing. When provided out-of-band via
+    /// Server-side salt for token hashing. When provided out-of-band via
     /// HUB_TOKEN_HASH_SALT, it mitigates offline attacks against a leaked DB.
     /// If auto-generated, the salt is persisted in this same DB, so a full DB
     /// compromise exposes both — set HUB_TOKEN_HASH_SALT in production.
@@ -46,7 +46,7 @@ impl TokenStore {
 
         Self::init_tables(&pool).await?;
 
-        // C1 fix: Use environment variable if set, otherwise persist generated salt to database.
+        // Use environment variable if set, otherwise persist generated salt to database.
         // This ensures tokens survive restarts even without explicit configuration.
         let hash_salt = match std::env::var("HUB_TOKEN_HASH_SALT") {
             Ok(salt) => {
@@ -64,7 +64,7 @@ impl TokenStore {
         Ok(Self { pool, hash_salt })
     }
 
-    /// M2 fix: Create a TokenStore using a shared connection pool.
+    /// Create a TokenStore using a shared connection pool.
     /// This reduces total SQLite connections when both TokenStore and MetadataStore
     /// access the same database file, preventing SQLITE_BUSY under load.
     pub async fn with_pool(pool: SqlitePool) -> Result<Self, sqlx::Error> {
@@ -105,8 +105,8 @@ impl TokenStore {
     }
 
     /// Get or generate persistent hash salt from database.
-    /// C1 fix: Ensures token hashes remain consistent across restarts.
-    /// I2 fix: Use INSERT OR IGNORE + re-SELECT for atomic upsert behavior.
+    /// Ensures token hashes remain consistent across restarts.
+    /// Use INSERT OR IGNORE + re-SELECT for atomic upsert behavior.
     /// This prevents race conditions in multi-instance deployments where two
     /// instances might both try to INSERT simultaneously.
     async fn get_or_generate_hash_salt(pool: &SqlitePool) -> Result<String, sqlx::Error> {
@@ -124,14 +124,14 @@ impl TokenStore {
         }
 
         // No salt found - generate and persist a new one
-        // I12 fix: Use OsRng for cryptographically secure random salt instead of UUID
+        // Use OsRng for cryptographically secure random salt instead of UUID
         use rand::RngCore;
         let mut salt_bytes = [0u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut salt_bytes);
         let new_salt = hex::encode(salt_bytes);
         let now = crate::util::unix_now_secs() as i64;
 
-        // I2 fix: Use INSERT OR IGNORE to handle concurrent inserts atomically.
+        // Use INSERT OR IGNORE to handle concurrent inserts atomically.
         // If another instance inserted first, this is a no-op.
         sqlx::query("INSERT OR IGNORE INTO _config (key, value, created_at) VALUES (?1, ?2, ?3)")
             .bind(SALT_KEY)
@@ -140,7 +140,7 @@ impl TokenStore {
             .execute(pool)
             .await?;
 
-        // I2 fix: Re-SELECT to get the actual persisted value (handles race condition).
+        // Re-SELECT to get the actual persisted value (handles race condition).
         // If another instance inserted first, we use their salt for consistency.
         let actual_salt: Option<(String,)> =
             sqlx::query_as("SELECT value FROM _config WHERE key = ?1")
@@ -320,9 +320,9 @@ impl TokenStore {
     }
 
     /// Hash a token using HMAC-SHA256 with server-side salt.
-    /// M4: An out-of-band salt (HUB_TOKEN_HASH_SALT) mitigates offline attacks
+    /// An out-of-band salt (HUB_TOKEN_HASH_SALT) mitigates offline attacks
     /// against a leaked DB; an auto-generated salt persisted in the same DB does not.
-    /// M2 fix: Uses HMAC instead of simple concatenation for cryptographic soundness.
+    /// Uses HMAC instead of simple concatenation for cryptographic soundness.
     fn hash_token(&self, token: &str) -> String {
         use hmac::{Hmac, Mac};
         use sha2::Sha256;

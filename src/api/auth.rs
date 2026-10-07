@@ -209,11 +209,11 @@ struct VerificationKey {
 /// Pre-loaded verification keys for authentication.
 /// Created at server startup from AuthConfig to avoid per-request file I/O.
 /// Holds an ordered key ID to public-key mapping for token verification.
-/// I5 fix: Optionally holds a signing key for generating proxy tokens in batch API responses.
+/// Optionally holds a signing key for generating proxy tokens in batch API responses.
 #[derive(Clone)]
 pub struct AuthVerifier {
     verification_keys: Vec<VerificationKey>,
-    /// I5 fix: Optional signing key for generating proxy tokens.
+    /// Optional signing key for generating proxy tokens.
     /// When present, batch API generates short-lived proxy tokens instead of
     /// passing through the user's long-lived token.
     signing_key: Option<SigningKey>,
@@ -262,7 +262,7 @@ impl AuthVerifier {
             .ok_or(AuthError::InvalidKey)?
             .to_string();
 
-        // I5 fix: Optionally load private key for proxy token generation
+        // Optionally load private key for proxy token generation
         let signing_key = if let Some(ref pk_path) = auth_config.private_key_path {
             #[cfg(unix)]
             if key_permissions_too_open(std::path::Path::new(pk_path)) {
@@ -319,7 +319,7 @@ impl AuthVerifier {
         verify_xet_token(token, &verification_key.key, &kid)
     }
 
-    /// I5 fix: Sign a short-lived proxy token for LFS operations.
+    /// Sign a short-lived proxy token for LFS operations.
     ///
     /// Returns None if signing key is not configured (CAS_PRIVATE_KEY_PATH not set).
     /// Proxy tokens are bound to a specific OID and operation, limiting blast radius.

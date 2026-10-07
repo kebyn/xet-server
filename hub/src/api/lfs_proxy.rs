@@ -300,7 +300,7 @@ pub async fn lfs_download(
         return lfs_object_guard_error_response(err);
     }
 
-    // C3 fix: Use streaming download with runtime size enforcement.
+    // Use streaming download with runtime size enforcement.
     // CAS /lfs/objects/{oid} accepts the OID/operation-bound proxy token that
     // Hub just validated; do not use an internal token for this public endpoint.
     match cas_client.proxy_lfs_download_streaming(&oid, &token).await {
@@ -308,7 +308,7 @@ pub async fn lfs_download(
             // Convert reqwest response body to actix-web streaming body
             let stream = resp.bytes_stream();
 
-            // C3 fix: Wrap stream with MaxBytesStream for runtime size enforcement
+            // Wrap stream with MaxBytesStream for runtime size enforcement
             // This protects against CAS bugs that could cause unbounded data transfer
             let max_size = config.cas.max_download_size;
             let limited_stream = MaxBytesStream::new(

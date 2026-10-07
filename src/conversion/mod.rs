@@ -20,8 +20,8 @@ pub use converting_oids::ConvertingOids;
 const CONVERSION_BLOCK_SIZE: usize = 1024 * 1024;
 
 /// RAII guard that deletes a file path when dropped.
-/// I2: Ensures temporary files are cleaned up even on error paths.
-/// I3 fix: Uses spawn_blocking for file deletion to avoid blocking the tokio runtime.
+/// Ensures temporary files are cleaned up even on error paths.
+/// Uses spawn_blocking for file deletion to avoid blocking the tokio runtime.
 struct PathGuard {
     path: std::path::PathBuf,
 }
@@ -34,7 +34,7 @@ impl PathGuard {
 
 impl Drop for PathGuard {
     fn drop(&mut self) {
-        // I3 fix: Use spawn_blocking to avoid blocking the tokio worker thread.
+        // Use spawn_blocking to avoid blocking the tokio worker thread.
         // std::fs::remove_file is a blocking syscall that can block the async runtime.
         // spawn_blocking moves this to a dedicated thread pool for blocking operations.
         let path = self.path.clone();
@@ -191,7 +191,7 @@ impl ConversionPipeline {
             let block = &read_buf[..bytes_read];
             chunk_data_buf.extend_from_slice(block);
 
-            // I5 fix: Safety check to prevent unbounded buffer growth if chunker has a bug.
+            // Safety check to prevent unbounded buffer growth if chunker has a bug.
             // chunk_data_buf should only hold data for the current incomplete chunk.
             // If it grows beyond expected size (e.g., 2x max chunk size), something is wrong.
             // Max chunk size is typically ~64KB, so 10MB is a generous safety margin.
@@ -266,7 +266,7 @@ impl ConversionPipeline {
             chunk_data_buf.drain(..chunk.size);
         }
 
-        // I5 fix: Verify buffer is empty after processing all chunks.
+        // Verify buffer is empty after processing all chunks.
         // If not empty, it means the chunker didn't emit all chunks (bug).
         debug_assert!(
             chunk_data_buf.is_empty(),
@@ -420,10 +420,10 @@ impl ConversionPipeline {
         }
 
         // Fall back to downloading to a temp file
-        // I1 fix: Use download_to_path for streaming download (avoids loading entire
+        // Use download_to_path for streaming download (avoids loading entire
         // blob into RAM). Previously used storage.get() + tokio::fs::write() which
         // buffered the entire blob in memory before writing.
-        // M5 fix: Use app-specific directory instead of system /tmp for security.
+        // Use app-specific directory instead of system /tmp for security.
         let temp_dir = std::env::temp_dir().join("xet-conversion");
         tokio::fs::create_dir_all(&temp_dir).await.map_err(|e| {
             ConversionError::StorageError(format!("Failed to create temp dir: {}", e))
@@ -445,7 +445,7 @@ impl ConversionPipeline {
         );
         let temp_path = temp_dir.join(format!("blob-{}.tmp", unique_id));
 
-        // I1 fix: Use download_to_path for streaming download.
+        // Use download_to_path for streaming download.
         // S3 backend overrides this with ByteStream::write_to_path (bounded memory).
         // Default implementation falls back to get() + write() with a warning.
         self.storage
@@ -458,7 +458,7 @@ impl ConversionPipeline {
                 ))
             })?;
 
-        // I2: Return a RAII guard that will delete the temp file when dropped
+        // Return a RAII guard that will delete the temp file when dropped
         let guard = PathGuard::new(temp_path.clone());
 
         Ok((temp_path, Some(guard)))

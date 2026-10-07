@@ -55,7 +55,7 @@ pub async fn upload_xorb(
         return rej.respond();
     }
 
-    // M7 fix: Use a more reasonable pre-check threshold instead of max_body_size_bytes.
+    // Use a more reasonable pre-check threshold instead of max_body_size_bytes.
     // Previously checked for 2GB free space before every upload, rejecting small uploads
     // on disks with limited (but sufficient) space. Use min(max_body_size, 100MB) as a
     // practical minimum: enough for most uploads, without being overly conservative.
@@ -142,7 +142,7 @@ pub async fn upload_xorb(
     //    reflect which concurrent writer actually won the race, but this only
     //    affects metrics/dedup accounting, not data integrity.
     // For strict dedup accounting, storage backends should implement put_if_absent.
-    // C1 fix: Use xorbs/{hash} format to match conversion pipeline and LFS download.
+    // Use xorbs/{hash} format to match conversion pipeline and LFS download.
     let xorb_hash_hex = xorb_info.xorb_hash.to_hex();
     let xorb_key = format!("xorbs/{}", xorb_hash_hex);
     let already_exists = match storage.exists(&xorb_key).await {
