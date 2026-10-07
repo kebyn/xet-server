@@ -376,7 +376,13 @@ impl HubConfig {
         // Start with file-based config if HUB_CONFIG_FILE is set
         let mut config = match env::var("HUB_CONFIG_FILE") {
             Ok(path) => match Self::parse_file(&path) {
-                Ok(cfg) => cfg,
+                Ok(cfg) => {
+                    // File-based config skips try_from_env, so the legacy
+                    // CAS_BASE_URL warning is surfaced here (and only here —
+                    // the env path warns inside cas_base_url_from_env).
+                    Self::warn_if_legacy_cas_base_url_set();
+                    cfg
+                }
                 Err(e) => {
                     return Err(format!(
                         "HUB_CONFIG_FILE '{}' is set but config could not be loaded: {}",
@@ -422,7 +428,6 @@ impl HubConfig {
         if let Some(size) = Self::parse_optional_env("HUB_DB_POOL_SIZE")? {
             config.metadata.db_pool_size = size;
         }
-        Self::warn_if_legacy_cas_base_url_set();
         if let Ok(url) = env::var("HUB_CAS_BASE_URL") {
             validate_http_url("HUB_CAS_BASE_URL", &url)?;
             config.cas.base_url = url;
