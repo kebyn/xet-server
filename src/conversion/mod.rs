@@ -448,19 +448,57 @@ impl ConversionPipeline {
         // Use download_to_path for streaming download.
         // S3 backend overrides this with ByteStream::write_to_path (bounded memory).
         // Default implementation falls back to get() + write() with a warning.
-        self.storage
-            .download_to_path(object_key, &temp_path)
-            .await
-            .map_err(|e| {
-                ConversionError::StorageError(format!(
-                    "Failed to download blob to temp file: {}",
-                    e
-                ))
-            })?;
+        crate::storage::download_to_path_with_retries(
+            self.storage.as_ref().as_ref(),
+            object_key,
+            &temp_path,
+        )
+        .await
+        .map_err(|e| {
+            ConversionError::StorageError(format!("Failed to download blob to temp file: {}", e))
+        })?;
 
         // Return a RAII guard that will delete the temp file when dropped
         let guard = PathGuard::new(temp_path.clone());
 
         Ok((temp_path, Some(guard)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::flaky::{FlakyStorage, InjectedFailure};
+    use crate::storage::local::LocalStorage;
+    use bytes::Bytes;
+    use std::sync::atomic::Ordering;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn blob_download_retries_transient_storage_failure() {
+        let dir = tempdir().unwrap();
+        let inner = LocalStorage::new(dir.path().to_str().unwrap()).unwrap();
+        let object_key = "lfs/objects/test";
+        inner
+            .put(object_key, Bytes::from_static(b"conversion payload"))
+            .await
+            .unwrap();
+
+        let (storage, attempts) =
+            FlakyStorage::new(inner, object_key.to_string(), InjectedFailure::Transient, 2);
+        let pipeline = ConversionPipeline::new(
+            Arc::new(Box::new(storage)),
+            Arc::new(MetadataIndex::new()),
+            ConversionConfig::default(),
+        );
+
+        let (path, guard) = pipeline
+            .open_blob_for_streaming(object_key)
+            .await
+            .expect("conversion download should recover after a transient failure");
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), b"conversion payload");
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+
+        drop(guard);
     }
 }
