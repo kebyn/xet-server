@@ -21,6 +21,8 @@ pub enum HubError {
     Unprocessable(String),
     #[error("CAS error: {0}")]
     CasError(String),
+    #[error("CAS request timed out: {0}")]
+    CasTimeout(#[source] reqwest::Error),
     #[error("Internal error: {0}")]
     Internal(String),
 }
@@ -41,6 +43,7 @@ impl HubError {
             HubError::BadRequest(_) => "ValidationError",
             HubError::Unprocessable(_) => "UnprocessableEntity",
             HubError::CasError(_) => "BadGateway",
+            HubError::CasTimeout(_) => "GatewayTimeout",
             HubError::Internal(_) => "InternalError",
         }
     }
@@ -54,6 +57,7 @@ impl HubError {
             HubError::BadRequest(_) => StatusCode::BAD_REQUEST,
             HubError::Unprocessable(_) => StatusCode::UNPROCESSABLE_ENTITY,
             HubError::CasError(_) => StatusCode::BAD_GATEWAY,
+            HubError::CasTimeout(_) => StatusCode::GATEWAY_TIMEOUT,
             HubError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -67,6 +71,13 @@ impl actix_web::ResponseError for HubError {
                     "Hub request failed through CAS",
                     self,
                     "BadGateway",
+                );
+            }
+            HubError::CasTimeout(_) => {
+                return gateway_timeout_error_response(
+                    "Hub request timed out through CAS",
+                    self,
+                    "GatewayTimeout",
                 );
             }
             HubError::Internal(_) => {
@@ -97,6 +108,18 @@ pub(crate) fn bad_gateway_error_response(
 ) -> HttpResponse {
     tracing::error!("{}: {}", context, detail);
     HttpResponse::BadGateway().json(ErrorBody {
+        error: CAS_ERROR_MESSAGE.to_string(),
+        error_type: error_type.to_string(),
+    })
+}
+
+pub(crate) fn gateway_timeout_error_response(
+    context: &str,
+    detail: impl Display,
+    error_type: &str,
+) -> HttpResponse {
+    tracing::error!("{}: {}", context, detail);
+    HttpResponse::GatewayTimeout().json(ErrorBody {
         error: CAS_ERROR_MESSAGE.to_string(),
         error_type: error_type.to_string(),
     })
@@ -138,5 +161,46 @@ mod tests {
             assert!(!body.to_string().contains("secret"));
             assert!(!body.to_string().contains("private-cas"));
         }
+    }
+
+    #[actix_web::test]
+    async fn cas_timeout_response_is_sanitized_504() {
+        // A listener that accepts connections but never responds, combined
+        // with a 100 ms client timeout, produces a genuine reqwest timeout
+        // error (reqwest::Error cannot be constructed directly).
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let black_hole = std::thread::spawn(move || {
+            while let Ok((stream, _)) = listener.accept() {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                drop(stream);
+            }
+        });
+
+        let error = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(100))
+            .build()
+            .unwrap()
+            .get(format!("http://{addr}"))
+            .send()
+            .await
+            .expect_err("request against a black hole must time out");
+        assert!(error.is_timeout(), "expected a timeout, got: {error}");
+
+        let response = HubError::CasTimeout(error).error_response();
+        assert_eq!(response.status(), 504);
+        let body = actix_web::body::to_bytes(response.into_body())
+            .await
+            .expect("error response body should be readable");
+        let body: serde_json::Value =
+            serde_json::from_slice(&body).expect("error response should be JSON");
+        assert_eq!(body["error"], CAS_ERROR_MESSAGE);
+        assert_eq!(body["error_type"], "GatewayTimeout");
+        // The reqwest Display embeds the mock URL — it must not leak.
+        assert!(!body.to_string().contains(&addr.to_string()));
+
+        drop(black_hole);
     }
 }

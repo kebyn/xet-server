@@ -402,7 +402,7 @@ Commit API 的 NDJSON 有以下顺序和快照语义：
    - `path`: 文件路径（必需）
    - `oid`: LFS 对象 ID（64 个十六进制字符，且不带 `sha256:` 前缀）
    - `size`: 文件大小（字节，必需，且必须能表示为 SQLite 有符号 64 位整数）
-   - Hub 会通过 CAS `HEAD /internal/blob/{oid}` 的 `X-Blob-Size` 响应头验证对象存在且实际大小与声明值一致。对象不存在或大小不一致返回 `422 Unprocessable Entity`；CAS 响应缺少或包含非法的 `X-Blob-Size` 时返回脱敏的 `502 Bad Gateway`。
+   - Hub 会通过 CAS `HEAD /internal/blob/{oid}` 的 `X-Blob-Size` 响应头验证对象存在且实际大小与声明值一致。对象不存在或大小不一致返回 `422 Unprocessable Entity`；CAS 响应缺少或包含非法的 `X-Blob-Size` 时返回脱敏的 `502 Bad Gateway`；验证请求超过 `HUB_CAS_TIMEOUT_SECS` 时返回脱敏的 `504 Gateway Timeout`。
 
 4. **DeletedEntry**（删除文件）：
    ```json
@@ -548,6 +548,7 @@ Authorization: Bearer hf_xxx
 - `302 Found`: 重定向到 CDN（大文件）
 - `404 Not Found`: 文件不存在
 - `502 Bad Gateway`: CAS 不可用，或返回的内容与 commit snapshot 不一致
+- `504 Gateway Timeout`: 小文件直读 CAS 超过 `HUB_CAS_TIMEOUT_SECS` 超时
 
 小文件直读 CAS 时，Hub 使用短期 `xet_xxx` user token（`read` scope）调用 CAS `/lfs/objects/{oid}`。读取上限收紧为 snapshot 中的文件大小；只有实际字节数与声明大小完全一致，且内容 SHA-256 等于 snapshot OID 时才返回 `200`。校验失败会记录服务端详情并返回脱敏的 `502`，不会重定向到同一个损坏对象。大文件或 LFS action URL 使用 `proxy_xxx` token 绑定 OID 和 download/upload operation。
 
@@ -897,6 +898,12 @@ CAS 网络故障、非法响应、超出 Hub 响应上限或上游 5xx 对客户
 
 部分 commit/LFS 端点为兼容既有契约会使用 `CasError` 作为 502 的 `error_type`；稳定保证是状态码和通用 `error` 文案。CAS 返回的 4xx 状态会保留，但响应正文仍会脱敏。
 
+请求超过 `HUB_CAS_TIMEOUT_SECS`（连接或响应超时）时返回 **504 Gateway Timeout**，`error_type` 为 `GatewayTimeout`，`error` 文案与 502 相同的脱敏保证同样适用（不回显 CAS URL）：
+
+```json
+{"error":"Upstream CAS request failed","error_type":"GatewayTimeout"}
+```
+
 ### 常见错误
 
 | HTTP 状态码 | 错误类型 | 描述 |
@@ -910,6 +917,7 @@ CAS 网络故障、非法响应、超出 Hub 响应上限或上游 5xx 对客户
 | 422 | `unprocessable_entity` | 无法处理的实体 |
 | 500 | `InternalError` | 服务器内部错误；详细原因仅记录在服务端日志 |
 | 502 | `BadGateway` / `CasError` | CAS 请求失败；不返回 CAS URL 或 upstream body |
+| 504 | `GatewayTimeout` | CAS 请求超过 `HUB_CAS_TIMEOUT_SECS` 超时；同样脱敏 |
 
 ---
 

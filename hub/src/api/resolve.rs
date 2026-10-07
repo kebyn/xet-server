@@ -1,7 +1,9 @@
 use super::error_json;
 use crate::auth::extract::{AuthRead, AuthUser};
 use crate::config::HubConfig;
-use crate::error::{bad_gateway_error_response, internal_error_response};
+use crate::error::{
+    bad_gateway_error_response, gateway_timeout_error_response, internal_error_response,
+};
 use crate::metadata::{MetadataStore, RepoType};
 use crate::services::resolve::{ResolveFileRequest, ResolveService, ResolveServiceError};
 use actix_web::http::Method;
@@ -133,6 +135,13 @@ async fn handle_resolve(
                                 "error": format!("File content not found in storage: {}", file_entry.cas_hash),
                                 "error_type": "NotFoundError"
                             }));
+                        }
+                        Err(crate::error::HubError::CasTimeout(err)) => {
+                            return gateway_timeout_error_response(
+                                "CAS inline fetch timed out",
+                                err,
+                                "GatewayTimeout",
+                            );
                         }
                         Err(e) => {
                             return bad_gateway_error_response(

@@ -81,6 +81,17 @@ async fn start_mock_cas() -> (String, Arc<Mutex<Vec<(String, String)>>>) {
                     HttpResponse::Ok().json(serde_json::json!({"status": "ready"}))
                 }),
             )
+            // HEAD verification endpoint that answers slowly — used by the
+            // commit-timeout test (the commit flow's internal HEAD check).
+            .route(
+                "/internal/blob/{oid}",
+                web::head().to(|| async {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    HttpResponse::Ok()
+                        .insert_header(("X-Blob-Size", "3"))
+                        .finish()
+                }),
+            )
     })
     .listen(listener)
     .unwrap()
@@ -94,6 +105,14 @@ async fn start_mock_cas() -> (String, Arc<Mutex<Vec<(String, String)>>>) {
 
 /// Real `HubAppDeps` with a real `CasClient` pointed at the mock CAS.
 async fn real_deps(cas_base_url: &str) -> (HubAppDeps, Arc<TokenStore>, Arc<dyn MetadataStore>) {
+    real_deps_with_timeout(cas_base_url, 5).await
+}
+
+/// Like [`real_deps`] but with a configurable CAS request timeout (seconds).
+async fn real_deps_with_timeout(
+    cas_base_url: &str,
+    internal_timeout_seconds: u64,
+) -> (HubAppDeps, Arc<TokenStore>, Arc<dyn MetadataStore>) {
     let token_store = Arc::new(TokenStore::in_memory().await.unwrap());
     let metadata: Arc<dyn MetadataStore> =
         Arc::new(SqliteMetadataStore::in_memory().await.unwrap());
@@ -106,7 +125,7 @@ async fn real_deps(cas_base_url: &str) -> (HubAppDeps, Arc<TokenStore>, Arc<dyn 
     let cas_client = Arc::new(
         CasClient::new(&hub_api::config::CasSettings {
             base_url: cas_base_url.to_string(),
-            internal_timeout_seconds: 5,
+            internal_timeout_seconds,
             max_download_size: 1024,
             health_check_timeout_seconds: 5,
         })
@@ -248,4 +267,42 @@ async fn preupload_is_not_a_data_configuration_error_on_real_app_assembly() {
     let body: serde_json::Value = test::read_body_json(resp).await;
     assert!(!body.to_string().contains("Requested application data"));
     assert_eq!(body["files"][0]["uploadMode"], "regular");
+}
+
+#[actix_web::test]
+async fn commit_cas_verification_timeout_returns_504() {
+    let (cas_url, _uploads) = start_mock_cas().await;
+    let (deps, token_store, metadata) = real_deps_with_timeout(&cas_url, 1).await;
+    let token = token_store
+        .create_token("testuser", "assembly-token", "write")
+        .await
+        .unwrap();
+    metadata
+        .create_repo("testuser", "assembly-model", RepoType::Model, false)
+        .await
+        .unwrap();
+
+    let app = test::init_service(build_app(deps)).await;
+
+    // An lfsFile op triggers the internal CAS HEAD verification, which the
+    // mock answers after 2s — past the 1s client timeout.
+    let body = format!(
+        "{{\"key\":\"header\",\"value\":{{\"summary\":\"slow cas\",\"parentRevision\":null}}}}\n\
+         {{\"key\":\"lfsFile\",\"value\":{{\"path\":\"model.bin\",\"oid\":\"{}\",\"size\":3}}}}",
+        "a".repeat(64)
+    );
+    let req = test::TestRequest::post()
+        .uri("/api/models/testuser/assembly-model/commit/main")
+        .peer_addr(peer())
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .insert_header(("Content-Type", "application/x-ndjson"))
+        .set_payload(body)
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), actix_web::http::StatusCode::GATEWAY_TIMEOUT);
+
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["error"], "Upstream CAS request failed");
+    assert_eq!(body["error_type"], "GatewayTimeout");
 }

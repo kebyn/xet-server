@@ -10,7 +10,10 @@ use crate::commit::id::generate_commit_id;
 use crate::commit::types::MAX_INLINE_SIZE;
 #[cfg(test)]
 use crate::commit::validation::{MAX_FILE_PATH_LENGTH, validate_file_path};
-use crate::error::{CAS_ERROR_MESSAGE, bad_gateway_error_response, internal_error_response};
+use crate::error::{
+    CAS_ERROR_MESSAGE, bad_gateway_error_response, gateway_timeout_error_response,
+    internal_error_response,
+};
 #[cfg(test)]
 use crate::metadata::Revision;
 use crate::metadata::{MetadataStore, RepoType};
@@ -112,6 +115,11 @@ fn commit_error_response(err: CommitServiceError) -> HttpResponse {
         CommitServiceError::BadGateway(message) => {
             bad_gateway_error_response("Commit CAS verification failed", message, "CasError")
         }
+        CommitServiceError::GatewayTimeout(message) => gateway_timeout_error_response(
+            "Commit CAS verification timed out",
+            message,
+            "GatewayTimeout",
+        ),
         CommitServiceError::Internal(message) => internal_error_response("Commit failed", message),
     }
 }

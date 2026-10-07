@@ -39,6 +39,7 @@ pub(crate) enum CommitServiceError {
         message: String,
     },
     BadGateway(String),
+    GatewayTimeout(String),
     Internal(String),
 }
 
@@ -314,6 +315,11 @@ impl CommitService {
                     "LFS file not found in CAS: {}",
                     lfs_op.oid
                 )));
+            }
+            Err(crate::error::HubError::CasTimeout(_)) => {
+                return Err(CommitServiceError::GatewayTimeout(
+                    "CAS verification timed out".to_string(),
+                ));
             }
             Err(err) => {
                 return Err(CommitServiceError::BadGateway(format!(

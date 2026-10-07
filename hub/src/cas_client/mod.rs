@@ -18,6 +18,16 @@ enum ResponseBodyError {
     Read(#[from] reqwest::Error),
 }
 
+/// Classify a send-time transport error: timeouts surface as a distinct
+/// variant so callers can answer 504 instead of a flat 502.
+fn cas_send_error(e: reqwest::Error) -> HubError {
+    if e.is_timeout() {
+        HubError::CasTimeout(e)
+    } else {
+        HubError::CasError(format!("CAS request failed: {}", e))
+    }
+}
+
 async fn read_response_body_limited(
     response: reqwest::Response,
     max_size: u64,
@@ -134,7 +144,7 @@ impl CasClientTrait for CasClient {
             .header("Authorization", format!("Bearer {}", internal_token))
             .send()
             .await
-            .map_err(|e| HubError::CasError(format!("CAS request failed: {}", e)))?;
+            .map_err(cas_send_error)?;
 
         let status = resp.status().as_u16();
         match status {
@@ -233,7 +243,7 @@ impl CasClient {
             .header("Authorization", format!("Bearer {}", internal_token))
             .send()
             .await
-            .map_err(|e| HubError::CasError(format!("CAS request failed: {}", e)))?;
+            .map_err(cas_send_error)?;
 
         let status = resp.status().as_u16();
         match status {
@@ -268,7 +278,7 @@ impl CasClient {
             .json(body)
             .send()
             .await
-            .map_err(|e| HubError::CasError(format!("CAS request failed: {}", e)))?;
+            .map_err(cas_send_error)?;
 
         let status = resp.status().as_u16();
         let response_body = read_response_body_limited(resp, MAX_CAS_CONTROL_RESPONSE_SIZE)
@@ -366,7 +376,7 @@ impl CasClient {
             .header("Authorization", format!("Bearer {}", token))
             .send()
             .await
-            .map_err(|e| HubError::CasError(format!("CAS request failed: {}", e)))?;
+            .map_err(cas_send_error)?;
 
         match resp.status().as_u16() {
             200 => {
@@ -414,7 +424,7 @@ impl CasClient {
             .header("Authorization", format!("Bearer {}", token))
             .send()
             .await
-            .map_err(|e| HubError::CasError(format!("CAS request failed: {}", e)))?;
+            .map_err(cas_send_error)?;
 
         match resp.status().as_u16() {
             200 => {
@@ -551,5 +561,43 @@ mod tests {
             .expect("size enforcement must not wait for upstream EOF")
             .expect_err("body above the runtime limit must be rejected");
         assert!(error.to_string().contains("exceeds limit"));
+    }
+
+    #[actix_web::test]
+    async fn streaming_download_timeout_is_cas_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+
+        let server = HttpServer::new(|| {
+            App::new().route(
+                "/lfs/objects/{oid}",
+                web::get().to(|| async {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    HttpResponse::Ok().body("late")
+                }),
+            )
+        })
+        .listen(listener)
+        .unwrap()
+        .run();
+        tokio::spawn(server);
+
+        let client = CasClient::new(&CasSettings {
+            base_url: format!("http://{address}"),
+            internal_timeout_seconds: 1,
+            max_download_size: 1024,
+            health_check_timeout_seconds: 5,
+        })
+        .unwrap();
+
+        let error = client
+            .proxy_lfs_download_streaming(&"a".repeat(64), "token")
+            .await
+            .expect_err("a 2s response against a 1s timeout must fail");
+        assert!(
+            matches!(error, HubError::CasTimeout(_)),
+            "expected a timeout variant, got: {error}"
+        );
+        assert!(error.to_string().contains("timed out"));
     }
 }

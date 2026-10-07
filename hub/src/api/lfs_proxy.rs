@@ -3,7 +3,10 @@ use crate::auth::token_store::TokenStore;
 use crate::auth::xet_signer::XetSigner;
 use crate::cas_client::CasClient;
 use crate::config::HubConfig;
-use crate::error::{CAS_ERROR_MESSAGE, bad_gateway_error_response, internal_error_response};
+use crate::error::{
+    CAS_ERROR_MESSAGE, bad_gateway_error_response, gateway_timeout_error_response,
+    internal_error_response,
+};
 use crate::lfs_proxy::streaming::MaxBytesStream;
 use crate::lfs_proxy::tokens::{extract_proxy_token, extract_token};
 use crate::services::lfs_batch::{
@@ -332,6 +335,11 @@ pub async fn lfs_download(
                     "error_type": "NotFoundError"
                 }))
             }
+            crate::error::HubError::CasTimeout(_) => gateway_timeout_error_response(
+                "LFS download from CAS timed out",
+                e,
+                "GatewayTimeout",
+            ),
             _ => bad_gateway_error_response("LFS download from CAS failed", e, "BadGateway"),
         },
     }

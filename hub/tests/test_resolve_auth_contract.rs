@@ -246,3 +246,98 @@ async fn resolve_inline_head_uses_snapshot_metadata_without_fetching_cas_body() 
     assert_eq!(headers.get("X-Linked-Size").unwrap(), "6");
     assert_eq!(headers.get("X-Linked-Etag").unwrap().to_str().unwrap(), oid);
 }
+
+#[actix_web::test]
+async fn resolve_inline_cas_timeout_returns_sanitized_504() {
+    // A CAS that accepts connections but answers after 2 seconds, combined
+    // with a 1-second client timeout, exercises the timeout classification
+    // end to end through the resolve inline fetch.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = actix_web::HttpServer::new(|| {
+        App::new().route(
+            "/lfs/objects/{oid}",
+            web::get().to(|| async {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                HttpResponse::Ok().body("late")
+            }),
+        )
+    })
+    .listen(listener)
+    .unwrap()
+    .run();
+    tokio::spawn(server);
+    wait_for_listener(addr).await;
+    let cas_url = format!("http://127.0.0.1:{}", addr.port());
+
+    let signer = test_signer();
+    let token_store = Arc::new(TokenStore::in_memory().await.unwrap());
+    let token = token_store
+        .create_token("testuser", "read-token", "read")
+        .await
+        .unwrap();
+    let metadata: Arc<dyn MetadataStore> =
+        Arc::new(SqliteMetadataStore::in_memory().await.unwrap());
+    let repo = metadata
+        .create_repo("testuser", "my-model", RepoType::Model, false)
+        .await
+        .unwrap();
+    let commit_id = "commit123";
+    metadata
+        .add_revision(Revision {
+            commit_id: commit_id.to_string(),
+            repo_id: repo.id,
+            parent: None,
+            message: "initial".to_string(),
+            author: "testuser".to_string(),
+            created_at: 1000,
+        })
+        .await
+        .unwrap();
+    metadata.set_head(repo.id, commit_id).await.unwrap();
+    metadata
+        .add_file_entries(vec![FileEntry {
+            path: "config.json".to_string(),
+            repo_id: repo.id,
+            commit_id: commit_id.to_string(),
+            size: 3,
+            cas_hash: "a".repeat(64),
+            is_lfs: false,
+        }])
+        .await
+        .unwrap();
+
+    let cas_client = Arc::new(
+        CasClient::new(&CasSettings {
+            base_url: cas_url,
+            internal_timeout_seconds: 1,
+            ..CasSettings::default()
+        })
+        .expect("CAS client should be created"),
+    );
+
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(token_store))
+            .app_data(web::Data::new(metadata))
+            .app_data(web::Data::new(HubConfig::default()))
+            .app_data(web::Data::new(signer))
+            .app_data(web::Data::new(cas_client))
+            .route(
+                "/{ns}/{repo}/resolve/{revision}/{path:.*}",
+                web::get().to(hub_api::api::resolve::resolve_model),
+            ),
+    )
+    .await;
+
+    let req = test::TestRequest::get()
+        .uri("/testuser/my-model/resolve/main/config.json")
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), actix_web::http::StatusCode::GATEWAY_TIMEOUT);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["error"], "Upstream CAS request failed");
+    assert_eq!(body["error_type"], "GatewayTimeout");
+}
