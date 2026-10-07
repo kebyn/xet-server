@@ -75,9 +75,9 @@ fn repo_service_error_response(err: RepoServiceError, not_found_type: &str) -> H
 
 /// Internal helper to create a repo
 async fn create_repo(
+    repo_type: RepoType,
     auth: AuthUser<AuthWrite>,
     body: web::Json<CreateRepoRequest>,
-    repo_type: RepoType,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
     let service = repo_service(&metadata);
@@ -130,9 +130,9 @@ pub async fn create_repo_unified(
 
 /// Internal helper to get repo info
 async fn get_repo_info(
+    repo_type: RepoType,
     auth: AuthUser<AuthRead>,
     path: web::Path<(String, String)>,
-    repo_type: RepoType,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
     let (namespace, repo_name) = path.into_inner();
@@ -150,9 +150,9 @@ async fn get_repo_info(
 
 /// Internal helper to delete a repo
 async fn delete_repo_info(
+    repo_type: RepoType,
     auth: AuthUser<AuthWrite>,
     path: web::Path<(String, String)>,
-    repo_type: RepoType,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
     let (namespace, repo_name) = path.into_inner();
@@ -168,111 +168,55 @@ async fn delete_repo_info(
     }
 }
 
-// Model handlers
-pub async fn create_model(
-    auth: AuthUser<AuthWrite>,
-    body: web::Json<CreateRepoRequest>,
-    metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
-) -> HttpResponse {
-    create_repo(auth, body, RepoType::Model, metadata).await
+repo_type_handlers! {
+    /// POST /api/{models,datasets,spaces} - create a repo of that type.
+    [create_model, create_dataset, create_space]
+    (
+        auth: AuthUser<AuthWrite>,
+        body: web::Json<CreateRepoRequest>,
+        metadata: web::Data<std::sync::Arc<dyn MetadataStore>>
+    ) -> HttpResponse
+    = create_repo(auth, body, metadata)
 }
 
-pub async fn get_repo_model(
-    auth: AuthUser<AuthRead>,
-    path: web::Path<(String, String)>,
-    metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
-) -> HttpResponse {
-    get_repo_info(auth, path, RepoType::Model, metadata).await
+repo_type_handlers! {
+    /// GET /api/{models,datasets,spaces}/{ns}/{repo}
+    [get_repo_model, get_repo_dataset, get_repo_space]
+    (
+        auth: AuthUser<AuthRead>,
+        path: web::Path<(String, String)>,
+        metadata: web::Data<std::sync::Arc<dyn MetadataStore>>
+    ) -> HttpResponse
+    = get_repo_info(auth, path, metadata)
 }
 
-pub async fn delete_repo_model(
-    auth: AuthUser<AuthWrite>,
-    path: web::Path<(String, String)>,
-    metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
-) -> HttpResponse {
-    delete_repo_info(auth, path, RepoType::Model, metadata).await
+repo_type_handlers! {
+    /// DELETE /api/{models,datasets,spaces}/{ns}/{repo}
+    [delete_repo_model, delete_repo_dataset, delete_repo_space]
+    (
+        auth: AuthUser<AuthWrite>,
+        path: web::Path<(String, String)>,
+        metadata: web::Data<std::sync::Arc<dyn MetadataStore>>
+    ) -> HttpResponse
+    = delete_repo_info(auth, path, metadata)
 }
 
-// Dataset handlers
-pub async fn create_dataset(
-    auth: AuthUser<AuthWrite>,
-    body: web::Json<CreateRepoRequest>,
-    metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
-) -> HttpResponse {
-    create_repo(auth, body, RepoType::Dataset, metadata).await
-}
-
-pub async fn get_repo_dataset(
-    auth: AuthUser<AuthRead>,
-    path: web::Path<(String, String)>,
-    metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
-) -> HttpResponse {
-    get_repo_info(auth, path, RepoType::Dataset, metadata).await
-}
-
-pub async fn delete_repo_dataset(
-    auth: AuthUser<AuthWrite>,
-    path: web::Path<(String, String)>,
-    metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
-) -> HttpResponse {
-    delete_repo_info(auth, path, RepoType::Dataset, metadata).await
-}
-
-// Space handlers
-pub async fn create_space(
-    auth: AuthUser<AuthWrite>,
-    body: web::Json<CreateRepoRequest>,
-    metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
-) -> HttpResponse {
-    create_repo(auth, body, RepoType::Space, metadata).await
-}
-
-pub async fn get_repo_space(
-    auth: AuthUser<AuthRead>,
-    path: web::Path<(String, String)>,
-    metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
-) -> HttpResponse {
-    get_repo_info(auth, path, RepoType::Space, metadata).await
-}
-
-pub async fn delete_repo_space(
-    auth: AuthUser<AuthWrite>,
-    path: web::Path<(String, String)>,
-    metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
-) -> HttpResponse {
-    delete_repo_info(auth, path, RepoType::Space, metadata).await
-}
-
-/// GET /api/{models,datasets,spaces}/{ns}/{repo}/revision/{rev}
-/// Returns revision info. For new repos with no commits, returns empty revision.
-pub async fn get_revision_model(
-    auth: AuthUser<AuthRead>,
-    path: web::Path<(String, String, String)>,
-    metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
-) -> HttpResponse {
-    get_revision_handler(auth, path, RepoType::Model, metadata).await
-}
-
-pub async fn get_revision_dataset(
-    auth: AuthUser<AuthRead>,
-    path: web::Path<(String, String, String)>,
-    metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
-) -> HttpResponse {
-    get_revision_handler(auth, path, RepoType::Dataset, metadata).await
-}
-
-pub async fn get_revision_space(
-    auth: AuthUser<AuthRead>,
-    path: web::Path<(String, String, String)>,
-    metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
-) -> HttpResponse {
-    get_revision_handler(auth, path, RepoType::Space, metadata).await
+repo_type_handlers! {
+    /// GET /api/{models,datasets,spaces}/{ns}/{repo}/revision/{rev}
+    /// Returns revision info. For new repos with no commits, returns empty revision.
+    [get_revision_model, get_revision_dataset, get_revision_space]
+    (
+        auth: AuthUser<AuthRead>,
+        path: web::Path<(String, String, String)>,
+        metadata: web::Data<std::sync::Arc<dyn MetadataStore>>
+    ) -> HttpResponse
+    = get_revision_handler(auth, path, metadata)
 }
 
 async fn get_revision_handler(
+    repo_type: RepoType,
     auth: AuthUser<AuthRead>,
     path: web::Path<(String, String, String)>,
-    repo_type: RepoType,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
     let (namespace, repo_name, revision) = path.into_inner();

@@ -25,9 +25,9 @@ fn resolve_service_error_response(err: ResolveServiceError) -> HttpResponse {
 
 /// Internal helper for file resolve/download
 async fn handle_resolve(
+    repo_type: RepoType,
     req: HttpRequest,
     path: web::Path<(String, String, String, String)>,
-    repo_type: RepoType,
     auth: AuthUser<AuthRead>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
     config: web::Data<HubConfig>,
@@ -160,37 +160,17 @@ async fn handle_resolve(
         .finish()
 }
 
-// Model resolve handler
-pub async fn resolve_model(
-    req: HttpRequest,
-    path: web::Path<(String, String, String, String)>,
-    auth: AuthUser<AuthRead>,
-    metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
-    config: web::Data<HubConfig>,
-) -> HttpResponse {
-    handle_resolve(req, path, RepoType::Model, auth, metadata, config).await
-}
-
-// Dataset resolve handler
-pub async fn resolve_dataset(
-    req: HttpRequest,
-    path: web::Path<(String, String, String, String)>,
-    auth: AuthUser<AuthRead>,
-    metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
-    config: web::Data<HubConfig>,
-) -> HttpResponse {
-    handle_resolve(req, path, RepoType::Dataset, auth, metadata, config).await
-}
-
-// Space resolve handler
-pub async fn resolve_space(
-    req: HttpRequest,
-    path: web::Path<(String, String, String, String)>,
-    auth: AuthUser<AuthRead>,
-    metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
-    config: web::Data<HubConfig>,
-) -> HttpResponse {
-    handle_resolve(req, path, RepoType::Space, auth, metadata, config).await
+repo_type_handlers! {
+    /// GET|HEAD /{models,datasets,spaces}/{ns}/{repo}/resolve/{rev}/{path:.*}
+    [resolve_model, resolve_dataset, resolve_space]
+    (
+        req: HttpRequest,
+        path: web::Path<(String, String, String, String)>,
+        auth: AuthUser<AuthRead>,
+        metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
+        config: web::Data<HubConfig>
+    ) -> HttpResponse
+    = handle_resolve(req, path, auth, metadata, config)
 }
 
 #[cfg(test)]

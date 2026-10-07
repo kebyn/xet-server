@@ -39,10 +39,10 @@ fn token_exchange_error_response(err: TokenExchangeServiceError) -> HttpResponse
 }
 
 async fn do_exchange(
+    repo_type: RepoType,
+    required_scope: ExchangeScope,
     info: &TokenInfo,
     path: (String, String, String),
-    required_scope: ExchangeScope,
-    repo_type: RepoType,
     xet_signer: web::Data<Arc<XetSigner>>,
     metadata: web::Data<Arc<dyn MetadataStore>>,
     config: web::Data<crate::config::HubConfig>,
@@ -72,121 +72,30 @@ async fn do_exchange(
     })
 }
 
-// Model endpoints
-pub async fn exchange_model_read(
-    auth: AuthUser<AuthRead>,
-    path: web::Path<(String, String, String)>,
-    xet_signer: web::Data<std::sync::Arc<XetSigner>>,
-    metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
-    config: web::Data<crate::config::HubConfig>,
-) -> HttpResponse {
-    do_exchange(
-        &auth.info,
-        path.into_inner(),
-        ExchangeScope::Read,
-        RepoType::Model,
-        xet_signer,
-        metadata,
-        config,
-    )
-    .await
+repo_type_handlers! {
+    /// GET /api/{models,datasets,spaces}/{ns}/{repo}/xet-read-token/{rev}
+    [exchange_model_read, exchange_dataset_read, exchange_space_read]
+    (
+        auth: AuthUser<AuthRead>,
+        path: web::Path<(String, String, String)>,
+        xet_signer: web::Data<std::sync::Arc<XetSigner>>,
+        metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
+        config: web::Data<crate::config::HubConfig>
+    ) -> HttpResponse
+    = do_exchange(ExchangeScope::Read, &auth.info, path.into_inner(), xet_signer, metadata, config)
 }
 
-pub async fn exchange_model_write(
-    auth: AuthUser<AuthWrite>,
-    path: web::Path<(String, String, String)>,
-    xet_signer: web::Data<std::sync::Arc<XetSigner>>,
-    metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
-    config: web::Data<crate::config::HubConfig>,
-) -> HttpResponse {
-    do_exchange(
-        &auth.info,
-        path.into_inner(),
-        ExchangeScope::Write,
-        RepoType::Model,
-        xet_signer,
-        metadata,
-        config,
-    )
-    .await
-}
-
-// Dataset endpoints
-pub async fn exchange_dataset_read(
-    auth: AuthUser<AuthRead>,
-    path: web::Path<(String, String, String)>,
-    xet_signer: web::Data<std::sync::Arc<XetSigner>>,
-    metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
-    config: web::Data<crate::config::HubConfig>,
-) -> HttpResponse {
-    do_exchange(
-        &auth.info,
-        path.into_inner(),
-        ExchangeScope::Read,
-        RepoType::Dataset,
-        xet_signer,
-        metadata,
-        config,
-    )
-    .await
-}
-
-pub async fn exchange_dataset_write(
-    auth: AuthUser<AuthWrite>,
-    path: web::Path<(String, String, String)>,
-    xet_signer: web::Data<std::sync::Arc<XetSigner>>,
-    metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
-    config: web::Data<crate::config::HubConfig>,
-) -> HttpResponse {
-    do_exchange(
-        &auth.info,
-        path.into_inner(),
-        ExchangeScope::Write,
-        RepoType::Dataset,
-        xet_signer,
-        metadata,
-        config,
-    )
-    .await
-}
-
-// Space endpoints
-pub async fn exchange_space_read(
-    auth: AuthUser<AuthRead>,
-    path: web::Path<(String, String, String)>,
-    xet_signer: web::Data<std::sync::Arc<XetSigner>>,
-    metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
-    config: web::Data<crate::config::HubConfig>,
-) -> HttpResponse {
-    do_exchange(
-        &auth.info,
-        path.into_inner(),
-        ExchangeScope::Read,
-        RepoType::Space,
-        xet_signer,
-        metadata,
-        config,
-    )
-    .await
-}
-
-pub async fn exchange_space_write(
-    auth: AuthUser<AuthWrite>,
-    path: web::Path<(String, String, String)>,
-    xet_signer: web::Data<std::sync::Arc<XetSigner>>,
-    metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
-    config: web::Data<crate::config::HubConfig>,
-) -> HttpResponse {
-    do_exchange(
-        &auth.info,
-        path.into_inner(),
-        ExchangeScope::Write,
-        RepoType::Space,
-        xet_signer,
-        metadata,
-        config,
-    )
-    .await
+repo_type_handlers! {
+    /// GET /api/{models,datasets,spaces}/{ns}/{repo}/xet-write-token/{rev}
+    [exchange_model_write, exchange_dataset_write, exchange_space_write]
+    (
+        auth: AuthUser<AuthWrite>,
+        path: web::Path<(String, String, String)>,
+        xet_signer: web::Data<std::sync::Arc<XetSigner>>,
+        metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
+        config: web::Data<crate::config::HubConfig>
+    ) -> HttpResponse
+    = do_exchange(ExchangeScope::Write, &auth.info, path.into_inner(), xet_signer, metadata, config)
 }
 
 #[cfg(test)]

@@ -1,3 +1,35 @@
+/// Generate the three per-repo-type handler wrappers around one shared impl.
+///
+/// Expands to `pub async fn $model`, `pub async fn $dataset`, and
+/// `pub async fn $space` with the parameter list `($($params)*)` re-emitted
+/// verbatim (actix requires concrete fn items with extractor parameters),
+/// each delegating to `$call(crate::metadata::RepoType::<variant>, $($args)*)`.
+/// The shared impl fn must therefore take `repo_type: RepoType` as its
+/// FIRST parameter.
+macro_rules! repo_type_handlers {
+    (
+        $(#[$doc:meta])*
+        [$model:ident, $dataset:ident, $space:ident]
+        ($($params:tt)*) -> $ret:ty
+        = $call:ident($($args:tt)*)
+    ) => {
+        $(#[$doc])*
+        pub async fn $model($($params)*) -> $ret {
+            $call(crate::metadata::RepoType::Model, $($args)*).await
+        }
+
+        $(#[$doc])*
+        pub async fn $dataset($($params)*) -> $ret {
+            $call(crate::metadata::RepoType::Dataset, $($args)*).await
+        }
+
+        $(#[$doc])*
+        pub async fn $space($($params)*) -> $ret {
+            $call(crate::metadata::RepoType::Space, $($args)*).await
+        }
+    };
+}
+
 pub mod commit;
 pub mod lfs_proxy;
 pub mod preupload;

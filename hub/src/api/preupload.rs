@@ -67,10 +67,10 @@ fn upload_mode_to_api(mode: UploadMode) -> &'static str {
 
 /// Internal helper for preupload handling
 async fn handle_preupload(
+    repo_type: RepoType,
     auth: AuthUser<AuthWrite>,
     path: web::Path<(String, String, String)>,
     body: web::Json<PreuploadRequest>,
-    repo_type: RepoType,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
     config: web::Data<crate::config::HubConfig>,
 ) -> HttpResponse {
@@ -118,37 +118,17 @@ async fn handle_preupload(
     })
 }
 
-// Model preupload handler
-pub async fn preupload_model(
-    auth: AuthUser<AuthWrite>,
-    path: web::Path<(String, String, String)>,
-    body: web::Json<PreuploadRequest>,
-    metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
-    config: web::Data<crate::config::HubConfig>,
-) -> HttpResponse {
-    handle_preupload(auth, path, body, RepoType::Model, metadata, config).await
-}
-
-// Dataset preupload handler
-pub async fn preupload_dataset(
-    auth: AuthUser<AuthWrite>,
-    path: web::Path<(String, String, String)>,
-    body: web::Json<PreuploadRequest>,
-    metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
-    config: web::Data<crate::config::HubConfig>,
-) -> HttpResponse {
-    handle_preupload(auth, path, body, RepoType::Dataset, metadata, config).await
-}
-
-// Space preupload handler
-pub async fn preupload_space(
-    auth: AuthUser<AuthWrite>,
-    path: web::Path<(String, String, String)>,
-    body: web::Json<PreuploadRequest>,
-    metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
-    config: web::Data<crate::config::HubConfig>,
-) -> HttpResponse {
-    handle_preupload(auth, path, body, RepoType::Space, metadata, config).await
+repo_type_handlers! {
+    /// POST /api/{models,datasets,spaces}/{ns}/{repo}/preupload/{rev}
+    [preupload_model, preupload_dataset, preupload_space]
+    (
+        auth: AuthUser<AuthWrite>,
+        path: web::Path<(String, String, String)>,
+        body: web::Json<PreuploadRequest>,
+        metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
+        config: web::Data<crate::config::HubConfig>
+    ) -> HttpResponse
+    = handle_preupload(auth, path, body, metadata, config)
 }
 
 #[cfg(test)]

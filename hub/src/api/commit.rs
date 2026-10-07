@@ -27,10 +27,10 @@ use std::sync::Arc;
 /// 2. Orphaned blobs don't affect correctness, only storage efficiency
 /// 3. A background GC job could clean up orphaned blobs in the future if needed
 async fn handle_commit(
+    repo_type: RepoType,
     auth: AuthUser<AuthWrite>,
     path: web::Path<(String, String, String)>,
     body: String,
-    repo_type: RepoType,
     metadata: web::Data<Arc<dyn MetadataStore>>,
     cas_client: web::Data<Arc<dyn CasClientTrait>>,
     signer: web::Data<Arc<XetSigner>>,
@@ -116,67 +116,18 @@ fn commit_error_response(err: CommitServiceError) -> HttpResponse {
     }
 }
 
-// Model commit handler
-pub async fn commit_model(
-    auth: AuthUser<AuthWrite>,
-    path: web::Path<(String, String, String)>,
-    body: String,
-    metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
-    cas_client: web::Data<std::sync::Arc<dyn CasClientTrait>>,
-    signer: web::Data<std::sync::Arc<XetSigner>>,
-) -> HttpResponse {
-    handle_commit(
-        auth,
-        path,
-        body,
-        RepoType::Model,
-        metadata,
-        cas_client,
-        signer,
-    )
-    .await
-}
-
-// Dataset commit handler
-pub async fn commit_dataset(
-    auth: AuthUser<AuthWrite>,
-    path: web::Path<(String, String, String)>,
-    body: String,
-    metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
-    cas_client: web::Data<std::sync::Arc<dyn CasClientTrait>>,
-    signer: web::Data<std::sync::Arc<XetSigner>>,
-) -> HttpResponse {
-    handle_commit(
-        auth,
-        path,
-        body,
-        RepoType::Dataset,
-        metadata,
-        cas_client,
-        signer,
-    )
-    .await
-}
-
-// Space commit handler
-pub async fn commit_space(
-    auth: AuthUser<AuthWrite>,
-    path: web::Path<(String, String, String)>,
-    body: String,
-    metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
-    cas_client: web::Data<std::sync::Arc<dyn CasClientTrait>>,
-    signer: web::Data<std::sync::Arc<XetSigner>>,
-) -> HttpResponse {
-    handle_commit(
-        auth,
-        path,
-        body,
-        RepoType::Space,
-        metadata,
-        cas_client,
-        signer,
-    )
-    .await
+repo_type_handlers! {
+    /// POST /api/{models,datasets,spaces}/{ns}/{repo}/commit/{rev}
+    [commit_model, commit_dataset, commit_space]
+    (
+        auth: AuthUser<AuthWrite>,
+        path: web::Path<(String, String, String)>,
+        body: String,
+        metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
+        cas_client: web::Data<std::sync::Arc<dyn CasClientTrait>>,
+        signer: web::Data<std::sync::Arc<XetSigner>>
+    ) -> HttpResponse
+    = handle_commit(auth, path, body, metadata, cas_client, signer)
 }
 
 #[cfg(test)]

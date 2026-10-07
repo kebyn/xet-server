@@ -95,9 +95,9 @@ fn service_entry_to_api(entry: TreeListingEntry) -> TreeEntry {
 
 /// Internal helper for tree listing
 async fn handle_tree(
+    repo_type: RepoType,
     req: HttpRequest,
     path: web::Path<(String, String, String, String)>,
-    repo_type: RepoType,
     auth: AuthUser<AuthRead>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
@@ -142,74 +142,42 @@ async fn handle_tree(
     response.json(tree_entries)
 }
 
-// Model tree handler
-pub async fn tree_model(
-    req: HttpRequest,
-    path: web::Path<(String, String, String, String)>,
-    auth: AuthUser<AuthRead>,
-    metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
-) -> HttpResponse {
-    handle_tree(req, path, RepoType::Model, auth, metadata).await
-}
-
-// Dataset tree handler
-pub async fn tree_dataset(
-    req: HttpRequest,
-    path: web::Path<(String, String, String, String)>,
-    auth: AuthUser<AuthRead>,
-    metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
-) -> HttpResponse {
-    handle_tree(req, path, RepoType::Dataset, auth, metadata).await
-}
-
-// Space tree handler
-pub async fn tree_space(
-    req: HttpRequest,
-    path: web::Path<(String, String, String, String)>,
-    auth: AuthUser<AuthRead>,
-    metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
-) -> HttpResponse {
-    handle_tree(req, path, RepoType::Space, auth, metadata).await
-}
-
-// Generic no-path tree handler
+/// Tree handler for routes without a path segment: forwards to
+/// [`handle_tree`] with an empty path.
 async fn handle_tree_no_path(
+    repo_type: RepoType,
     req: HttpRequest,
     path: web::Path<(String, String, String)>,
-    repo_type: RepoType,
     auth: AuthUser<AuthRead>,
     metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
 ) -> HttpResponse {
     let (ns, repo, rev) = path.into_inner();
     let full_path = web::Path::from((ns, repo, rev, "".to_string()));
-    handle_tree(req, full_path, repo_type, auth, metadata).await
+    handle_tree(repo_type, req, full_path, auth, metadata).await
 }
 
-pub async fn tree_model_no_path(
-    req: HttpRequest,
-    path: web::Path<(String, String, String)>,
-    auth: AuthUser<AuthRead>,
-    metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
-) -> HttpResponse {
-    handle_tree_no_path(req, path, RepoType::Model, auth, metadata).await
+repo_type_handlers! {
+    /// GET /api/{models,datasets,spaces}/{ns}/{repo}/tree/{rev}/{path:.*}
+    [tree_model, tree_dataset, tree_space]
+    (
+        req: HttpRequest,
+        path: web::Path<(String, String, String, String)>,
+        auth: AuthUser<AuthRead>,
+        metadata: web::Data<std::sync::Arc<dyn MetadataStore>>
+    ) -> HttpResponse
+    = handle_tree(req, path, auth, metadata)
 }
 
-pub async fn tree_dataset_no_path(
-    req: HttpRequest,
-    path: web::Path<(String, String, String)>,
-    auth: AuthUser<AuthRead>,
-    metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
-) -> HttpResponse {
-    handle_tree_no_path(req, path, RepoType::Dataset, auth, metadata).await
-}
-
-pub async fn tree_space_no_path(
-    req: HttpRequest,
-    path: web::Path<(String, String, String)>,
-    auth: AuthUser<AuthRead>,
-    metadata: web::Data<std::sync::Arc<dyn MetadataStore>>,
-) -> HttpResponse {
-    handle_tree_no_path(req, path, RepoType::Space, auth, metadata).await
+repo_type_handlers! {
+    /// GET /api/{models,datasets,spaces}/{ns}/{repo}/tree/{rev}
+    [tree_model_no_path, tree_dataset_no_path, tree_space_no_path]
+    (
+        req: HttpRequest,
+        path: web::Path<(String, String, String)>,
+        auth: AuthUser<AuthRead>,
+        metadata: web::Data<std::sync::Arc<dyn MetadataStore>>
+    ) -> HttpResponse
+    = handle_tree_no_path(req, path, auth, metadata)
 }
 
 #[cfg(test)]
