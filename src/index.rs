@@ -70,6 +70,58 @@ pub struct MetadataIndex {
     chunk_to_xorb: Arc<RwLock<HashMap<MerkleHash, (MerkleHash, u32)>>>,
 }
 
+/// Bounded retry delays for transient shard fetches during index rebuild:
+/// 100 ms after the first attempt, 500 ms after the second. Storage
+/// errors are ambiguous between transient blips (network) and permanent
+/// failures; the small bound makes a misclassification cost ~600 ms.
+const SHARD_FETCH_RETRY_DELAYS: &[std::time::Duration] = &[
+    std::time::Duration::from_millis(100),
+    std::time::Duration::from_millis(500),
+];
+
+/// Fetch and parse a shard with bounded retries for transient storage
+/// errors during index rebuild.
+///
+/// Only `ShardIoError::Storage` failures are retried, and never for a
+/// missing object (retrying an absent key only burns the delay budget).
+/// Parse failures are permanent and returned immediately. Each attempt
+/// fetches into a fresh temp file cleaned up by its guard.
+async fn parse_shard_with_retries(
+    storage: &dyn crate::storage::StorageBackend,
+    key: &str,
+    temp_dir: &std::path::Path,
+    retry_delays: &[std::time::Duration],
+) -> Result<crate::format::shard::MDBShardFile, crate::shard_io::ShardIoError> {
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        match crate::shard_io::parse_shard_from_storage(storage, key, temp_dir).await {
+            Ok(shard) => return Ok(shard),
+            Err(error) if attempt <= retry_delays.len() && is_retryable_storage_error(&error) => {
+                let delay = retry_delays[attempt - 1];
+                tracing::warn!(
+                    "Transient storage error fetching shard {} (attempt {}/{}): {}; retrying in {:?}",
+                    key,
+                    attempt,
+                    retry_delays.len() + 1,
+                    error,
+                    delay
+                );
+                tokio::time::sleep(delay).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn is_retryable_storage_error(error: &crate::shard_io::ShardIoError) -> bool {
+    matches!(
+        error,
+        crate::shard_io::ShardIoError::Storage { source, .. }
+            if !matches!(source, crate::storage::StorageError::NotFound(_))
+    )
+}
+
 impl MetadataIndex {
     /// Create a new empty metadata index (in-memory only)
     pub fn new() -> Self {
@@ -232,10 +284,11 @@ impl MetadataIndex {
                 let temp_dir_clone = temp_dir.clone();
 
                 let handle = tokio::spawn(async move {
-                    let shard = match crate::shard_io::parse_shard_from_storage(
+                    let shard = match parse_shard_with_retries(
                         &**storage_clone,
                         &key,
                         &temp_dir_clone,
+                        SHARD_FETCH_RETRY_DELAYS,
                     )
                     .await
                     {
@@ -342,7 +395,10 @@ mod tests {
         MerkleHash::from(bytes)
     }
 
-    fn build_one_chunk_shard(raw_chunk: &[u8]) -> (Vec<u8>, MerkleHash) {
+    /// A valid one-chunk shard plus the xorb it references, so rebuild tests
+    /// can store both and let `validate_shard_for_index` pass.
+    /// Returns (shard_data, xorb_data, xorb_hash_hex, file_hash).
+    fn build_one_chunk_shard_parts(raw_chunk: &[u8]) -> (Vec<u8>, Vec<u8>, String, MerkleHash) {
         let raw_hash = compute_data_hash(raw_chunk);
         let file_hash = sha256_merkle_hash(raw_chunk);
         let mut xorb_builder = XorbBuilder::new(CompressionScheme::None);
@@ -376,7 +432,18 @@ mod tests {
         );
 
         assert_eq!(compressed_len, raw_chunk.len() as u32);
-        (shard_builder.build().unwrap(), file_hash)
+        (
+            shard_builder.build().unwrap(),
+            xorb.data,
+            xorb.xorb_hash.to_hex(),
+            file_hash,
+        )
+    }
+
+    fn build_one_chunk_shard(raw_chunk: &[u8]) -> (Vec<u8>, MerkleHash) {
+        let (shard_data, _xorb_data, _xorb_hash, file_hash) =
+            build_one_chunk_shard_parts(raw_chunk);
+        (shard_data, file_hash)
     }
 
     struct StreamingListOnlyStorage {
@@ -409,6 +476,78 @@ mod tests {
             Err(StorageError::Internal(
                 "index rebuild must not collect the complete key list".to_string(),
             ))
+        }
+
+        fn list_objects_stream<'a>(&'a self, prefix: &'a str) -> ObjectKeyStream<'a> {
+            self.inner.list_objects_stream(prefix)
+        }
+
+        async fn get_size(&self, key: &str) -> StorageResult<u64> {
+            self.inner.get_size(key).await
+        }
+
+        async fn download_to_path(&self, key: &str, dest: &Path) -> StorageResult<()> {
+            self.inner.download_to_path(key, dest).await
+        }
+    }
+
+    /// Storage failure the FlakyStorage wrapper injects for its target key.
+    enum InjectedFailure {
+        /// Network-class storage error (retryable by the rebuild fetch).
+        Transient,
+        /// The object is absent (must NOT be retried).
+        Missing,
+    }
+
+    /// Storage wrapper whose `get_path` fails for a target key while
+    /// `remaining` is positive, then delegates — simulates a transient
+    /// storage blip around an otherwise-working backend.
+    struct FlakyStorage {
+        inner: LocalStorage,
+        target_key: String,
+        inject: InjectedFailure,
+        remaining: std::sync::atomic::AtomicUsize,
+        attempts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl StorageBackend for FlakyStorage {
+        async fn put(&self, key: &str, data: Bytes) -> StorageResult<()> {
+            self.inner.put(key, data).await
+        }
+
+        async fn get(&self, key: &str) -> StorageResult<Bytes> {
+            self.inner.get(key).await
+        }
+
+        async fn get_path(&self, key: &str) -> StorageResult<Option<PathBuf>> {
+            if key == self.target_key {
+                self.attempts
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if self.remaining.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+                    self.remaining
+                        .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                    return Err(match self.inject {
+                        InjectedFailure::Transient => {
+                            StorageError::Internal(format!("injected transient failure for {key}"))
+                        }
+                        InjectedFailure::Missing => StorageError::NotFound(key.to_string()),
+                    });
+                }
+            }
+            self.inner.get_path(key).await
+        }
+
+        async fn exists(&self, key: &str) -> StorageResult<bool> {
+            self.inner.exists(key).await
+        }
+
+        async fn delete(&self, key: &str) -> StorageResult<()> {
+            self.inner.delete(key).await
+        }
+
+        async fn list_objects(&self, _prefix: &str) -> StorageResult<Vec<String>> {
+            self.inner.list_objects(_prefix).await
         }
 
         fn list_objects_stream<'a>(&'a self, prefix: &'a str) -> ObjectKeyStream<'a> {
@@ -731,6 +870,121 @@ mod tests {
         assert_eq!(
             index.get_xorb_for_chunk(&parsed),
             Some((test_hash(0xC1), 0))
+        );
+    }
+
+    #[tokio::test]
+    async fn rebuild_retries_transient_shard_fetch_and_indexes_shard() {
+        let raw = b"transient storage blips must not permanently skip a shard";
+        let (shard_data, xorb_data, xorb_hash, _file_hash) = build_one_chunk_shard_parts(raw);
+        let storage_dir = tempdir().unwrap();
+        let rebuild_temp_dir = tempdir().unwrap();
+        let local = LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap();
+        let shard_id = compute_data_hash(&shard_data).to_hex();
+        local
+            .put(&format!("shards/{}", shard_id), Bytes::from(shard_data))
+            .await
+            .unwrap();
+        local
+            .put(&format!("xorbs/{}", xorb_hash), Bytes::from(xorb_data))
+            .await
+            .unwrap();
+
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let storage: Arc<Box<dyn StorageBackend>> = Arc::new(Box::new(FlakyStorage {
+            inner: local,
+            target_key: format!("shards/{}", shard_id),
+            inject: InjectedFailure::Transient,
+            remaining: std::sync::atomic::AtomicUsize::new(1),
+            attempts: attempts.clone(),
+        }));
+
+        let index = MetadataIndex::new();
+        let count = index
+            .rebuild_from_storage(storage, rebuild_temp_dir.path().to_path_buf())
+            .await
+            .unwrap();
+
+        assert_eq!(count, 1, "the retried fetch must index the shard");
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "exactly one retry must happen"
+        );
+    }
+
+    #[tokio::test]
+    async fn rebuild_does_not_retry_shard_parse_failures() {
+        let garbage = b"this is not a shard".to_vec();
+        let storage_dir = tempdir().unwrap();
+        let rebuild_temp_dir = tempdir().unwrap();
+        let local = LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap();
+        let shard_id = compute_data_hash(&garbage).to_hex();
+        local
+            .put(&format!("shards/{}", shard_id), Bytes::from(garbage))
+            .await
+            .unwrap();
+
+        // No injection: get_path must serve the garbage file so the failure
+        // comes from parsing (permanent), not from the fetch.
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let storage: Arc<Box<dyn StorageBackend>> = Arc::new(Box::new(FlakyStorage {
+            inner: local,
+            target_key: format!("shards/{}", shard_id),
+            inject: InjectedFailure::Transient,
+            remaining: std::sync::atomic::AtomicUsize::new(0),
+            attempts: attempts.clone(),
+        }));
+
+        let index = MetadataIndex::new();
+        let count = index
+            .rebuild_from_storage(storage, rebuild_temp_dir.path().to_path_buf())
+            .await
+            .unwrap();
+
+        assert_eq!(count, 0);
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "parse failures must never be retried"
+        );
+    }
+
+    #[tokio::test]
+    async fn rebuild_does_not_retry_missing_shards() {
+        let raw = b"a shard whose fetch always reports the object missing";
+        let (shard_data, _xorb_data, _xorb_hash, _file_hash) = build_one_chunk_shard_parts(raw);
+        let storage_dir = tempdir().unwrap();
+        let rebuild_temp_dir = tempdir().unwrap();
+        let local = LocalStorage::new(storage_dir.path().to_str().unwrap()).unwrap();
+        let shard_id = compute_data_hash(&shard_data).to_hex();
+        // The bytes exist on disk so the listing yields the key, but the
+        // wrapper's get_path always reports NotFound.
+        local
+            .put(&format!("shards/{}", shard_id), Bytes::from(shard_data))
+            .await
+            .unwrap();
+
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let storage: Arc<Box<dyn StorageBackend>> = Arc::new(Box::new(FlakyStorage {
+            inner: local,
+            target_key: format!("shards/{}", shard_id),
+            inject: InjectedFailure::Missing,
+            remaining: std::sync::atomic::AtomicUsize::new(usize::MAX),
+            attempts: attempts.clone(),
+        }));
+
+        let index = MetadataIndex::new();
+        let count = index
+            .rebuild_from_storage(storage, rebuild_temp_dir.path().to_path_buf())
+            .await
+            .unwrap();
+
+        assert_eq!(count, 0);
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "missing objects must not consume the retry budget"
         );
     }
 }
