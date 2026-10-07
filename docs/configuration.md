@@ -748,7 +748,7 @@ curl http://localhost:8080/ready
 
 ## 相关文档
 
-- [Authentication](api/authentication.md) - 认证机制详细说明
-- [CAS API Reference](api/cas-api.md) - CAS 服务器 API 文档
-- [Hub API Reference](api/hub-api.md) - Hub API 文档
-- [Architecture](architecture.md) - 系统架构说明
+- [认证文档](api/authentication.md) - 认证机制详细说明
+- [CAS API 参考文档](api/cas-api.md) - CAS 服务器 API 文档
+- [Hub API 参考文档](api/hub-api.md) - Hub API 文档
+- [系统架构文档](architecture.md) - 系统架构说明

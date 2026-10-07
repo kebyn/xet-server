@@ -116,7 +116,7 @@ hf_<example>
 4. 返回 `xet_xxx` 令牌给客户端
 
 **当前授权语义**：
-`repo_id`、`repo_type` 和 `revision` claims 标识签发 token 的 Hub 上下文。本版本 CAS 内容授权是 content-capability based：持有有效 CAS token 的客户端可按 token scope 访问对应内容能力；这些 repo claims 不强制实现 repository-scoped CAS object isolation。
+`repo_id`、`repo_type` 和 `revision` claims 标识签发 token 的 Hub 上下文。本版本 CAS 内容授权基于 content-capability：持有有效 CAS token 的客户端可按 token scope 访问对应内容能力；这些 repo claims 不强制实现 repository-scoped CAS object isolation。
 
 **示例**：
 ```
@@ -265,7 +265,7 @@ xet_<example>.eyJzdWIiOiJhZG1pbiIsInNjb3BlIjoicmVhZCIsInJlcG9faWQiOiJteS1vcmcvbX
 
 ### 生成 Ed25519 密钥对
 
-Hub 需要 Ed25519 密钥对来签发和验证 CAS tokens：
+Hub 需要 Ed25519 密钥对来签发和验证 CAS token：
 
 ```bash
 # 生成私钥（Hub 使用）
@@ -337,11 +337,11 @@ export CAS_TRUSTED_KIDS=hub-key-1
 
 ### 密钥轮换
 
-1. 生成新密钥对，并先把 old/new 两个真实公钥部署为 `CAS_PUBLIC_KEYS=old-key=...,new-key=...`；allowlist 同时包含两者，重启 CAS。
-2. 将 Hub 的 `HUB_PRIVATE_KEY_PATH` 和 `HUB_KID` 一起切换到 `new-key`，重启 Hub。此时 CAS 同时接受尚未过期的 old token 和新 token。
+1. 生成新密钥对，并先把旧/新两个真实公钥部署为 `CAS_PUBLIC_KEYS=old-key=...,new-key=...`；allowlist 同时包含两者，重启 CAS。
+2. 将 Hub 的 `HUB_PRIVATE_KEY_PATH` 和 `HUB_KID` 一起切换到 `new-key`，重启 Hub。此时 CAS 同时接受尚未过期的旧 token 和新 token。
 3. 如果 CAS 自己签发 LFS proxy token，也将 `CAS_PRIVATE_KEY_PATH` 与 `CAS_SIGNING_KID=new-key` 一起切换并重启 CAS；私钥/映射公钥不匹配会在启动时失败。
 4. 等待所有旧 user/internal/proxy token 的最大 TTL 过期。
-5. 从 `CAS_TRUSTED_KIDS` 和 `CAS_PUBLIC_KEYS` 移除 old key，再重启 CAS。不要只增加 trusted kid 而仍使用单个 `CAS_PUBLIC_KEY_PATH`，那不会建立真正的 kid→公钥轮换。
+5. 从 `CAS_TRUSTED_KIDS` 和 `CAS_PUBLIC_KEYS` 移除旧 key，再重启 CAS。不要只增加 trusted kid 而仍使用单个 `CAS_PUBLIC_KEY_PATH`，那不会建立真正的 kid→公钥轮换。
 
 ## 数据库结构
 
@@ -415,8 +415,8 @@ pub fn create_token(&self, username: &str, token_name: &str, scope: &str) -> Res
 - CAS 私钥（`CAS_PRIVATE_KEY_PATH`）权限同样需要保护（建议 `chmod 600`）
 
 **短期有效**：
-- CAS tokens 默认 1 小时有效
-- Proxy tokens 默认 5 分钟有效（可通过 `HUB_PROXY_TOKEN_TTL_SECONDS` 配置）
+- CAS token 默认 1 小时有效
+- Proxy token 默认 5 分钟有效（可通过 `HUB_PROXY_TOKEN_TTL_SECONDS` 配置）
 - 减少令牌泄露的风险
 
 **CAS Private Key 安全说明**：
@@ -533,6 +533,6 @@ curl "$HF_ENDPOINT/api/models/my-org/my-model/xet-write-token/main" \
 
 ## 相关文档
 
-- [CAS API Reference](cas-api.md) - CAS 服务器 API 详细文档
-- [Hub API Reference](hub-api.md) - Hub API 详细文档
-- [Configuration Guide](../configuration.md) - 配置选项说明
+- [CAS API 参考文档](cas-api.md) - CAS 服务器 API 详细文档
+- [Hub API 参考文档](hub-api.md) - Hub API 详细文档
+- [配置指南](../configuration.md) - 配置选项说明

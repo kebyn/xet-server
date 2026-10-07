@@ -4,7 +4,7 @@ CAS (Content Addressable Storage) Server 是 Xet Server 的核心存储引擎，
 
 **端口**：8081（默认）  
 **协议**：HTTP/REST  
-**认证**：Ed25519 JWT (`xet_xxx` user tokens, `proxy_xxx` LFS action tokens, `internal_xxx` service tokens)
+**认证**：Ed25519 JWT（`xet_xxx` user token、`proxy_xxx` LFS action token、`internal_xxx` service token）
 
 ## 端点概览
 
@@ -569,9 +569,9 @@ Governor 429 限速拒绝、路由 404 与请求体超限 413 同样会被计数
 }
 ```
 
-Git LFS batch 兼容端点可能按协议使用 `message` 或 per-object `error` 结构；`HEAD` 响应不包含正文。
+Git LFS batch 兼容端点可能按协议使用 `message` 或逐对象的 `error` 结构；`HEAD` 响应不包含正文。
 
-可由客户端修正的 4xx 会返回稳定的输入校验信息。存储路径、S3 bucket/endpoint、parser 内部细节和其他基础设施错误只记录在服务端日志；普通 CAS API 的 500 正文固定为：
+可由客户端修正的 4xx 会返回稳定的输入校验信息。存储路径、S3 bucket/endpoint、解析器内部细节和其他基础设施错误只记录在服务端日志；普通 CAS API 的 500 正文固定为：
 
 ```json
 {"error":"Internal server error"}
@@ -678,7 +678,7 @@ Shard 是 Merkle DB 分片文件，包含文件到 chunk/xorb 的映射：
 
 ## 相关文档
 
-- [Authentication](authentication.md) - 认证机制详细说明
-- [Hub API Reference](hub-api.md) - Hub API 文档
-- [Configuration Guide](../configuration.md) - 配置选项
-- [Architecture](../architecture.md) - 系统架构
+- [认证文档](authentication.md) - 认证机制详细说明
+- [Hub API 参考文档](hub-api.md) - Hub API 文档
+- [配置指南](../configuration.md) - 配置选项
+- [系统架构文档](../architecture.md) - 系统架构

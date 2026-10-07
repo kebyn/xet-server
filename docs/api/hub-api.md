@@ -355,7 +355,7 @@ Commit API 的 NDJSON 有以下顺序和快照语义：
 - `header` 必须是第一个非空 operation，且整个请求中必须恰好出现一次；空行会被忽略。
 - `file`、`lfsFile` 和 `deletedEntry` 按请求中的原始顺序执行。同一路径出现多次时，后面的 operation 覆盖前面的结果。
 - 每个 commit 保存完整文件树快照：先复制当前 HEAD 的所有父条目，再按顺序应用本次修改和删除；请求中未提及的父条目会保留到新 commit。
-- 非首个 commit 必须在 header 中提供与当前 HEAD 完全一致的 `parentRevision`。不一致或遗漏会返回 `409 Conflict`，最终比较在 SQLite transaction 中原子执行。
+- 非首个 commit 必须在 header 中提供与当前 HEAD 完全一致的 `parentRevision`。不一致或遗漏会返回 `409 Conflict`，最终比较在 SQLite 事务中原子执行。
 - 所有 file/LFS/delete operation 的 `path` 按 UTF-8 字节计算不得超过 4096 字节。
 
 **NDJSON 操作类型**：
@@ -752,7 +752,7 @@ curl -X POST "http://localhost:8080/api/models/my-org/my-model/preupload/main" \
 
 ## LFS 代理 API
 
-LFS 代理 API 将 Git LFS 请求代理到 CAS Server。支持标准 LFS 端点和 Git-style LFS 端点。
+LFS 代理 API 将 Git LFS 请求代理到 CAS Server。支持标准 LFS 端点和 Git 风格 LFS 端点。
 
 **授权边界**：LFS 对象字节路径是 content-hash capability。Hub 会校验用户是否具备执行 batch operation 所需的 Hub scope，并签发绑定 OID 和 operation 的 `proxy_xxx` token；对象上传/下载阶段只验证该 proxy token，不校验 OID 是否属于 URL 中的 repo。私有 repo 的 OID 由 tree、resolve 和 repo metadata API 保护。
 
@@ -766,7 +766,7 @@ Proxy token 的 OID 必须非空，operation 只能是 `upload` 或 `download`�
 - `PUT /lfs/objects/{oid}` - 上传对象
 - `GET /lfs/objects/{oid}` - 下载对象
 
-### Git-style LFS 端点（Git LFS Smart HTTP）
+### Git 风格 LFS 端点（Git LFS Smart HTTP）
 
 用于 Git LFS Smart HTTP 协议的端点，支持通过 `.git/info/lfs` 路径访问：
 
@@ -937,7 +937,7 @@ CAS 网络故障、非法响应、超出 Hub 响应上限或上游 5xx 对客户
 - ≤ `HUB_INLINE_THRESHOLD`（默认 1MB）: 内联在 commit 中（regular 模式）
 - > `HUB_INLINE_THRESHOLD`: 通过 LFS 协议上传（lfs 模式）
 
-> **说明**：xorb/shard 格式转换是 CAS 服务端的异步后处理步骤，由转换管道自动完成，对客户端透明。Hub 端仅负责 two-way 分类（内联 vs LFS）。
+> **说明**：xorb/shard 格式转换是 CAS 服务端的异步后处理步骤，由转换管道自动完成，对客户端透明。Hub 端仅负责两分类（内联 vs LFS）。
 
 **LFS 指针文件**：
 ```
@@ -1085,7 +1085,7 @@ curl "http://localhost:8080/ready"
 
 ## 相关文档
 
-- [Authentication](authentication.md) - 认证机制详细说明
-- [CAS API Reference](cas-api.md) - CAS 服务器 API 文档
-- [Configuration Guide](../configuration.md) - 配置选项
-- [Architecture](../architecture.md) - 系统架构
+- [认证文档](authentication.md) - 认证机制详细说明
+- [CAS API 参考文档](cas-api.md) - CAS 服务器 API 文档
+- [配置指南](../configuration.md) - 配置选项
+- [系统架构文档](../architecture.md) - 系统架构

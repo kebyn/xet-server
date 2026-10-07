@@ -222,11 +222,11 @@ src/
 
 **MetadataIndex 验证不变量**：
 
-`MetadataIndex` 是 verified mappings 的内存缓存。服务启动时会从已存储的 shards 重建索引，但只有通过内容验证的 shard 才会被索引。Shard 声明不能直接成为 file/chunk 可发现性来源；handler 必须通过验证流程注册映射，不能直接从 shard 声明写入 file 或 chunk mappings。
+`MetadataIndex` 是已验证映射的内存缓存。服务启动时会从已存储的 shards 重建索引，但只有通过内容验证的 shard 才会被索引。Shard 声明不能直接成为 file/chunk 可发现性来源；handler 必须通过验证流程注册映射，不能直接从 shard 声明写入 file 或 chunk 映射。
 
 CAS 启动时会将索引状态置为 `rebuilding`，重建成功后置为 `ready` 并记录 shard 数；重建失败时置为 `failed`。默认情况下进程会继续启动但 `/ready` 返回 `503`，便于编排系统等待或摘除实例；设置 `XET_INDEX_REBUILD_STRICT=true` 时，重建失败会让 CAS 直接启动失败。
 
-Shard I/O 不把完整对象复制到内存：本地文件原地解析，S3/其他远端对象流式下载到带 RAII 清理的临时文件；解析器以 64 KiB 哈希缓冲加解析后的 metadata 工作，并在分配前验证物理文件长度、section offset、entry count、checked arithmetic 和截断。启动重建通过存储 backend 流式枚举 shard key，以 10 个 shard 为一批进行有界并发解析与内容验证，不先构造全量 key 列表。S3 每页最多请求并接受 1000 个 key，拒绝空、重复、缺失或与 truncation 状态矛盾的 continuation token。因此峰值受单批 key、解析 metadata、xorb 验证和临时文件控制，而不会随 shard 对象总数或原始字节总量直接放大。
+Shard I/O 不把完整对象复制到内存：本地文件原地解析，S3/其他远端对象流式下载到带 RAII 清理的临时文件；解析器以 64 KiB 哈希缓冲加解析后的元数据工作，并在分配前验证物理文件长度、section offset、entry count、checked arithmetic 和截断。启动重建通过存储后端流式枚举 shard key，以 10 个 shard 为一批进行有界并发解析与内容验证，不先构造全量 key 列表。S3 每页最多请求并接受 1000 个 key，拒绝空、重复、缺失或与 truncation 状态矛盾的 continuation token。因此峰值受单批 key、解析元数据、xorb 验证和临时文件控制，而不会随 shard 对象总数或原始字节总量直接放大。
 
 ### 3. 存储后端
 
@@ -404,7 +404,7 @@ export CAS_SIGNING_KID=hub-key-1
 ### 性能考虑
 
 - **流式输入**：转换过程以 1 MiB block 读取，不额外保留完整原始 blob
-- **输出仍有界累计**：`XorbBuilder` 在完成前保留序列化后的压缩 chunks，finalize 时构建完整 xorb；xorb/shard metadata 也随 chunk 数量增长
+- **输出仍有界累计**：`XorbBuilder` 在完成前保留序列化后的压缩 chunks，finalize 时构建完整 xorb；xorb/shard 元数据也随 chunk 数量增长
 - `XET_MAX_CONVERSION_SIZE` 用于限制峰值内存、转换时间、临时磁盘和 xorb/shard 构建工作
 - 建议生产环境保持 `XET_DELETE_RAW_AFTER_CONVERSION=true` 以节省 50% 存储空间
 - 转换是异步进行的，不会阻塞上传请求
@@ -866,7 +866,7 @@ LFS 对象是原始文件的直接存储，使用 SHA-256 哈希标识。
 - **Hub LFS proxy boundary**：Hub 的 LFS batch 和 `/lfs/objects/{oid}` 代理使用短期 `proxy_xxx` token 绑定 OID 与 operation，但不校验 OID 是否属于 URL 中的 repo。带 repo 的 Git LFS 路由和裸 `/objects/batch` 路由共享同一能力模型。
 - **Internal service authorization**：Hub → CAS 内部调用使用 `internal_xxx` token，并要求 `sub=hub-service`、`scope=internal`、`token_type=internal`。该 token 只用于 `/internal/*` 和 `/metrics` 等内部端点。
 
-### Error Boundaries
+### 错误边界
 
 - Hub/CAS service 层和服务端日志保留 SQL、文件路径、S3 endpoint/bucket、parser 细节与 CAS upstream 状态，便于运维诊断。
 - Hub 累计 CAS 响应时同时检查 `Content-Length` 和运行时 chunk 总量：inline resolve 的文件 body 进一步收紧为 snapshot 声明大小，并在返回客户端前验证精确大小和 SHA-256 OID；其他文件 body 受 `HUB_MAX_DOWNLOAD_SIZE` 限制，batch/state JSON 受 8 MiB 限制，错误 body 受 64 KiB 限制。超限时立即停止读取，不等待 upstream EOF。
@@ -911,8 +911,8 @@ LFS 对象是原始文件的直接存储，使用 SHA-256 哈希标识。
 **Hub API**：
 - 有状态设计（元数据存储在 SQLite，启动时由内置 migration runner 初始化或校验 schema）
 - migration runner 对未来版本、没有迁移路径的旧版本和无法识别的 schema 拒绝启动；恢复时先备份旧库，再用当前版本创建空库并重建 Hub 元数据。CAS 对象独立存储，无需重新上传
-- 当前只实现 SQLite backend；多实例 Hub 是受限部署模式，要求共享同一个 SQLite 文件、相同 `HUB_TOKEN_HASH_SALT` 和相同 Hub signing key，并受 SQLite 单写者限制
-- 负载均衡可以分发无状态 HTTP 请求，但不能绕过 SQLite 写入串行化；生产多写场景需要先引入明确的分布式数据库 backend（当前未实现）
+- 当前只实现 SQLite 后端；多实例 Hub 是受限部署模式，要求共享同一个 SQLite 文件、相同 `HUB_TOKEN_HASH_SALT` 和相同 Hub 签名密钥，并受 SQLite 单写者限制
+- 负载均衡可以分发无状态 HTTP 请求，但不能绕过 SQLite 写入串行化；生产多写场景需要先引入明确的分布式数据库后端（当前未实现）
 
 **CAS Server**：
 - 存储后端可共享（S3）
@@ -974,7 +974,7 @@ LFS 对象是原始文件的直接存储，使用 SHA-256 哈希标识。
 **新增配置项**：
 - `XET_RATE_LIMIT_RPM` (60) - CAS 速率限制
 - `HUB_RATE_LIMIT_RPM` (120) - Hub 速率限制
-- `HUB_PROXY_TOKEN_TTL_SECONDS` (300) - Proxy Token TTL
+- `HUB_PROXY_TOKEN_TTL_SECONDS` (300) - Proxy Token 有效期
 - `HUB_MAX_DOWNLOAD_SIZE` (512MB) - CAS 下载限制
 - `HUB_DB_POOL_SIZE` (5) - SQLite 连接池大小
 
@@ -1007,7 +1007,7 @@ LFS 对象是原始文件的直接存储，使用 SHA-256 哈希标识。
 
 ## 相关文档
 
-- [Configuration Guide](configuration.md) - 配置选项详细说明
-- [CAS API Reference](api/cas-api.md) - CAS 服务器 API 文档
-- [Hub API Reference](api/hub-api.md) - Hub API 文档
-- [Authentication](api/authentication.md) - 认证机制详细说明
+- [配置指南](configuration.md) - 配置选项详细说明
+- [CAS API 参考文档](api/cas-api.md) - CAS 服务器 API 文档
+- [Hub API 参考文档](api/hub-api.md) - Hub API 文档
+- [认证文档](api/authentication.md) - 认证机制详细说明
