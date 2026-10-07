@@ -1,7 +1,7 @@
 //! File-tree SQL for [`SqliteMetadataStore`](super::SqliteMetadataStore).
 
 use super::TransactionConnectionGuard;
-use super::helpers::{escape_like_pattern, file_size_to_sql, row_to_file_entry};
+use super::helpers::{escape_like_pattern, insert_file_entry, row_to_file_entry};
 use crate::metadata::{FileEntry, FileTreePage, MetadataError};
 use sqlx::Connection;
 use sqlx::sqlite::SqlitePool;
@@ -21,20 +21,7 @@ pub(super) async fn add_file_entries(
         .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
 
     for entry in &entries {
-        let is_lfs_int: i64 = if entry.is_lfs { 1 } else { 0 };
-        let size = file_size_to_sql(entry.size)?;
-        sqlx::query(
-            "INSERT OR REPLACE INTO file_tree (path, repo_id, commit_id, size, cas_hash, is_lfs) VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
-        )
-        .bind(&entry.path)
-        .bind(entry.repo_id)
-        .bind(&entry.commit_id)
-        .bind(size)
-        .bind(&entry.cas_hash)
-        .bind(is_lfs_int)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+        insert_file_entry(&mut tx, entry.repo_id, &entry.commit_id, entry).await?;
     }
 
     tx.commit()

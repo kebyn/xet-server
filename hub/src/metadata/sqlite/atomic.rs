@@ -4,11 +4,11 @@
 //! [`TransactionConnectionGuard`](super::TransactionConnectionGuard) so a
 //! cancelled future rolls back instead of returning an open transaction to the pool.
 
-use super::helpers::file_size_to_sql;
+use super::helpers::insert_file_entry;
 use super::{CommitWrite, TransactionConnectionGuard};
-use crate::metadata::{FileEntry, FileTreeChange, MetadataError, Revision};
+use crate::metadata::{FileTreeChange, MetadataError, Revision};
 use sqlx::sqlite::SqlitePool;
-use sqlx::{Connection, Row, Sqlite};
+use sqlx::{Connection, Row};
 
 pub(super) async fn commit_atomic_write(
     pool: &SqlitePool,
@@ -78,14 +78,14 @@ pub(super) async fn commit_atomic_write(
         match write {
             CommitWrite::Snapshot(entries) => {
                 for entry in entries {
-                    insert_file_entry(&mut tx, rev, entry).await?;
+                    insert_file_entry(&mut tx, rev.repo_id, &rev.commit_id, entry).await?;
                 }
             }
             CommitWrite::Changes(changes) => {
                 for change in changes {
                     match change {
                         FileTreeChange::Upsert(entry) => {
-                            insert_file_entry(&mut tx, rev, entry).await?;
+                            insert_file_entry(&mut tx, rev.repo_id, &rev.commit_id, entry).await?;
                         }
                         FileTreeChange::Delete(path) => {
                             sqlx::query(
@@ -133,28 +133,4 @@ pub(super) async fn commit_atomic_write(
             Err(error)
         }
     }
-}
-
-async fn insert_file_entry(
-    tx: &mut sqlx::Transaction<'_, Sqlite>,
-    rev: &Revision,
-    entry: &FileEntry,
-) -> Result<(), MetadataError> {
-    let is_lfs: i64 = if entry.is_lfs { 1 } else { 0 };
-    let size = file_size_to_sql(entry.size)?;
-    sqlx::query(
-        "INSERT OR REPLACE INTO file_tree \
-     (path, repo_id, commit_id, size, cas_hash, is_lfs) \
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-    )
-    .bind(&entry.path)
-    .bind(rev.repo_id)
-    .bind(&rev.commit_id)
-    .bind(size)
-    .bind(&entry.cas_hash)
-    .bind(is_lfs)
-    .execute(&mut **tx)
-    .await
-    .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
-    Ok(())
 }

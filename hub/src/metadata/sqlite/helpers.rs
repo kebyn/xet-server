@@ -1,7 +1,7 @@
 //! Shared row mapping and SQL value helpers for the sqlite store modules.
 
 use crate::metadata::{FileEntry, MetadataError, Repo, RepoType, Revision};
-use sqlx::Row;
+use sqlx::{Row, Sqlite};
 
 /// Check if a sqlx::Error represents a UNIQUE constraint violation.
 ///
@@ -119,6 +119,37 @@ pub(super) fn file_size_to_sql(size: u64) -> Result<i64, MetadataError> {
     i64::try_from(size).map_err(|_| {
         MetadataError::InvalidOperation(format!("File size {} exceeds SQLite INTEGER range", size))
     })
+}
+
+/// Insert (or replace) a file_tree row.
+///
+/// `repo_id`/`commit_id` are caller-supplied because the authoritative
+/// source differs: the atomic commit path binds from the revision (defending
+/// against entries that disagree with it), while `add_file_entries` binds
+/// from the entry itself.
+pub(super) async fn insert_file_entry(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    repo_id: i64,
+    commit_id: &str,
+    entry: &FileEntry,
+) -> Result<(), MetadataError> {
+    let is_lfs: i64 = if entry.is_lfs { 1 } else { 0 };
+    let size = file_size_to_sql(entry.size)?;
+    sqlx::query(
+        "INSERT OR REPLACE INTO file_tree \
+         (path, repo_id, commit_id, size, cas_hash, is_lfs) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+    )
+    .bind(&entry.path)
+    .bind(repo_id)
+    .bind(commit_id)
+    .bind(size)
+    .bind(&entry.cas_hash)
+    .bind(is_lfs)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+    Ok(())
 }
 
 pub(super) fn escape_like_pattern(input: &str) -> String {
