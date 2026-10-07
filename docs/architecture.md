@@ -98,10 +98,12 @@ Xet Server 是一个高性能的**内容寻址存储（CAS）**系统，专为�
 hub/src/
 ├── api/                  # HTTP 参数/响应与错误映射
 │   ├── commit.rs         # Commit NDJSON handler
+│   ├── preupload.rs      # preupload 决策 handler
 │   ├── repo.rs           # 仓库 HTTP API
 │   ├── tree.rs           # 文件树与 Link pagination
 │   ├── resolve.rs        # GET/HEAD 文件解析
 │   ├── token_exchange.rs # CAS token exchange
+│   ├── whoami.rs         # whoami-v2 handler
 │   └── lfs_proxy.rs      # LFS proxy handler
 ├── services/             # 业务规则与授权边界
 │   ├── commit.rs         # commit 校验与有序 delta
@@ -114,10 +116,12 @@ hub/src/
 ├── auth/                 # Hub token 存储、提取与 CAS token 签名
 ├── metadata/
 │   ├── mod.rs            # 持久化接口与公共类型
-│   └── sqlite.rs         # SQLite 原子事务实现
+│   └── sqlite/           # SQLite 实现（mod 构造器+trait 委托、repos、
+│                          # revisions、file_tree、atomic 事务、helpers）
 ├── cas_client/           # Hub 到 CAS 的有界客户端
 ├── migrations.rs         # SQLite schema 初始化与兼容性校验
 ├── sqlite_pool.rs        # 共享 SQLite pool 配置
+├── util.rs               # 跨模块小工具（时间戳等）
 ├── config.rs             # 配置管理
 ├── server.rs             # 路由、readiness 与服务启动
 └── error.rs              # 稳定 HTTP 错误边界
@@ -166,6 +170,7 @@ src/
 │   ├── reconstruction.rs  # 文件重构
 │   ├── global_dedup.rs    # 全局去重
 │   ├── batch.rs      # Git LFS 批量 API
+│   ├── guard.rs      # 请求鉴权（require_auth）
 │   └── internal.rs   # 内部 API（Hub 使用）
 ├── conversion/       # 转换管道
 │   ├── mod.rs        # 转换逻辑
@@ -199,8 +204,13 @@ src/
 ├── error.rs          # 错误类型定义
 ├── metrics.rs        # Prometheus 指标
 ├── middleware.rs     # 中间件（速率限制等）
-├── server.rs         # 服务器启动和路由
-└── index.rs          # 元数据索引（内存，启动重建）
+├── server.rs             # 服务器启动和路由
+├── index.rs              # 元数据索引（内存，启动重建）
+├── reconstruction_plan.rs # 文件 chunk 重构计划
+├── reconstruction_io.rs  # 文件重构 I/O 与临时文件
+├── shard_io.rs           # shard 读取与解析
+├── shard_validation.rs   # shard 内容验证与索引注册
+└── xorb_reader.rs        # xorb chunk 提取与校验
 ```
 
 **数据流**：

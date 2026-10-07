@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 /// Handle Git LFS batch request
 ///
-/// # I2: Memory Usage Analysis
+/// # Memory Usage Analysis
 ///
 /// The entire CAS batch response is buffered in memory before URL rewriting. This is
 /// required because URL rewriting mutates the JSON structure in-place (replacing CAS

@@ -409,7 +409,7 @@ impl ConversionPipeline {
     /// Returns (path_to_file, optional_path_guard).
     /// - For local storage: returns the existing file path directly (no copy).
     /// - For remote backends (S3): downloads to a temp file, returns that path.
-    ///   The path guard ensures cleanup when dropped (I2: RAII temp file cleanup).
+    ///   The path guard ensures cleanup when dropped (RAII temp file cleanup).
     async fn open_blob_for_streaming(
         &self,
         object_key: &str,

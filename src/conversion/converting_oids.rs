@@ -7,7 +7,7 @@ use parking_lot::RwLock;
 ///
 /// Uses a `parking_lot::RwLock` (like the metadata index and readiness state):
 /// parking_lot locks are not poisoned, so the former std-lock poison-recovery
-/// boilerplate (M10 fix) is unnecessary.
+/// boilerplate is unnecessary.
 pub struct ConvertingOids {
     inner: RwLock<HashSet<String>>,
 }

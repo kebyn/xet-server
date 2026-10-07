@@ -1,6 +1,6 @@
 //! S3/MinIO storage backend with streaming multipart upload support.
 //!
-//! # I7: S3 Lifecycle Rule Recommendation
+//! # S3 Lifecycle Rule Recommendation
 //!
 //! When using S3 storage backend, configure a lifecycle rule to automatically clean up
 //! incomplete multipart uploads. This is critical because:

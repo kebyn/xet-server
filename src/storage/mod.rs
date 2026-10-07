@@ -104,7 +104,7 @@ pub trait StorageBackend: Send + Sync {
     ///
     /// Default implementation: uses get() and writes to file (loads entire object into RAM).
     /// Storage backends should override this with a streaming implementation.
-    /// I1/I3: This enables bounded-memory downloads for the conversion pipeline and xorb downloads.
+    /// This enables bounded-memory downloads for the conversion pipeline and xorb downloads.
     async fn download_to_path(&self, key: &str, dest: &Path) -> StorageResult<()> {
         tracing::warn!(
             "download_to_path using default (non-streaming) implementation for key={}; \
