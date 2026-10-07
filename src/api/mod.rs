@@ -10,4 +10,4 @@ pub mod reconstruction;
 pub mod shard;
 pub mod xorb;
 
-pub(crate) const INTERNAL_ERROR_MESSAGE: &str = "Internal server error";
+pub(crate) use xet_common::INTERNAL_ERROR_MESSAGE;

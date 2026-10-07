@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "hub", "xet-auth-types"]
+members = [".", "hub", "xet-auth-types", "xet-common"]
 resolver = "3"
 
 [package]
@@ -10,6 +10,7 @@ rust-version = "1.94.1"
 
 [dependencies]
 xet-auth-types = { path = "xet-auth-types" }
+xet-common = { path = "xet-common" }
 blake3 = "1.8"
 sha2 = "0.10"
 gearhash = "0.1"

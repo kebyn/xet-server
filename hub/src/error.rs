@@ -2,7 +2,7 @@ use actix_web::{HttpResponse, http::StatusCode};
 use serde::Serialize;
 use std::fmt::Display;
 
-pub(crate) const INTERNAL_ERROR_MESSAGE: &str = "Internal server error";
+pub(crate) use xet_common::INTERNAL_ERROR_MESSAGE;
 pub(crate) const CAS_ERROR_MESSAGE: &str = "Upstream CAS request failed";
 
 #[derive(Debug, thiserror::Error)]

@@ -1847,6 +1847,7 @@ dependencies = [
  "url",
  "uuid",
  "xet-auth-types",
+ "xet-common",
 ]
 
 [[package]]
@@ -4130,6 +4131,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "xet-common"
+version = "0.1.0"
+dependencies = [
+ "url",
+]
+
+[[package]]
 name = "xet-server"
 version = "0.1.0"
 dependencies = [
@@ -4165,6 +4173,7 @@ dependencies = [
  "url",
  "uuid",
  "xet-auth-types",
+ "xet-common",
 ]
 
 [[package]]

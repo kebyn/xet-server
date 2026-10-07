@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::str::FromStr;
 use xet_auth_types::MAX_TOKEN_LIFETIME_SECS;
+use xet_common::{parse_env, validate_http_url};
 
 /// Server configuration settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -165,19 +166,6 @@ pub struct HubConfig {
 }
 
 impl HubConfig {
-    fn parse_env<T>(key: &str, default: T) -> Result<T, String>
-    where
-        T: FromStr,
-        T::Err: std::fmt::Display,
-    {
-        match env::var(key) {
-            Ok(value) => value
-                .parse()
-                .map_err(|e| format!("{key} '{value}' is not a valid value: {e}")),
-            Err(_) => Ok(default),
-        }
-    }
-
     fn parse_optional_env<T>(key: &str) -> Result<Option<T>, String>
     where
         T: FromStr,
@@ -197,9 +185,9 @@ impl HubConfig {
     /// I4 fix: Prevent zero values that would cause service unavailability.
     fn validate(&self) -> Result<(), String> {
         if let Some(public_base_url) = &self.server.public_base_url {
-            Self::validate_http_url("HUB_PUBLIC_BASE_URL", public_base_url)?;
+            validate_http_url("HUB_PUBLIC_BASE_URL", public_base_url)?;
         }
-        Self::validate_http_url("HUB_CAS_BASE_URL", &self.cas.base_url)?;
+        validate_http_url("HUB_CAS_BASE_URL", &self.cas.base_url)?;
 
         if self.server.rate_limit_rpm == 0 {
             return Err(
@@ -297,23 +285,6 @@ impl HubConfig {
         Ok(())
     }
 
-    fn validate_http_url(name: &str, url: &str) -> Result<(), String> {
-        let parsed = url::Url::parse(url)
-            .map_err(|e| format!("{} '{}' is not a valid URL: {}", name, url, e))?;
-        if parsed.host().is_none() {
-            return Err(format!("{} '{}' is missing a valid host", name, url));
-        }
-        if parsed.scheme() != "http" && parsed.scheme() != "https" {
-            return Err(format!(
-                "{} '{}' uses unsupported scheme '{}'; expected http or https",
-                name,
-                url,
-                parsed.scheme()
-            ));
-        }
-        Ok(())
-    }
-
     /// Warn when the retired `CAS_BASE_URL` variable is still set.
     ///
     /// The Hub's CAS address moved to `HUB_CAS_BASE_URL` to match the
@@ -331,7 +302,7 @@ impl HubConfig {
         Self::warn_if_legacy_cas_base_url_set();
         let url =
             env::var("HUB_CAS_BASE_URL").unwrap_or_else(|_| "http://localhost:8081".to_string());
-        Self::validate_http_url("HUB_CAS_BASE_URL", &url)?;
+        validate_http_url("HUB_CAS_BASE_URL", &url)?;
         Ok(url)
     }
 
@@ -340,45 +311,39 @@ impl HubConfig {
         let config = HubConfig {
             server: ServerSettings {
                 host: env::var("HUB_HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
-                port: Self::parse_env("HUB_PORT", 8080)?,
+                port: parse_env("HUB_PORT", 8080)?,
                 public_base_url: env::var("HUB_PUBLIC_BASE_URL").ok(),
-                rate_limit_rpm: Self::parse_env("HUB_RATE_LIMIT_RPM", 120)?,
+                rate_limit_rpm: parse_env("HUB_RATE_LIMIT_RPM", 120)?,
                 cached_base_url: None,
             },
             auth: AuthSettings {
                 private_key_path: env::var("HUB_PRIVATE_KEY_PATH")
                     .unwrap_or_else(|_| "private_key.pem".to_string()),
                 kid: env::var("HUB_KID").unwrap_or_else(|_| "hub-key-1".to_string()),
-                token_ttl_seconds: Self::parse_env("HUB_TOKEN_TTL_SECONDS", 3600)?,
-                proxy_token_ttl_seconds: Self::parse_env("HUB_PROXY_TOKEN_TTL_SECONDS", 300)?,
-                internal_token_ttl_seconds: Self::parse_env(
-                    "HUB_INTERNAL_TOKEN_TTL_SECONDS",
-                    86400,
-                )?,
+                token_ttl_seconds: parse_env("HUB_TOKEN_TTL_SECONDS", 3600)?,
+                proxy_token_ttl_seconds: parse_env("HUB_PROXY_TOKEN_TTL_SECONDS", 300)?,
+                internal_token_ttl_seconds: parse_env("HUB_INTERNAL_TOKEN_TTL_SECONDS", 86400)?,
             },
             metadata: MetadataSettings {
                 sqlite_path: env::var("HUB_SQLITE_PATH").unwrap_or_else(|_| "hub.db".to_string()),
-                db_pool_size: Self::parse_env("HUB_DB_POOL_SIZE", 5)?,
+                db_pool_size: parse_env("HUB_DB_POOL_SIZE", 5)?,
             },
             cas: CasSettings {
                 base_url: Self::cas_base_url_from_env()?,
-                internal_timeout_seconds: Self::parse_env("HUB_CAS_TIMEOUT_SECS", 30)?,
-                max_download_size: Self::parse_env("HUB_MAX_DOWNLOAD_SIZE", 512 * 1024 * 1024)?,
-                health_check_timeout_seconds: Self::parse_env(
-                    "HUB_CAS_HEALTH_CHECK_TIMEOUT_SECS",
-                    10,
-                )?,
+                internal_timeout_seconds: parse_env("HUB_CAS_TIMEOUT_SECS", 30)?,
+                max_download_size: parse_env("HUB_MAX_DOWNLOAD_SIZE", 512 * 1024 * 1024)?,
+                health_check_timeout_seconds: parse_env("HUB_CAS_HEALTH_CHECK_TIMEOUT_SECS", 10)?,
             },
             storage: StorageSettings {
-                inline_threshold_bytes: Self::parse_env("HUB_INLINE_THRESHOLD", 1024 * 1024)?,
+                inline_threshold_bytes: parse_env("HUB_INLINE_THRESHOLD", 1024 * 1024)?,
                 upload_temp_dir: env::var("HUB_UPLOAD_TEMP_DIR")
                     .unwrap_or_else(|_| "./data/hub-uploads".to_string()), // I1 fix: Use app-specific dir instead of /tmp
-                max_upload_size: Self::parse_env("HUB_MAX_UPLOAD_SIZE", 512 * 1024 * 1024)?,
+                max_upload_size: parse_env("HUB_MAX_UPLOAD_SIZE", 512 * 1024 * 1024)?,
             },
         };
 
         if let Some(ref url) = config.server.public_base_url {
-            Self::validate_http_url("HUB_PUBLIC_BASE_URL", url)?;
+            validate_http_url("HUB_PUBLIC_BASE_URL", url)?;
         }
         config.validate()?;
         Ok(config)
@@ -430,7 +395,7 @@ impl HubConfig {
             config.server.port = port;
         }
         if let Ok(url) = env::var("HUB_PUBLIC_BASE_URL") {
-            Self::validate_http_url("HUB_PUBLIC_BASE_URL", &url)?;
+            validate_http_url("HUB_PUBLIC_BASE_URL", &url)?;
             config.server.public_base_url = Some(url);
         }
         if let Some(rpm) = Self::parse_optional_env("HUB_RATE_LIMIT_RPM")? {
@@ -459,7 +424,7 @@ impl HubConfig {
         }
         Self::warn_if_legacy_cas_base_url_set();
         if let Ok(url) = env::var("HUB_CAS_BASE_URL") {
-            Self::validate_http_url("HUB_CAS_BASE_URL", &url)?;
+            validate_http_url("HUB_CAS_BASE_URL", &url)?;
             config.cas.base_url = url;
         }
         if let Some(timeout) = Self::parse_optional_env("HUB_CAS_TIMEOUT_SECS")? {

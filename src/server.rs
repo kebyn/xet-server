@@ -7,7 +7,9 @@ use actix_web::{
     web,
 };
 use parking_lot::RwLock;
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+
+use xet_common::rate_limit_period;
 
 use crate::api::auth::AuthVerifier;
 use crate::api::guard::{AuthNeed, require_auth};
@@ -15,17 +17,6 @@ use crate::config::ServerConfig;
 use crate::conversion::ConvertingOids;
 use crate::middleware::metrics_middleware;
 use crate::storage::{StorageBackend, create_storage};
-
-const NANOS_PER_MINUTE: u64 = 60_000_000_000;
-
-fn rate_limit_period(rpm: u32) -> Option<Duration> {
-    if rpm == 0 {
-        return None;
-    }
-
-    let period_nanos = NANOS_PER_MINUTE.div_ceil(u64::from(rpm));
-    Some(Duration::from_nanos(period_nanos))
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IndexReadiness {
@@ -374,26 +365,4 @@ pub async fn metrics_endpoint(
     HttpResponse::Ok()
         .content_type("text/plain; version=0.0.4")
         .body(metrics)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::rate_limit_period;
-    use std::time::Duration;
-
-    #[test]
-    fn rate_limit_period_matches_requests_per_minute() {
-        assert_eq!(rate_limit_period(10), Some(Duration::from_secs(6)));
-        assert_eq!(rate_limit_period(60), Some(Duration::from_secs(1)));
-        assert_eq!(rate_limit_period(120), Some(Duration::from_millis(500)));
-    }
-
-    #[test]
-    fn rate_limit_period_rejects_zero_and_rounds_up() {
-        assert_eq!(rate_limit_period(0), None);
-        assert_eq!(
-            rate_limit_period(7),
-            Some(Duration::from_nanos(8_571_428_572))
-        );
-    }
 }

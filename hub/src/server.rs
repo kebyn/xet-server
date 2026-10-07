@@ -4,6 +4,8 @@ use actix_web::dev::{ServiceFactory, ServiceRequest, ServiceResponse};
 use actix_web::{App, Error, HttpResponse, HttpServer, middleware::Logger, web};
 use std::{sync::Arc, time::Duration};
 
+use xet_common::rate_limit_period;
+
 use crate::auth::token_store::TokenStore;
 use crate::auth::xet_signer::XetSigner;
 use crate::cas_client::{CasClient, CasClientTrait};
@@ -11,17 +13,6 @@ use crate::config::HubConfig;
 use crate::metadata::MetadataStore;
 use crate::metadata::sqlite::SqliteMetadataStore;
 use crate::sqlite_pool::connect_hub_sqlite_pool;
-
-const NANOS_PER_MINUTE: u64 = 60_000_000_000;
-
-fn rate_limit_period(rpm: u32) -> Option<Duration> {
-    if rpm == 0 {
-        return None;
-    }
-
-    let period_nanos = NANOS_PER_MINUTE.div_ceil(u64::from(rpm));
-    Some(Duration::from_nanos(period_nanos))
-}
 
 /// Governor configuration for the Hub's rate-limited public API scope.
 ///
@@ -582,22 +573,6 @@ mod tests {
     use actix_web::{App, HttpResponse, HttpServer, test, web};
     use sqlx::sqlite::SqlitePoolOptions;
     use std::net::TcpListener;
-
-    #[actix_web::test]
-    async fn rate_limit_period_matches_requests_per_minute() {
-        assert_eq!(rate_limit_period(10), Some(Duration::from_secs(6)));
-        assert_eq!(rate_limit_period(60), Some(Duration::from_secs(1)));
-        assert_eq!(rate_limit_period(120), Some(Duration::from_millis(500)));
-    }
-
-    #[actix_web::test]
-    async fn rate_limit_period_rejects_zero_and_rounds_up() {
-        assert_eq!(rate_limit_period(0), None);
-        assert_eq!(
-            rate_limit_period(7),
-            Some(Duration::from_nanos(8_571_428_572))
-        );
-    }
 
     async fn start_mock_cas_ready(status: actix_web::http::StatusCode) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();

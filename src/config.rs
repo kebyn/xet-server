@@ -2,7 +2,6 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::str::FromStr;
 
 /// Server configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -370,20 +369,9 @@ impl Default for ServerConfig {
     }
 }
 
-impl ServerConfig {
-    fn parse_env<T>(key: &str, default: T) -> Result<T, String>
-    where
-        T: FromStr,
-        T::Err: std::fmt::Display,
-    {
-        match std::env::var(key) {
-            Ok(value) => value
-                .parse()
-                .map_err(|e| format!("{key} '{value}' is not a valid value: {e}")),
-            Err(_) => Ok(default),
-        }
-    }
+use xet_common::{parse_env, validate_http_url};
 
+impl ServerConfig {
     fn parse_bool_env(key: &str, default: bool) -> Result<bool, String> {
         match std::env::var(key) {
             Ok(value) => match value.to_ascii_lowercase().as_str() {
@@ -478,7 +466,7 @@ impl ServerConfig {
                     );
                 }
                 if let Some(endpoint) = &self.storage.s3_endpoint {
-                    Self::validate_http_url("XET_S3_ENDPOINT", endpoint)?;
+                    validate_http_url("XET_S3_ENDPOINT", endpoint)?;
                 }
             }
             backend => {
@@ -530,30 +518,13 @@ impl ServerConfig {
         Ok(())
     }
 
-    fn validate_http_url(name: &str, value: &str) -> Result<(), String> {
-        let parsed = url::Url::parse(value)
-            .map_err(|error| format!("{} '{}' is not a valid URL: {}", name, value, error))?;
-        if parsed.host().is_none() {
-            return Err(format!("{} '{}' is missing a valid host", name, value));
-        }
-        if parsed.scheme() != "http" && parsed.scheme() != "https" {
-            return Err(format!(
-                "{} '{}' uses unsupported scheme '{}'; expected http or https",
-                name,
-                value,
-                parsed.scheme()
-            ));
-        }
-        Ok(())
-    }
-
     /// Load configuration from environment variables with defaults.
     pub fn try_from_env() -> Result<Self, String> {
         let host = std::env::var("XET_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
-        let port = Self::parse_env("XET_PORT", 8081)?;
+        let port = parse_env("XET_PORT", 8081)?;
         let public_base_url = std::env::var("XET_PUBLIC_BASE_URL").ok();
-        let max_body_size_mb = Self::parse_env("XET_MAX_BODY_SIZE_MB", 2048)?;
-        let rate_limit_rpm = Self::parse_env("XET_RATE_LIMIT_RPM", 60)?;
+        let max_body_size_mb = parse_env("XET_MAX_BODY_SIZE_MB", 2048)?;
+        let rate_limit_rpm = parse_env("XET_RATE_LIMIT_RPM", 60)?;
         let index_rebuild_strict = Self::parse_bool_env("XET_INDEX_REBUILD_STRICT", false)?;
 
         let backend = std::env::var("XET_STORAGE_BACKEND").unwrap_or_else(|_| "local".to_string());
@@ -603,8 +574,8 @@ impl ServerConfig {
         let conversion_scheme =
             std::env::var("XET_CONVERSION_SCHEME").unwrap_or_else(|_| "lz4".to_string());
         let delete_raw = Self::parse_bool_env("XET_DELETE_RAW_AFTER_CONVERSION", true)?;
-        let min_conversion_size = Self::parse_env("XET_MIN_CONVERSION_SIZE", 65536)?;
-        let max_conversion_size = Self::parse_env("XET_MAX_CONVERSION_SIZE", 512 * 1024 * 1024)?;
+        let min_conversion_size = parse_env("XET_MIN_CONVERSION_SIZE", 65536)?;
+        let max_conversion_size = parse_env("XET_MAX_CONVERSION_SIZE", 512 * 1024 * 1024)?;
 
         let config = Self {
             server: ServerSettings {
