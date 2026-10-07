@@ -91,7 +91,7 @@ impl SqliteMetadataStore {
     pub async fn new(path: &str, pool_size: u32) -> Result<Self, MetadataError> {
         let pool = connect_hub_sqlite_pool(path, pool_size)
             .await
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+            .map_err(MetadataError::DatabaseError)?;
 
         Self::init_pool(&pool).await?;
 
@@ -113,7 +113,7 @@ impl SqliteMetadataStore {
         // max_connections(1) so all operations see the same in-memory database.
         let pool = connect_in_memory_hub_sqlite_pool()
             .await
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+            .map_err(MetadataError::DatabaseError)?;
 
         Self::init_pool(&pool).await?;
 
@@ -125,7 +125,7 @@ impl SqliteMetadataStore {
     async fn init_pool(pool: &SqlitePool) -> Result<(), MetadataError> {
         crate::migrations::run_hub_migrations(pool)
             .await
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))
+            .map_err(MetadataError::DatabaseError)
     }
 }
 

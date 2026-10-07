@@ -87,7 +87,7 @@ async fn test_negative_stored_file_size_is_reported_as_corruption() {
         .await
         .expect_err("negative SQLite size must not become a huge u64");
 
-    assert!(matches!(err, MetadataError::DatabaseError(_)));
+    assert!(matches!(err, MetadataError::Corruption(_)));
     assert!(err.to_string().contains("negative size"));
 }
 

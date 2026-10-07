@@ -45,7 +45,7 @@ pub(super) async fn create_repo(
             "{}/{}/{}",
             namespace, name, repo_type_str
         ))),
-        Err(e) => Err(MetadataError::DatabaseError(e.to_string())),
+        Err(e) => Err(MetadataError::DatabaseError(e)),
     }
 }
 
@@ -65,7 +65,7 @@ pub(super) async fn get_repo(
     .bind(&repo_type_str)
     .fetch_optional(pool)
     .await
-    .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+    .map_err(MetadataError::DatabaseError)?;
 
     match row {
         Some(row) => row_to_repo(&row),
@@ -80,10 +80,7 @@ pub(super) async fn get_repo(
 /// Wrapped in a single transaction for atomicity.
 pub(super) async fn delete_repo(pool: &SqlitePool, repo_id: i64) -> Result<(), MetadataError> {
     // Wrap deletion in a transaction for atomicity
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+    let mut tx = pool.begin().await.map_err(MetadataError::DatabaseError)?;
 
     let result = async {
         // Delete in order (foreign key constraints)
@@ -91,25 +88,25 @@ pub(super) async fn delete_repo(pool: &SqlitePool, repo_id: i64) -> Result<(), M
             .bind(repo_id)
             .execute(&mut *tx)
             .await
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+            .map_err(MetadataError::DatabaseError)?;
 
         sqlx::query("DELETE FROM heads WHERE repo_id = ?1")
             .bind(repo_id)
             .execute(&mut *tx)
             .await
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+            .map_err(MetadataError::DatabaseError)?;
 
         sqlx::query("DELETE FROM revisions WHERE repo_id = ?1")
             .bind(repo_id)
             .execute(&mut *tx)
             .await
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+            .map_err(MetadataError::DatabaseError)?;
 
         let rows = sqlx::query("DELETE FROM repos WHERE id = ?1")
             .bind(repo_id)
             .execute(&mut *tx)
             .await
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+            .map_err(MetadataError::DatabaseError)?;
 
         if rows.rows_affected() == 0 {
             Err(MetadataError::RepoNotFound(format!("id={}", repo_id)))
@@ -121,9 +118,7 @@ pub(super) async fn delete_repo(pool: &SqlitePool, repo_id: i64) -> Result<(), M
 
     match result {
         Ok(()) => {
-            tx.commit()
-                .await
-                .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+            tx.commit().await.map_err(MetadataError::DatabaseError)?;
             Ok(())
         }
         Err(e) => {

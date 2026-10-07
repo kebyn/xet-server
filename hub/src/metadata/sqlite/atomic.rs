@@ -19,15 +19,12 @@ pub(super) async fn commit_atomic_write(
     // BEGIN IMMEDIATE acquires SQLite's single-writer lock before checking HEAD.
     // If this future is cancelled, the connection guard closes the connection;
     // SQLite then rolls back before the pool can create a replacement.
-    let connection = pool
-        .acquire()
-        .await
-        .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+    let connection = pool.acquire().await.map_err(MetadataError::DatabaseError)?;
     let mut connection = TransactionConnectionGuard::new(connection);
     let mut tx = connection
         .begin_with("BEGIN IMMEDIATE")
         .await
-        .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+        .map_err(MetadataError::DatabaseError)?;
 
     let result = async {
         let current_head: Option<String> =
@@ -35,10 +32,10 @@ pub(super) async fn commit_atomic_write(
                 .bind(rev.repo_id)
                 .fetch_optional(&mut *tx)
                 .await
-                .map_err(|e| MetadataError::DatabaseError(e.to_string()))?
+                .map_err(MetadataError::DatabaseError)?
                 .map(|row| row.try_get::<String, _>(0))
                 .transpose()
-                .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+                .map_err(MetadataError::DatabaseError)?;
 
         if current_head.as_deref() != expected_parent {
             return Err(MetadataError::Conflict(current_head.unwrap_or_default()));
@@ -56,7 +53,7 @@ pub(super) async fn commit_atomic_write(
         .bind(rev.created_at)
         .execute(&mut *tx)
         .await
-        .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+        .map_err(MetadataError::DatabaseError)?;
 
         if let CommitWrite::Changes(_) = write
             && let Some(parent) = expected_parent
@@ -72,7 +69,7 @@ pub(super) async fn commit_atomic_write(
             .bind(parent)
             .execute(&mut *tx)
             .await
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+            .map_err(MetadataError::DatabaseError)?;
         }
 
         match write {
@@ -97,7 +94,7 @@ pub(super) async fn commit_atomic_write(
                             .bind(&rev.commit_id)
                             .execute(&mut *tx)
                             .await
-                            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+                            .map_err(MetadataError::DatabaseError)?;
                         }
                     }
                 }
@@ -109,7 +106,7 @@ pub(super) async fn commit_atomic_write(
             .bind(&rev.commit_id)
             .execute(&mut *tx)
             .await
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+            .map_err(MetadataError::DatabaseError)?;
 
         Ok::<(), MetadataError>(())
     }
@@ -117,17 +114,18 @@ pub(super) async fn commit_atomic_write(
 
     match result {
         Ok(()) => {
-            tx.commit()
-                .await
-                .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+            tx.commit().await.map_err(MetadataError::DatabaseError)?;
             connection.mark_resolved();
             Ok(())
         }
         Err(error) => {
+            // The rollback failure (a genuine sqlx error) becomes the returned
+            // error so its source chain survives; the original commit error is
+            // preserved in the log. The unresolved connection guard still drops
+            // closed, so SQLite rolls back either way.
             tx.rollback().await.map_err(|rollback_error| {
-                MetadataError::DatabaseError(format!(
-                    "Commit failed ({error}); rollback failed: {rollback_error}"
-                ))
+                tracing::error!("Commit failed ({error}); rollback failed: {rollback_error}");
+                MetadataError::DatabaseError(rollback_error)
             })?;
             connection.mark_resolved();
             Err(error)

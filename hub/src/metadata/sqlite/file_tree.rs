@@ -10,23 +10,18 @@ pub(super) async fn add_file_entries(
     pool: &SqlitePool,
     entries: Vec<FileEntry>,
 ) -> Result<(), MetadataError> {
-    let connection = pool
-        .acquire()
-        .await
-        .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+    let connection = pool.acquire().await.map_err(MetadataError::DatabaseError)?;
     let mut connection = TransactionConnectionGuard::new(connection);
     let mut tx = connection
         .begin()
         .await
-        .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+        .map_err(MetadataError::DatabaseError)?;
 
     for entry in &entries {
         insert_file_entry(&mut tx, entry.repo_id, &entry.commit_id, entry).await?;
     }
 
-    tx.commit()
-        .await
-        .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+    tx.commit().await.map_err(MetadataError::DatabaseError)?;
     connection.mark_resolved();
 
     Ok(())
@@ -44,7 +39,7 @@ pub(super) async fn get_file_tree(
     .bind(commit_id)
     .fetch_all(pool)
     .await
-    .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+    .map_err(MetadataError::DatabaseError)?;
 
     rows.iter().map(row_to_file_entry).collect()
 }
@@ -87,7 +82,7 @@ pub(super) async fn get_file_tree_prefix(
         .await
     };
 
-    let rows = rows.map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+    let rows = rows.map_err(MetadataError::DatabaseError)?;
 
     rows.iter().map(row_to_file_entry).collect()
 }
@@ -176,7 +171,7 @@ pub(super) async fn get_file_tree_prefix_page(
             .await
         }
     }
-    .map_err(|error| MetadataError::DatabaseError(error.to_string()))?;
+    .map_err(MetadataError::DatabaseError)?;
 
     let mut entries: Vec<FileEntry> = rows
         .iter()
@@ -210,7 +205,7 @@ pub(super) async fn resolve_file(
     .bind(path)
     .fetch_optional(pool)
     .await
-    .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+    .map_err(MetadataError::DatabaseError)?;
 
     match row {
         Some(r) => row_to_file_entry(&r),

@@ -100,7 +100,9 @@ pub enum MetadataError {
     #[error("File not found: {0}")]
     FileNotFound(String),
     #[error("Database error: {0}")]
-    DatabaseError(String),
+    DatabaseError(#[from] sqlx::Error),
+    #[error("Database corruption: {0}")]
+    Corruption(String),
     #[error("Invalid operation: {0}")]
     InvalidOperation(String),
     #[error("Conflict: HEAD mismatch (expected parent '{0}')")]

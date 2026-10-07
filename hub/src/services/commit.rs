@@ -523,7 +523,10 @@ mod tests {
         }
 
         fn injected_error(operation: &str) -> MetadataError {
-            MetadataError::DatabaseError(format!("injected {} failure", operation))
+            MetadataError::DatabaseError(sqlx::Error::Protocol(format!(
+                "injected {} failure",
+                operation
+            )))
         }
     }
 

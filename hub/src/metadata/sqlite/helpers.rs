@@ -25,60 +25,34 @@ pub(super) fn is_unique_violation(err: &sqlx::Error) -> bool {
 
 /// Map a `sqlx::Row` to a `Repo` value.
 pub(super) fn row_to_repo(row: &sqlx::sqlite::SqliteRow) -> Result<Repo, MetadataError> {
-    let repo_type_str: String = row
-        .try_get(3)
-        .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+    let repo_type_str: String = row.try_get(3).map_err(MetadataError::DatabaseError)?;
     let repo_type = repo_type_str
         .parse::<RepoType>()
-        .map_err(|e| MetadataError::DatabaseError(format!("Invalid repo_type: {}", e)))?;
+        .map_err(|e| MetadataError::Corruption(format!("Invalid repo_type: {}", e)))?;
     Ok(Repo {
-        id: row
-            .try_get(0)
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
-        name: row
-            .try_get(1)
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
-        namespace: row
-            .try_get(2)
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
+        id: row.try_get(0).map_err(MetadataError::DatabaseError)?,
+        name: row.try_get(1).map_err(MetadataError::DatabaseError)?,
+        namespace: row.try_get(2).map_err(MetadataError::DatabaseError)?,
         repo_type,
-        sha: row
-            .try_get(4)
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
+        sha: row.try_get(4).map_err(MetadataError::DatabaseError)?,
         private: row
             .try_get::<i64, _>(5)
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?
+            .map_err(MetadataError::DatabaseError)?
             != 0,
-        created_at: row
-            .try_get(6)
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
-        updated_at: row
-            .try_get(7)
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
+        created_at: row.try_get(6).map_err(MetadataError::DatabaseError)?,
+        updated_at: row.try_get(7).map_err(MetadataError::DatabaseError)?,
     })
 }
 
 /// Map a `sqlx::Row` to a `Revision` value.
 pub(super) fn row_to_revision(row: &sqlx::sqlite::SqliteRow) -> Result<Revision, MetadataError> {
     Ok(Revision {
-        commit_id: row
-            .try_get(0)
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
-        repo_id: row
-            .try_get(1)
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
-        parent: row
-            .try_get(2)
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
-        message: row
-            .try_get(3)
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
-        author: row
-            .try_get(4)
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
-        created_at: row
-            .try_get(5)
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
+        commit_id: row.try_get(0).map_err(MetadataError::DatabaseError)?,
+        repo_id: row.try_get(1).map_err(MetadataError::DatabaseError)?,
+        parent: row.try_get(2).map_err(MetadataError::DatabaseError)?,
+        message: row.try_get(3).map_err(MetadataError::DatabaseError)?,
+        author: row.try_get(4).map_err(MetadataError::DatabaseError)?,
+        created_at: row.try_get(5).map_err(MetadataError::DatabaseError)?,
     })
 }
 
@@ -86,31 +60,23 @@ pub(super) fn row_to_revision(row: &sqlx::sqlite::SqliteRow) -> Result<Revision,
 pub(super) fn row_to_file_entry(row: &sqlx::sqlite::SqliteRow) -> Result<FileEntry, MetadataError> {
     let stored_size = row
         .try_get::<i64, _>(3)
-        .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+        .map_err(MetadataError::DatabaseError)?;
     let size = u64::try_from(stored_size).map_err(|_| {
-        MetadataError::DatabaseError(format!(
+        MetadataError::Corruption(format!(
             "Corrupt file_tree row contains negative size {}",
             stored_size
         ))
     })?;
 
     Ok(FileEntry {
-        path: row
-            .try_get(0)
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
-        repo_id: row
-            .try_get(1)
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
-        commit_id: row
-            .try_get(2)
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
+        path: row.try_get(0).map_err(MetadataError::DatabaseError)?,
+        repo_id: row.try_get(1).map_err(MetadataError::DatabaseError)?,
+        commit_id: row.try_get(2).map_err(MetadataError::DatabaseError)?,
         size,
-        cas_hash: row
-            .try_get(4)
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?,
+        cas_hash: row.try_get(4).map_err(MetadataError::DatabaseError)?,
         is_lfs: row
             .try_get::<i64, _>(5)
-            .map_err(|e| MetadataError::DatabaseError(e.to_string()))?
+            .map_err(MetadataError::DatabaseError)?
             != 0,
     })
 }
@@ -148,7 +114,7 @@ pub(super) async fn insert_file_entry(
     .bind(is_lfs)
     .execute(&mut **tx)
     .await
-    .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+    .map_err(MetadataError::DatabaseError)?;
     Ok(())
 }
 

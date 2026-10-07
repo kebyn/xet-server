@@ -20,7 +20,7 @@ pub(super) async fn add_revision(
     .bind(revision.created_at)
     .execute(pool)
     .await
-    .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+    .map_err(MetadataError::DatabaseError)?;
 
     Ok(())
 }
@@ -37,7 +37,7 @@ pub(super) async fn get_revision(
     .bind(commit_id)
     .fetch_optional(pool)
     .await
-    .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+    .map_err(MetadataError::DatabaseError)?;
 
     match row {
         Some(row) => row_to_revision(&row),
@@ -53,14 +53,10 @@ pub(super) async fn get_head(
         .bind(repo_id)
         .fetch_optional(pool)
         .await
-        .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+        .map_err(MetadataError::DatabaseError)?;
 
     match row {
-        Some(r) => {
-            Ok(Some(r.try_get(0).map_err(|e| {
-                MetadataError::DatabaseError(e.to_string())
-            })?))
-        }
+        Some(r) => Ok(Some(r.try_get(0).map_err(MetadataError::DatabaseError)?)),
         None => Ok(None),
     }
 }
@@ -75,7 +71,7 @@ pub(super) async fn set_head(
         .bind(commit_id)
         .execute(pool)
         .await
-        .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+        .map_err(MetadataError::DatabaseError)?;
 
     Ok(())
 }
@@ -113,7 +109,7 @@ pub(super) async fn get_commit_log(
     .bind(effective_limit)
     .fetch_all(pool)
     .await
-    .map_err(|e| MetadataError::DatabaseError(e.to_string()))?;
+    .map_err(MetadataError::DatabaseError)?;
 
     rows.iter().map(row_to_revision).collect()
 }
