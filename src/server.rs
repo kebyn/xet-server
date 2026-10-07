@@ -273,10 +273,6 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
                         web::post().to(crate::api::shard::upload_shard),
                     )
                     .route(
-                        "/v1/reconstructions/{file_id}",
-                        web::get().to(crate::api::reconstruction::get_reconstruction_v1),
-                    )
-                    .route(
                         "/v2/reconstructions/{file_id}",
                         web::get().to(crate::api::reconstruction::get_reconstruction),
                     )

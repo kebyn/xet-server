@@ -15,7 +15,6 @@ CAS (Content Addressable Storage) Server 是 Xet Server 的核心存储引擎，
 | `/lfs/objects/{oid}` | PUT | 上传 LFS 对象 | 需要 `write` user token 或绑定该 OID 的 `lfs-upload` proxy token |
 | `/lfs/objects/{oid}` | GET | 下载 LFS 对象 | 需要 `read` user token 或绑定该 OID 的 `lfs-download` proxy token |
 | `/v1/shards` | POST | 上传 Shard 元数据 | 需要 write |
-| `/v1/reconstructions/{file_id}` | GET | 获取文件重构信息 (V1) | 需要 read |
 | `/v2/reconstructions/{file_id}` | GET | 获取文件重构信息 (V2) | 需要 read |
 | `/v1/chunks/{prefix}/{hash}` | GET | 全局去重查询 | 需要 read |
 | `/objects/batch` | POST | Git LFS 批量 API | 需要 read/write |
@@ -184,63 +183,11 @@ curl -X POST "http://localhost:8081/v1/shards" \
 
 文件重构 API 返回从 chunks 和 xorbs 重构完整文件所需的元数据。
 
-### 获取重构信息 (V1)
-
-**端点**：`GET /v1/reconstructions/{file_id}`
-
-**路径参数**：
-- `file_id` (string): 文件标识符（通常是文件哈希）
-
-**请求头**：
-```
-Authorization: Bearer xet_xxx
-```
-
-**响应** (V1)：
-```json
-{
-  "file_id": "abc123...",
-  "xorbs": [
-    {
-      "xorb_hash": "xorb1_hash",
-      "size": 65536,
-      "chunks": [
-        {
-          "chunk_hash": "chunk1_hash",
-          "offset": 0,
-          "length": 65536
-        },
-        {
-          "chunk_hash": "chunk2_hash",
-          "offset": 65536,
-          "length": 65536
-        }
-      ]
-    }
-  ]
-}
-```
-
-**字段说明**：
-- `file_id`: 文件标识符
-- `xorbs`: Xorb 对象列表
-  - `xorb_hash`: Xorb 的 BLAKE3 哈希
-  - `size`: Xorb 大小（字节）
-  - `chunks`: 该 Xorb 中包含的 chunk 列表
-    - `chunk_hash`: 原始 chunk 内容的 BLAKE3 哈希（raw chunk hash，用于全局去重）
-    - `offset`: Chunk 在 Xorb 中的偏移量
-    - `length`: Chunk 长度（字节）
-
-**响应码**：
-- `200 OK`: 返回重构信息
-- `404 Not Found`: 文件不存在
-- `401 Unauthorized`: 认证失败
-
 ### 获取重构信息 (V2)
 
 **端点**：`GET /v2/reconstructions/{file_id}`
 
-**与 V1 的区别**：
+**设计要点**：
 - 分离 Xorb 元数据和获取信息
 - `fetch_info` 提供存储路径和大小，便于客户端直接下载
 - 减少响应体积（xorbs 数组只包含哈希和大小）

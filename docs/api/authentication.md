@@ -217,7 +217,7 @@ xet_<example>.eyJzdWIiOiJhZG1pbiIsInNjb3BlIjoicmVhZCIsInJlcG9faWQiOiJteS1vcmcvbX
    - 返回 xet_xxx 令牌
 
 4. 客户端 → CAS Server
-   GET /v1/reconstructions/file123
+   GET /v2/reconstructions/file123
    Authorization: Bearer xet_eyJhbGci...
 
 5. CAS Server 验证令牌

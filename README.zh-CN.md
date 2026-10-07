@@ -244,7 +244,6 @@ hf download my-org/my-repo model.bin --local-dir ./downloaded
 | `/lfs/objects/{oid}` | PUT | 上传 LFS 对象 |
 | `/lfs/objects/{oid}` | GET | 下载 LFS 对象 |
 | `/v1/shards` | POST | 上传 Shard 元数据 |
-| `/v1/reconstructions/{file_id}` | GET | 获取文件重构信息 |
 | `/v2/reconstructions/{file_id}` | GET | 获取文件重构信息（V2） |
 | `/v1/chunks/{prefix}/{hash}` | GET | 全局去重查询 |
 | `/objects/batch` | POST | Git LFS 批量 API |

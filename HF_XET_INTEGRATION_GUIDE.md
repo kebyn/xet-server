@@ -426,7 +426,7 @@ curl "$HF_ENDPOINT/api/models/$TARGET_REPO/tree/main" \
 | `/v1/xorbs/{prefix}/{hash}` | POST/PUT | Xorb 上传 |
 | `/v1/xorbs/{prefix}/{hash}/download` | GET | Xorb 下载 |
 | `/v1/shards` | POST | Shard 上传 |
-| `/v1/reconstructions/{file_id}` | GET | 文件重构 |
+| `/v2/reconstructions/{file_id}` | GET | 文件重构 |
 | `/health` | GET | 存活检查 |
 | `/ready` | GET | 就绪检查 |
 | `/metrics` | GET | Prometheus 指标 |

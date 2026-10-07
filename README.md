@@ -247,7 +247,6 @@ hf download my-org/my-repo model.bin --local-dir ./downloaded
 | `/lfs/objects/{oid}` | PUT | Upload an LFS object |
 | `/lfs/objects/{oid}` | GET | Download an LFS object |
 | `/v1/shards` | POST | Upload shard metadata |
-| `/v1/reconstructions/{file_id}` | GET | Get file reconstruction info |
 | `/v2/reconstructions/{file_id}` | GET | Get file reconstruction info (V2) |
 | `/v1/chunks/{prefix}/{hash}` | GET | Global deduplication query |
 | `/objects/batch` | POST | Git LFS batch API |
