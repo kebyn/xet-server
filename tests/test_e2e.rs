@@ -15,6 +15,7 @@ use xet_server::index::{
 };
 use xet_server::storage::StorageBackend;
 use xet_server::storage::local::LocalStorage;
+use xet_server::types::MerkleHash;
 
 /// Test 5.1.1: Complete file upload workflow
 ///
@@ -217,24 +218,24 @@ async fn test_e2e_metadata_index() {
 
     // Register a shard
     let shard_id = "test-shard-123".to_string();
-    let file_hash = "a".repeat(64);
+    let file_hash = MerkleHash::from_hex(&"a".repeat(64)).unwrap();
     index
         .register_verified_shard(VerifiedShardRegistration {
             shard_id: shard_id.clone(),
             files: vec![VerifiedFileMapping {
-                file_hash: file_hash.clone(),
+                file_hash,
                 file_index: 0,
                 file_size: 123,
             }],
             chunks: vec![
                 VerifiedChunkMapping {
-                    chunk_hash: "b".repeat(64),
-                    xorb_hash: "c".repeat(64),
+                    chunk_hash: MerkleHash::from_hex(&"b".repeat(64)).unwrap(),
+                    xorb_hash: MerkleHash::from_hex(&"c".repeat(64)).unwrap(),
                     chunk_index: 0,
                 },
                 VerifiedChunkMapping {
-                    chunk_hash: "d".repeat(64),
-                    xorb_hash: "c".repeat(64),
+                    chunk_hash: MerkleHash::from_hex(&"d".repeat(64)).unwrap(),
+                    xorb_hash: MerkleHash::from_hex(&"c".repeat(64)).unwrap(),
                     chunk_index: 1,
                 },
             ],
@@ -251,7 +252,7 @@ async fn test_e2e_metadata_index() {
     );
 
     // Query for non-existent file
-    let non_existent = "e".repeat(64);
+    let non_existent = MerkleHash::from_hex(&"e".repeat(64)).unwrap();
     let shards = index.get_shards_for_file(&non_existent);
     assert!(
         shards.is_none(),

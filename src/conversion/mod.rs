@@ -212,8 +212,7 @@ impl ConversionPipeline {
 
                 // Hash and dedup check
                 let chunk_hash = compute_data_hash(chunk_data);
-                let chunk_hash_hex = chunk_hash.to_hex();
-                if self.index.chunk_exists(&chunk_hash_hex) {
+                if self.index.chunk_exists(&chunk_hash) {
                     num_deduped += 1;
                 }
                 raw_chunk_hashes.push(chunk_hash);
@@ -245,8 +244,7 @@ impl ConversionPipeline {
             let unpacked_size = chunk.size as u32;
 
             let chunk_hash = compute_data_hash(chunk_data);
-            let chunk_hash_hex = chunk_hash.to_hex();
-            if self.index.chunk_exists(&chunk_hash_hex) {
+            if self.index.chunk_exists(&chunk_hash) {
                 num_deduped += 1;
             }
             raw_chunk_hashes.push(chunk_hash);
@@ -320,8 +318,8 @@ impl ConversionPipeline {
         let mut verified_chunks: Vec<crate::index::VerifiedChunkMapping> = Vec::new();
         for (i, chunk_hash) in raw_chunk_hashes.iter().enumerate() {
             verified_chunks.push(crate::index::VerifiedChunkMapping {
-                chunk_hash: chunk_hash.to_hex(),
-                xorb_hash: xorb_hash.clone(),
+                chunk_hash: *chunk_hash,
+                xorb_hash: xorb_result.xorb_hash,
                 chunk_index: i as u32,
             });
         }
@@ -370,7 +368,7 @@ impl ConversionPipeline {
             .register_verified_shard(crate::index::VerifiedShardRegistration {
                 shard_id: shard_hash.clone(),
                 files: vec![crate::index::VerifiedFileMapping {
-                    file_hash: oid.to_string(),
+                    file_hash,
                     file_index: 0,
                     file_size: raw_size,
                 }],

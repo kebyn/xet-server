@@ -288,7 +288,7 @@ pub async fn validate_shard_for_index(
         }
 
         files.push(VerifiedFileMapping {
-            file_hash: declared_file_hash_hex,
+            file_hash: declared_file_hash,
             file_index,
             file_size,
         });
@@ -299,8 +299,8 @@ pub async fn validate_shard_for_index(
         .iter()
         .filter(|entry| validated_chunks.contains(&(entry.xorb_hash, entry.chunk_index)))
         .map(|entry| VerifiedChunkMapping {
-            chunk_hash: entry.chunk_hash.to_hex(),
-            xorb_hash: entry.xorb_hash.to_hex(),
+            chunk_hash: entry.chunk_hash,
+            xorb_hash: entry.xorb_hash,
             chunk_index: entry.chunk_index,
         })
         .collect();
@@ -468,12 +468,12 @@ mod tests {
 
         assert_eq!(registration.shard_id, "test-shard");
         assert_eq!(registration.files.len(), 1);
-        assert_eq!(registration.files[0].file_hash, declared_file_hash.to_hex());
+        assert_eq!(registration.files[0].file_hash, declared_file_hash);
         assert_eq!(registration.files[0].file_index, 0);
         assert_eq!(registration.files[0].file_size, raw_chunk.len() as u64);
         assert_eq!(registration.chunks.len(), 1);
-        assert_eq!(registration.chunks[0].chunk_hash, raw_chunk_hash.to_hex());
-        assert_eq!(registration.chunks[0].xorb_hash, xorb_hash.to_hex());
+        assert_eq!(registration.chunks[0].chunk_hash, raw_chunk_hash);
+        assert_eq!(registration.chunks[0].xorb_hash, xorb_hash);
         assert_eq!(registration.chunks[0].chunk_index, 0);
     }
 

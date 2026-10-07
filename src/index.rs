@@ -6,7 +6,15 @@
 //!
 //! The index is rebuilt from storage on each startup (stateless server design).
 //! This ensures consistency and avoids local state management complexity.
+//!
+//! Index keys are `MerkleHash` values (fixed 32 bytes, zero heap allocation)
+//! rather than 64-character hex strings, keeping the resident memory of the
+//! dedup tables low at scale. Hex is only a transport encoding at the HTTP and
+//! storage boundaries: because typed keys are parsed from hex, lookups are
+//! case-insensitive — a query built from uppercase hex resolves to the same
+//! entry a lowercase-hex producer registered.
 
+use crate::types::MerkleHash;
 use futures_util::StreamExt;
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -21,7 +29,7 @@ pub struct FileShardRef {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedFileMapping {
-    pub file_hash: String,
+    pub file_hash: MerkleHash,
     pub file_index: usize,
     pub file_size: u64,
 }
@@ -32,7 +40,7 @@ pub enum IndexRegistrationError {
         "File hash {file_hash} is already registered with size {existing_size}, cannot register size {new_size}"
     )]
     FileSizeConflict {
-        file_hash: String,
+        file_hash: MerkleHash,
         existing_size: u64,
         new_size: u64,
     },
@@ -40,8 +48,8 @@ pub enum IndexRegistrationError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedChunkMapping {
-    pub chunk_hash: String,
-    pub xorb_hash: String,
+    pub chunk_hash: MerkleHash,
+    pub xorb_hash: MerkleHash,
     pub chunk_index: u32,
 }
 
@@ -56,10 +64,10 @@ pub struct VerifiedShardRegistration {
 #[derive(Debug, Clone)]
 pub struct MetadataIndex {
     /// Map from file hash to verified shard references that contain reconstruction info
-    file_to_shards: Arc<RwLock<HashMap<String, Vec<FileShardRef>>>>,
+    file_to_shards: Arc<RwLock<HashMap<MerkleHash, Vec<FileShardRef>>>>,
 
     /// Map from chunk hash to (xorb_hash, chunk_index) for global deduplication
-    chunk_to_xorb: Arc<RwLock<HashMap<String, (String, u32)>>>,
+    chunk_to_xorb: Arc<RwLock<HashMap<MerkleHash, (MerkleHash, u32)>>>,
 }
 
 impl MetadataIndex {
@@ -85,11 +93,11 @@ impl MetadataIndex {
             // registration cannot leave a partially applied file mapping.
             for file in &registration.files {
                 if let Some(existing_size) =
-                    registration_sizes.insert(file.file_hash.clone(), file.file_size)
+                    registration_sizes.insert(file.file_hash, file.file_size)
                     && existing_size != file.file_size
                 {
                     return Err(IndexRegistrationError::FileSizeConflict {
-                        file_hash: file.file_hash.clone(),
+                        file_hash: file.file_hash,
                         existing_size,
                         new_size: file.file_size,
                     });
@@ -101,7 +109,7 @@ impl MetadataIndex {
                     && existing_ref.file_size != file.file_size
                 {
                     return Err(IndexRegistrationError::FileSizeConflict {
-                        file_hash: file.file_hash.clone(),
+                        file_hash: file.file_hash,
                         existing_size: existing_ref.file_size,
                         new_size: file.file_size,
                     });
@@ -109,7 +117,7 @@ impl MetadataIndex {
             }
 
             for file in &registration.files {
-                let entry = file_map.entry(file.file_hash.clone()).or_default();
+                let entry = file_map.entry(file.file_hash).or_default();
                 let file_ref = FileShardRef {
                     shard_id: registration.shard_id.clone(),
                     file_index: file.file_index,
@@ -125,10 +133,7 @@ impl MetadataIndex {
         {
             let mut chunk_map = self.chunk_to_xorb.write();
             for chunk in &registration.chunks {
-                chunk_map.insert(
-                    chunk.chunk_hash.clone(),
-                    (chunk.xorb_hash.clone(), chunk.chunk_index),
-                );
+                chunk_map.insert(chunk.chunk_hash, (chunk.xorb_hash, chunk.chunk_index));
             }
         }
 
@@ -136,13 +141,13 @@ impl MetadataIndex {
     }
 
     /// Get verified shard references for a file hash
-    pub fn get_file_refs(&self, file_hash: &str) -> Option<Vec<FileShardRef>> {
+    pub fn get_file_refs(&self, file_hash: &MerkleHash) -> Option<Vec<FileShardRef>> {
         let file_map = self.file_to_shards.read();
         file_map.get(file_hash).cloned()
     }
 
     /// Get the verified reconstructed size for a file hash.
-    pub fn get_file_size(&self, file_hash: &str) -> Option<u64> {
+    pub fn get_file_size(&self, file_hash: &MerkleHash) -> Option<u64> {
         let file_map = self.file_to_shards.read();
         file_map
             .get(file_hash)
@@ -151,7 +156,7 @@ impl MetadataIndex {
     }
 
     /// Get shard IDs for a file hash
-    pub fn get_shards_for_file(&self, file_hash: &str) -> Option<Vec<String>> {
+    pub fn get_shards_for_file(&self, file_hash: &MerkleHash) -> Option<Vec<String>> {
         self.get_file_refs(file_hash).map(|refs| {
             refs.into_iter()
                 .map(|r| r.shard_id)
@@ -162,13 +167,13 @@ impl MetadataIndex {
     }
 
     /// Get xorb location for a chunk hash (for global dedup)
-    pub fn get_xorb_for_chunk(&self, chunk_hash: &str) -> Option<(String, u32)> {
+    pub fn get_xorb_for_chunk(&self, chunk_hash: &MerkleHash) -> Option<(MerkleHash, u32)> {
         let chunk_map = self.chunk_to_xorb.read();
         chunk_map.get(chunk_hash).cloned()
     }
 
     /// Check if a chunk exists in the index (for global dedup query)
-    pub fn chunk_exists(&self, chunk_hash: &str) -> bool {
+    pub fn chunk_exists(&self, chunk_hash: &MerkleHash) -> bool {
         let chunk_map = self.chunk_to_xorb.read();
         chunk_map.contains_key(chunk_hash)
     }
@@ -326,6 +331,10 @@ mod tests {
     use crate::storage::{ObjectKeyStream, StorageBackend, StorageError, StorageResult};
     use crate::types::MerkleHash;
 
+    fn test_hash(seed: u8) -> MerkleHash {
+        MerkleHash::from([seed; 32])
+    }
+
     fn sha256_merkle_hash(data: &[u8]) -> MerkleHash {
         let digest = Sha256::digest(data);
         let mut bytes = [0u8; 32];
@@ -333,7 +342,7 @@ mod tests {
         MerkleHash::from(bytes)
     }
 
-    fn build_one_chunk_shard(raw_chunk: &[u8]) -> (Vec<u8>, String) {
+    fn build_one_chunk_shard(raw_chunk: &[u8]) -> (Vec<u8>, MerkleHash) {
         let raw_hash = compute_data_hash(raw_chunk);
         let file_hash = sha256_merkle_hash(raw_chunk);
         let mut xorb_builder = XorbBuilder::new(CompressionScheme::None);
@@ -367,7 +376,7 @@ mod tests {
         );
 
         assert_eq!(compressed_len, raw_chunk.len() as u32);
-        (shard_builder.build().unwrap(), file_hash.to_hex())
+        (shard_builder.build().unwrap(), file_hash)
     }
 
     struct StreamingListOnlyStorage {
@@ -424,34 +433,34 @@ mod tests {
                 shard_id: "shard-001".to_string(),
                 files: vec![
                     VerifiedFileMapping {
-                        file_hash: "file-abc".to_string(),
+                        file_hash: test_hash(0xA1),
                         file_index: 0,
                         file_size: 10,
                     },
                     VerifiedFileMapping {
-                        file_hash: "file-def".to_string(),
+                        file_hash: test_hash(0xA2),
                         file_index: 1,
                         file_size: 20,
                     },
                 ],
                 chunks: vec![VerifiedChunkMapping {
-                    chunk_hash: "chunk-1".to_string(),
-                    xorb_hash: "xorb-1".to_string(),
+                    chunk_hash: test_hash(0xB1),
+                    xorb_hash: test_hash(0xC1),
                     chunk_index: 0,
                 }],
             })
             .unwrap();
 
-        let refs = index.get_file_refs("file-def").unwrap();
+        let refs = index.get_file_refs(&test_hash(0xA2)).unwrap();
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].shard_id, "shard-001");
         assert_eq!(refs[0].file_index, 1);
         assert_eq!(refs[0].file_size, 20);
-        assert_eq!(index.get_file_size("file-def"), Some(20));
+        assert_eq!(index.get_file_size(&test_hash(0xA2)), Some(20));
 
         assert_eq!(
-            index.get_xorb_for_chunk("chunk-1"),
-            Some(("xorb-1".to_string(), 0))
+            index.get_xorb_for_chunk(&test_hash(0xB1)),
+            Some((test_hash(0xC1), 0))
         );
     }
 
@@ -461,7 +470,7 @@ mod tests {
         let reg = VerifiedShardRegistration {
             shard_id: "shard-001".to_string(),
             files: vec![VerifiedFileMapping {
-                file_hash: "file-abc".to_string(),
+                file_hash: test_hash(0xA1),
                 file_index: 0,
                 file_size: 10,
             }],
@@ -470,7 +479,7 @@ mod tests {
         index.register_verified_shard(reg.clone()).unwrap();
         index.register_verified_shard(reg).unwrap();
 
-        let refs = index.get_file_refs("file-abc").unwrap();
+        let refs = index.get_file_refs(&test_hash(0xA1)).unwrap();
         assert_eq!(refs.len(), 1);
     }
 
@@ -484,25 +493,25 @@ mod tests {
                 shard_id: shard_id.clone(),
                 files: vec![
                     VerifiedFileMapping {
-                        file_hash: "file-abc".to_string(),
+                        file_hash: test_hash(0xA1),
                         file_index: 0,
                         file_size: 10,
                     },
                     VerifiedFileMapping {
-                        file_hash: "file-def".to_string(),
+                        file_hash: test_hash(0xA2),
                         file_index: 1,
                         file_size: 20,
                     },
                 ],
                 chunks: vec![
                     VerifiedChunkMapping {
-                        chunk_hash: "chunk-1".to_string(),
-                        xorb_hash: "xorb-1".to_string(),
+                        chunk_hash: test_hash(0xB1),
+                        xorb_hash: test_hash(0xC1),
                         chunk_index: 0,
                     },
                     VerifiedChunkMapping {
-                        chunk_hash: "chunk-2".to_string(),
-                        xorb_hash: "xorb-1".to_string(),
+                        chunk_hash: test_hash(0xB2),
+                        xorb_hash: test_hash(0xC1),
                         chunk_index: 1,
                     },
                 ],
@@ -510,14 +519,14 @@ mod tests {
             .unwrap();
 
         // Verify file-to-shards mapping
-        let shards = index.get_shards_for_file("file-abc");
+        let shards = index.get_shards_for_file(&test_hash(0xA1));
         assert!(shards.is_some());
         assert_eq!(shards.unwrap(), vec![shard_id]);
 
         // Verify chunk-to-xorb mapping
-        let xorb = index.get_xorb_for_chunk("chunk-1");
+        let xorb = index.get_xorb_for_chunk(&test_hash(0xB1));
         assert!(xorb.is_some());
-        assert_eq!(xorb.unwrap(), ("xorb-1".to_string(), 0));
+        assert_eq!(xorb.unwrap(), (test_hash(0xC1), 0));
 
         // Verify stats
         let stats = index.stats();
@@ -534,13 +543,13 @@ mod tests {
             .register_verified_shard(VerifiedShardRegistration {
                 shard_id: "shard-001".to_string(),
                 files: vec![VerifiedFileMapping {
-                    file_hash: "file-a".to_string(),
+                    file_hash: test_hash(0xA3),
                     file_index: 0,
                     file_size: 10,
                 }],
                 chunks: vec![VerifiedChunkMapping {
-                    chunk_hash: "chunk-1".to_string(),
-                    xorb_hash: "xorb-1".to_string(),
+                    chunk_hash: test_hash(0xB1),
+                    xorb_hash: test_hash(0xC1),
                     chunk_index: 0,
                 }],
             })
@@ -551,20 +560,20 @@ mod tests {
             .register_verified_shard(VerifiedShardRegistration {
                 shard_id: "shard-002".to_string(),
                 files: vec![VerifiedFileMapping {
-                    file_hash: "file-a".to_string(),
+                    file_hash: test_hash(0xA3),
                     file_index: 0,
                     file_size: 10,
                 }],
                 chunks: vec![VerifiedChunkMapping {
-                    chunk_hash: "chunk-2".to_string(),
-                    xorb_hash: "xorb-2".to_string(),
+                    chunk_hash: test_hash(0xB2),
+                    xorb_hash: test_hash(0xC2),
                     chunk_index: 0,
                 }],
             })
             .unwrap();
 
         // File should be in both shards
-        let shards = index.get_shards_for_file("file-a").unwrap();
+        let shards = index.get_shards_for_file(&test_hash(0xA3)).unwrap();
         assert_eq!(shards.len(), 2);
         assert!(shards.contains(&"shard-001".to_string()));
         assert!(shards.contains(&"shard-002".to_string()));
@@ -577,13 +586,13 @@ mod tests {
             .register_verified_shard(VerifiedShardRegistration {
                 shard_id: "shard-001".to_string(),
                 files: vec![VerifiedFileMapping {
-                    file_hash: "file-a".to_string(),
+                    file_hash: test_hash(0xA3),
                     file_index: 0,
                     file_size: 10,
                 }],
                 chunks: vec![VerifiedChunkMapping {
-                    chunk_hash: "chunk-1".to_string(),
-                    xorb_hash: "xorb-1".to_string(),
+                    chunk_hash: test_hash(0xB1),
+                    xorb_hash: test_hash(0xC1),
                     chunk_index: 0,
                 }],
             })
@@ -594,19 +603,19 @@ mod tests {
                 shard_id: "shard-002".to_string(),
                 files: vec![
                     VerifiedFileMapping {
-                        file_hash: "file-new".to_string(),
+                        file_hash: test_hash(0xA4),
                         file_index: 0,
                         file_size: 5,
                     },
                     VerifiedFileMapping {
-                        file_hash: "file-a".to_string(),
+                        file_hash: test_hash(0xA3),
                         file_index: 1,
                         file_size: 11,
                     },
                 ],
                 chunks: vec![VerifiedChunkMapping {
-                    chunk_hash: "chunk-2".to_string(),
-                    xorb_hash: "xorb-2".to_string(),
+                    chunk_hash: test_hash(0xB2),
+                    xorb_hash: test_hash(0xC2),
                     chunk_index: 0,
                 }],
             })
@@ -620,9 +629,9 @@ mod tests {
                 ..
             }
         ));
-        assert_eq!(index.get_file_size("file-a"), Some(10));
-        assert!(index.get_file_refs("file-new").is_none());
-        assert!(!index.chunk_exists("chunk-2"));
+        assert_eq!(index.get_file_size(&test_hash(0xA3)), Some(10));
+        assert!(index.get_file_refs(&test_hash(0xA4)).is_none());
+        assert!(!index.chunk_exists(&test_hash(0xB2)));
     }
 
     #[test]
@@ -634,15 +643,15 @@ mod tests {
                 shard_id: "shard-001".to_string(),
                 files: vec![],
                 chunks: vec![VerifiedChunkMapping {
-                    chunk_hash: "chunk-1".to_string(),
-                    xorb_hash: "xorb-1".to_string(),
+                    chunk_hash: test_hash(0xB1),
+                    xorb_hash: test_hash(0xC1),
                     chunk_index: 0,
                 }],
             })
             .unwrap();
 
-        assert!(index.chunk_exists("chunk-1"));
-        assert!(!index.chunk_exists("chunk-2"));
+        assert!(index.chunk_exists(&test_hash(0xB1)));
+        assert!(!index.chunk_exists(&test_hash(0xB2)));
     }
 
     #[tokio::test]
@@ -695,5 +704,33 @@ mod tests {
 
         assert_eq!(count, 0);
         assert!(index.get_shards_for_file(&file_hash).is_none());
+    }
+
+    #[test]
+    fn typed_keys_make_hex_lookups_case_insensitive() {
+        let index = MetadataIndex::new();
+        let chunk = test_hash(0xB1);
+        index
+            .register_verified_shard(VerifiedShardRegistration {
+                shard_id: "shard-001".to_string(),
+                files: vec![],
+                chunks: vec![VerifiedChunkMapping {
+                    chunk_hash: chunk,
+                    xorb_hash: test_hash(0xC1),
+                    chunk_index: 0,
+                }],
+            })
+            .unwrap();
+
+        // Hex is only a transport encoding: an uppercase rendering of the
+        // same digest parses back to the identical typed key.
+        let upper_hex = chunk.to_hex().to_uppercase();
+        let parsed = MerkleHash::from_hex(&upper_hex).unwrap();
+        assert_eq!(parsed, chunk);
+        assert!(index.chunk_exists(&parsed));
+        assert_eq!(
+            index.get_xorb_for_chunk(&parsed),
+            Some((test_hash(0xC1), 0))
+        );
     }
 }

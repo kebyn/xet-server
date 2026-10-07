@@ -121,7 +121,7 @@ pub async fn get_reconstruction_v1(
 
     // Look up verified shard references for this file. Each ref is a full-file
     // candidate, so use one complete plan rather than merging candidate metadata.
-    let file_refs = match index.get_file_refs(&file_id) {
+    let file_refs = match index.get_file_refs(&target_hash) {
         Some(refs) if !refs.is_empty() => refs,
         None => {
             return HttpResponse::NotFound().json(serde_json::json!({
@@ -274,7 +274,7 @@ pub async fn get_reconstruction(
 
     // Look up verified shard references for this file. Each ref is a full-file
     // candidate, so use one complete plan rather than merging candidate metadata.
-    let file_refs = match index.get_file_refs(&file_id) {
+    let file_refs = match index.get_file_refs(&target_hash) {
         Some(refs) if !refs.is_empty() => refs,
         None => {
             return HttpResponse::NotFound().json(serde_json::json!({
@@ -661,25 +661,25 @@ mod tests {
                 shard_id,
                 files: vec![
                     VerifiedFileMapping {
-                        file_hash: file_a.to_hex(),
+                        file_hash: file_a,
                         file_index: 0,
                         file_size: 3,
                     },
                     VerifiedFileMapping {
-                        file_hash: file_b.to_hex(),
+                        file_hash: file_b,
                         file_index: 1,
                         file_size: 3,
                     },
                 ],
                 chunks: vec![
                     VerifiedChunkMapping {
-                        chunk_hash: raw_hashes[0].to_hex(),
-                        xorb_hash: xorb.xorb_hash.to_hex(),
+                        chunk_hash: raw_hashes[0],
+                        xorb_hash: xorb.xorb_hash,
                         chunk_index: 0,
                     },
                     VerifiedChunkMapping {
-                        chunk_hash: raw_hashes[1].to_hex(),
-                        xorb_hash: xorb.xorb_hash.to_hex(),
+                        chunk_hash: raw_hashes[1],
+                        xorb_hash: xorb.xorb_hash,
                         chunk_index: 1,
                     },
                 ],

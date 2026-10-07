@@ -24,7 +24,6 @@ use crate::format::xorb::XorbChunkHeader;
 use crate::index::MetadataIndex;
 use crate::metrics::GLOBAL_METRICS;
 use crate::storage::StorageBackend;
-#[cfg(test)]
 use crate::types::MerkleHash;
 use crate::util::{DualHasher, TempFile};
 #[cfg(test)]
@@ -236,12 +235,16 @@ pub async fn download_lfs_object(
 ) -> HttpResponse {
     let oid = path.into_inner();
 
-    // Validate oid format
-    if oid.len() != 64 || !oid.chars().all(|c| c.is_ascii_hexdigit()) {
-        return HttpResponse::BadRequest().json(serde_json::json!({
-            "error": "Invalid oid format, expected 64-character hex string"
-        }));
-    }
+    // Validate oid format and parse it into its typed form (64 hex chars,
+    // any case; the typed key normalizes case).
+    let oid_hash = match MerkleHash::from_hex(&oid) {
+        Ok(parsed) => parsed,
+        Err(_) => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "Invalid oid format, expected 64-character hex string"
+            }));
+        }
+    };
 
     // Extract, verify, and authorize the caller in one step.
     if let Err(rej) = require_auth(
@@ -326,7 +329,7 @@ pub async fn download_lfs_object(
         }
     }
 
-    if let Some(file_refs) = index.get_file_refs(&oid) {
+    if let Some(file_refs) = index.get_file_refs(&oid_hash) {
         let temp_dir = config.storage.resolve_reconstruction_temp_dir();
         return serve_verified_xet_reconstruction(&oid, file_refs, storage, temp_dir).await;
     }
@@ -621,7 +624,11 @@ mod tests {
             "{}",
             validation_error
         );
-        assert!(index_for_assert.get_file_refs(&victim_oid).is_none());
+        assert!(
+            index_for_assert
+                .get_file_refs(&MerkleHash::from_hex(&victim_oid).unwrap())
+                .is_none()
+        );
 
         let app = actix_test::init_service(
             App::new()

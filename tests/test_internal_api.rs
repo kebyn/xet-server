@@ -22,6 +22,7 @@ use xet_server::hash::compute_data_hash;
 use xet_server::index::{MetadataIndex, VerifiedFileMapping, VerifiedShardRegistration};
 use xet_server::storage::local::LocalStorage;
 use xet_server::storage::{StorageBackend, StorageResult};
+use xet_server::types::MerkleHash;
 
 fn create_test_context() -> TestContext {
     common::test_config_with_new_key()
@@ -253,7 +254,7 @@ async fn test_internal_head_blob_xet() {
         .register_verified_shard(VerifiedShardRegistration {
             shard_id: "shard-test".to_string(),
             files: vec![VerifiedFileMapping {
-                file_hash: oid.clone(),
+                file_hash: MerkleHash::from_hex(&oid).unwrap(),
                 file_index: 0,
                 file_size: 123,
             }],

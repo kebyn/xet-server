@@ -9,6 +9,7 @@ use crate::api::auth::AuthVerifier;
 use crate::api::guard::{AuthNeed, require_auth};
 use crate::index::MetadataIndex;
 use crate::storage::StorageBackend;
+use crate::types::MerkleHash;
 
 #[derive(Serialize, Deserialize)]
 struct ChunkDedupResponse {
@@ -44,22 +45,26 @@ pub async fn query_chunk_dedup(
         }));
     }
 
-    // Validate hash format (should be a hex hash)
-    if hash.len() != 64 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
-        return HttpResponse::BadRequest().json(serde_json::json!({
-            "error": "Invalid hash format, expected 64-character hex string"
-        }));
-    }
+    // Parse the hash into its typed form (64 hex chars, any case; the typed
+    // key normalizes case so an uppercase query matches lowercase producers).
+    let chunk_hash = match MerkleHash::from_hex(&hash) {
+        Ok(parsed) => parsed,
+        Err(_) => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "Invalid hash format, expected 64-character hex string"
+            }));
+        }
+    };
 
     // Look up chunk in metadata index
-    let response = match index.get_xorb_for_chunk(&hash) {
+    let response = match index.get_xorb_for_chunk(&chunk_hash) {
         Some((xorb_hash, chunk_index)) => {
             let xorb_key = format!("xorbs/{}", xorb_hash);
             match storage.exists(&xorb_key).await {
                 Ok(true) => ChunkDedupResponse {
                     hash,
                     found: true,
-                    xorb_hash: Some(xorb_hash),
+                    xorb_hash: Some(xorb_hash.to_hex()),
                     chunk_index: Some(chunk_index),
                 },
                 Ok(false) => ChunkDedupResponse {
@@ -225,8 +230,8 @@ mod tests {
                 shard_id: "stale-shard".to_string(),
                 files: vec![],
                 chunks: vec![VerifiedChunkMapping {
-                    chunk_hash: chunk_hash.clone(),
-                    xorb_hash: "b".repeat(64),
+                    chunk_hash: MerkleHash::from_hex(&chunk_hash).unwrap(),
+                    xorb_hash: MerkleHash::from_hex(&"b".repeat(64)).unwrap(),
                     chunk_index: 0,
                 }],
             })
@@ -335,8 +340,8 @@ mod tests {
                 shard_id: "shard".to_string(),
                 files: vec![],
                 chunks: vec![VerifiedChunkMapping {
-                    chunk_hash: chunk_hash.clone(),
-                    xorb_hash: "b".repeat(64),
+                    chunk_hash: MerkleHash::from_hex(&chunk_hash).unwrap(),
+                    xorb_hash: MerkleHash::from_hex(&"b".repeat(64)).unwrap(),
                     chunk_index: 0,
                 }],
             })

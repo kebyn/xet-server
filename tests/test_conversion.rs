@@ -21,6 +21,7 @@ use xet_server::hash::compute_data_hash;
 use xet_server::index::MetadataIndex;
 use xet_server::storage::StorageBackend;
 use xet_server::storage::local::LocalStorage;
+use xet_server::types::MerkleHash;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -64,12 +65,12 @@ fn make_test_data(seed: u64, size: usize) -> Vec<u8> {
     data
 }
 
-fn raw_chunk_hashes(data: &[u8]) -> Vec<String> {
+fn raw_chunk_hashes(data: &[u8]) -> Vec<MerkleHash> {
     let mut chunker = Chunker::new(ChunkConfig::default());
     chunker
         .chunk_data(data)
         .iter()
-        .map(|chunk| compute_data_hash(&data[chunk.offset..chunk.offset + chunk.size]).to_hex())
+        .map(|chunk| compute_data_hash(&data[chunk.offset..chunk.offset + chunk.size]))
         .collect()
 }
 
@@ -106,8 +107,9 @@ async fn reconstruct_from_xet(
     index: &MetadataIndex,
     storage: &Arc<Box<dyn StorageBackend>>,
 ) -> Vec<u8> {
+    let file_id_hash = MerkleHash::from_hex(file_id).expect("file_id should be valid hex");
     let shard_ids = index
-        .get_shards_for_file(file_id)
+        .get_shards_for_file(&file_id_hash)
         .expect("file_id should have shard mappings");
 
     let mut output = Vec::new();
@@ -250,7 +252,7 @@ async fn test_convert_small_file() {
     assert!(!raw_exists, "raw blob should be deleted after conversion");
 
     // Index was updated.
-    let shards = index.get_shards_for_file(&oid);
+    let shards = index.get_shards_for_file(&MerkleHash::from_hex(&oid).unwrap());
     assert!(shards.is_some(), "index should have file→shard mapping");
     let shards = shards.unwrap();
     assert!(
@@ -366,7 +368,7 @@ async fn test_rebuild_from_storage() {
     assert!(count >= 1, "should have rebuilt at least 1 shard");
 
     // The rebuilt index should know about the file.
-    let shards = fresh_index.get_shards_for_file(&oid);
+    let shards = fresh_index.get_shards_for_file(&MerkleHash::from_hex(&oid).unwrap());
     assert!(
         shards.is_some(),
         "rebuilt index should have mapping for the converted file"

@@ -11,6 +11,7 @@ use crate::api::auth::AuthVerifier;
 use crate::api::guard::{AuthNeed, require_auth};
 use crate::index::MetadataIndex;
 use crate::storage::{StorageBackend, StorageError};
+use crate::types::MerkleHash;
 
 /// Error response for internal endpoints
 #[derive(Serialize)]
@@ -35,12 +36,16 @@ pub async fn get_blob_state(
 ) -> HttpResponse {
     let oid = path.into_inner();
 
-    // Validate oid format (should be a hex hash)
-    if oid.len() != 64 || !oid.chars().all(|c| c.is_ascii_hexdigit()) {
-        return HttpResponse::BadRequest().json(ErrorResponse {
-            error: "Invalid oid format, expected 64-character hex string".to_string(),
-        });
-    }
+    // Validate oid format and parse it into its typed form (64 hex chars,
+    // any case; the typed key normalizes case).
+    let oid_hash = match MerkleHash::from_hex(&oid) {
+        Ok(parsed) => parsed,
+        Err(_) => {
+            return HttpResponse::BadRequest().json(ErrorResponse {
+                error: "Invalid oid format, expected 64-character hex string".to_string(),
+            });
+        }
+    };
 
     // Extract, verify, and authorize the caller in one step.
     if let Err(rej) = require_auth(
@@ -52,7 +57,7 @@ pub async fn get_blob_state(
     }
 
     // Check MetadataIndex first
-    if let Some(size) = index.get_file_size(&oid) {
+    if let Some(size) = index.get_file_size(&oid_hash) {
         info!("Internal state query for {}: xet_only", oid);
         return HttpResponse::Ok().json(serde_json::json!({
             "state": "xet_only",
@@ -108,12 +113,16 @@ pub async fn head_blob(
 ) -> HttpResponse {
     let oid = path.into_inner();
 
-    // Validate oid format
-    if oid.len() != 64 || !oid.chars().all(|c| c.is_ascii_hexdigit()) {
-        return HttpResponse::BadRequest().json(ErrorResponse {
-            error: "Invalid oid format, expected 64-character hex string".to_string(),
-        });
-    }
+    // Validate oid format and parse it into its typed form (64 hex chars,
+    // any case; the typed key normalizes case).
+    let oid_hash = match MerkleHash::from_hex(&oid) {
+        Ok(parsed) => parsed,
+        Err(_) => {
+            return HttpResponse::BadRequest().json(ErrorResponse {
+                error: "Invalid oid format, expected 64-character hex string".to_string(),
+            });
+        }
+    };
 
     // Extract, verify, and authorize the caller in one step.
     if let Err(rej) = require_auth(
@@ -125,7 +134,7 @@ pub async fn head_blob(
     }
 
     // Check MetadataIndex first
-    if let Some(size) = index.get_file_size(&oid) {
+    if let Some(size) = index.get_file_size(&oid_hash) {
         return HttpResponse::Ok()
             .insert_header(("X-Storage-State", "xet_only"))
             .insert_header(("X-File-Id", oid.as_str()))
@@ -309,7 +318,11 @@ mod tests {
         );
 
         let index = MetadataIndex::new();
-        assert!(index.get_file_refs(&victim_oid).is_none());
+        assert!(
+            index
+                .get_file_refs(&MerkleHash::from_hex(&victim_oid).unwrap())
+                .is_none()
+        );
         let (kp, auth) = create_test_config();
         let token = create_internal_token(&kp);
 

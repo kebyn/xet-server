@@ -249,6 +249,7 @@ mod tests {
     use crate::format::xorb_builder::XorbBuilder;
     use crate::hash::compute_data_hash;
     use crate::storage::local::LocalStorage;
+    use crate::types::MerkleHash;
     use actix_web::{App, test, web};
     use bytes::Bytes;
     use sha2::{Digest, Sha256};
@@ -351,7 +352,7 @@ mod tests {
         shard_builder.build().unwrap()
     }
 
-    fn build_one_chunk_xorb_and_shard_data(raw_chunk: &[u8]) -> (Vec<u8>, Vec<u8>, String) {
+    fn build_one_chunk_xorb_and_shard_data(raw_chunk: &[u8]) -> (Vec<u8>, Vec<u8>, MerkleHash) {
         let mut xorb_builder = XorbBuilder::new(CompressionScheme::None);
         let (serialized_chunk_hash, compressed_len) = xorb_builder.add_chunk(raw_chunk).unwrap();
         let xorb = xorb_builder.build().unwrap();
@@ -385,11 +386,7 @@ mod tests {
             }],
         );
 
-        (
-            xorb.data,
-            shard_builder.build().unwrap(),
-            file_hash.to_hex(),
-        )
+        (xorb.data, shard_builder.build().unwrap(), file_hash)
     }
 
     #[actix_web::test]
