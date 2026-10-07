@@ -20,6 +20,16 @@ enum ResponseBodyError {
 
 /// Classify a send-time transport error: timeouts surface as a distinct
 /// variant so callers can answer 504 instead of a flat 502.
+/// Classify a response-body read failure: a mid-body timeout surfaces as
+/// `HubError::CasTimeout` so callers answer 504 instead of a flat 502.
+/// Size-limit violations (TooLarge) are permanent and stay CasError.
+fn cas_read_error(context: &str, error: ResponseBodyError) -> HubError {
+    match error {
+        ResponseBodyError::Read(source) if source.is_timeout() => HubError::CasTimeout(source),
+        error => HubError::CasError(format!("{}: {}", context, error)),
+    }
+}
+
 fn cas_send_error(e: reqwest::Error) -> HubError {
     if e.is_timeout() {
         HubError::CasTimeout(e)
@@ -250,9 +260,7 @@ impl CasClient {
             200 => {
                 let body = read_response_body_limited(resp, MAX_CAS_CONTROL_RESPONSE_SIZE)
                     .await
-                    .map_err(|e| {
-                        HubError::CasError(format!("CAS state response rejected: {}", e))
-                    })?;
+                    .map_err(|e| cas_read_error("CAS state response rejected", e))?;
                 let state: BlobState = serde_json::from_slice(&body).map_err(|e| {
                     HubError::CasError(format!("Invalid CAS state response: {}", e))
                 })?;
@@ -283,7 +291,7 @@ impl CasClient {
         let status = resp.status().as_u16();
         let response_body = read_response_body_limited(resp, MAX_CAS_CONTROL_RESPONSE_SIZE)
             .await
-            .map_err(|e| HubError::CasError(format!("CAS batch response rejected: {}", e)))?;
+            .map_err(|e| cas_read_error("CAS batch response rejected", e))?;
         let response_body: serde_json::Value = serde_json::from_slice(&response_body)
             .map_err(|e| HubError::CasError(format!("Invalid CAS batch response: {}", e)))?;
 
@@ -382,7 +390,7 @@ impl CasClient {
             200 => {
                 let body = read_response_body_limited(resp, expected_size)
                     .await
-                    .map_err(|e| HubError::CasError(format!("CAS download rejected: {}", e)))?;
+                    .map_err(|e| cas_read_error("CAS download rejected", e))?;
 
                 let actual_size = u64::try_from(body.len()).map_err(|_| {
                     HubError::CasError("CAS download size cannot be represented as u64".to_string())
@@ -597,6 +605,52 @@ mod tests {
         assert!(
             matches!(error, HubError::CasTimeout(_)),
             "expected a timeout variant, got: {error}"
+        );
+        assert!(error.to_string().contains("timed out"));
+    }
+    #[actix_web::test]
+    async fn buffered_download_body_read_timeout_is_cas_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+
+        let server = HttpServer::new(|| {
+            App::new().route(
+                "/lfs/objects/{oid}",
+                web::get().to(|| async {
+                    // Headers (plus one body chunk) arrive immediately; the
+                    // body then stalls forever, so the client-level timeout
+                    // fires mid-read rather than at send time.
+                    let first = futures_util::stream::once(async {
+                        Ok::<_, actix_web::Error>(web::Bytes::from(vec![b'x'; 8]))
+                    });
+                    let never_finishes =
+                        futures_util::stream::pending::<Result<web::Bytes, actix_web::Error>>();
+                    HttpResponse::Ok()
+                        .insert_header(("Content-Length", "64"))
+                        .streaming(first.chain(never_finishes))
+                }),
+            )
+        })
+        .listen(listener)
+        .unwrap()
+        .run();
+        tokio::spawn(server);
+
+        let client = CasClient::new(&CasSettings {
+            base_url: format!("http://{address}"),
+            internal_timeout_seconds: 1,
+            max_download_size: 1024,
+            health_check_timeout_seconds: 5,
+        })
+        .unwrap();
+
+        let error = client
+            .proxy_lfs_download(&"a".repeat(64), 64, "token")
+            .await
+            .expect_err("a stalled body against a 1s timeout must fail");
+        assert!(
+            matches!(error, HubError::CasTimeout(_)),
+            "expected a body-read timeout, got: {error}"
         );
         assert!(error.to_string().contains("timed out"));
     }

@@ -898,7 +898,7 @@ CAS 网络故障、非法响应、超出 Hub 响应上限或上游 5xx 对客户
 
 部分 commit/LFS 端点为兼容既有契约会使用 `CasError` 作为 502 的 `error_type`；稳定保证是状态码和通用 `error` 文案。CAS 返回的 4xx 状态会保留，但响应正文仍会脱敏。
 
-请求超过 `HUB_CAS_TIMEOUT_SECS`（连接或响应超时）时返回 **504 Gateway Timeout**，`error_type` 为 `GatewayTimeout`，`error` 文案与 502 相同的脱敏保证同样适用（不回显 CAS URL）：
+请求超过 `HUB_CAS_TIMEOUT_SECS`（连接、响应或响应体读取超时）时返回 **504 Gateway Timeout**，`error_type` 为 `GatewayTimeout`，`error` 文案与 502 相同的脱敏保证同样适用（不回显 CAS URL）：
 
 ```json
 {"error":"Upstream CAS request failed","error_type":"GatewayTimeout"}
