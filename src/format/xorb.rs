@@ -102,7 +102,8 @@ impl XorbObjectInfoV1 {
     /// Serialize to bytes
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::new();
-        self.serialize(&mut buf).unwrap();
+        self.serialize(&mut buf)
+            .expect("serializing into Vec<u8> cannot fail");
         buf
     }
 
