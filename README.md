@@ -490,8 +490,8 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## 🙏 Acknowledgments
 
 - [BLAKE3](https://github.com/BLAKE3-team/BLAKE3) - fast cryptographic hashing
-- [Actix Web](https://actix.rs/) - high-performance web framework
-- [HuggingFace](https://huggingface.co/) - Hub API design reference
+- [Actix Web](https://github.com/actix/actix-web) - high-performance web framework
+- [HuggingFace Xet Core](https://github.com/huggingface/xet-core) - Hub API design reference
 - [Git LFS](https://git-lfs.github.com/) - large file storage protocol
 
 ## 📞 Support

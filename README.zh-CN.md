@@ -437,8 +437,8 @@ cargo fmt
 ## 🙏 致谢
 
 - [BLAKE3](https://github.com/BLAKE3-team/BLAKE3) - 高速加密哈希
-- [Actix Web](https://actix.rs/) - 高性能 Web 框架
-- [HuggingFace](https://huggingface.co/) - Hub API 设计参考
+- [Actix Web](https://github.com/actix/actix-web) - 高性能 Web 框架
+- [HuggingFace Xet Core](https://github.com/huggingface/xet-core) - Hub API 设计参考
 - [Git LFS](https://git-lfs.github.com/) - 大文件存储协议
 
 ## 📞 支持
