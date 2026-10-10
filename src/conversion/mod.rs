@@ -515,6 +515,19 @@ impl ConversionPipeline {
             ConversionError::StorageError(format!("Failed to download blob to temp file: {}", e))
         })?;
 
+        let actual_size = tokio::fs::metadata(&temp_path)
+            .await
+            .map_err(|e| {
+                ConversionError::StorageError(format!("Failed to stat downloaded blob: {}", e))
+            })?
+            .len();
+        if actual_size != expected_size {
+            return Err(ConversionError::StorageError(format!(
+                "downloaded blob size mismatch: expected {}, received {}",
+                expected_size, actual_size
+            )));
+        }
+
         reservation
             .commit_written(expected_size)
             .map_err(|e| ConversionError::StorageError(e.to_string()))?;
