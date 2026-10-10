@@ -84,7 +84,10 @@ pub fn build_app(
     let cas_client_trait: Arc<dyn CasClientTrait> = deps.cas_client.clone();
 
     App::new()
-        .wrap(Logger::default())
+        .wrap(
+            Logger::new("peer=%a method=%{method}xi path=%U status=%s bytes=%b duration=%T")
+                .custom_request_replace("method", |req| req.method().to_string()),
+        )
         // Payload size limit: 50MB default for JSON API endpoints.
         // Commit API inline files max ~13.6MB (10MB base64-encoded), 50MB is sufficient.
         // Large LFS files use streaming upload via Git LFS protocol.

@@ -76,3 +76,43 @@ fn empty_storage_is_ready_on_real_server() {
         serde_json::json!({"status":"ready","checks":{"storage":"ok","index":"ok"},"index_shard_count":0})
     );
 }
+
+#[test]
+fn cas_access_log_omits_query_and_credential_headers() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = cas_env(dir.path(), true);
+    let mut server = ServerProcess::spawn(
+        env!("CARGO_BIN_EXE_xet-server"),
+        dir.path(),
+        "XET_PORT",
+        &env,
+    );
+    server.wait_for_health();
+    let response = server
+        .request(
+            "/health?token=QUERY_SECRET",
+            &[
+                ("Referer", "https://example.test/?token=REFERER_SECRET"),
+                ("Authorization", "Bearer AUTH_SECRET"),
+                ("Cookie", "session=COOKIE_SECRET"),
+            ],
+        )
+        .unwrap();
+    assert!(response.starts_with("HTTP/1.1 200"));
+    let denied = server.request("/lfs/objects/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?token=OTHER_QUERY_SECRET", &[("Authorization", "Bearer proxy_BADPROXY_MARKER")]).unwrap();
+    assert!(denied.starts_with("HTTP/1.1 401"));
+    let logs = process::wait_for_log(dir.path(), "status=401");
+    for marker in [
+        "QUERY_SECRET",
+        "REFERER_SECRET",
+        "AUTH_SECRET",
+        "COOKIE_SECRET",
+        "OTHER_QUERY_SECRET",
+        "BADPROXY_MARKER",
+    ] {
+        assert!(!logs.contains(marker), "leaked {marker}");
+    }
+    assert!(logs.contains("peer=127.0.0.1"));
+    assert!(logs.contains("method=GET path=/health status=200 bytes="));
+    assert!(logs.contains("duration="));
+}

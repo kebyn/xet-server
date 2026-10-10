@@ -74,19 +74,20 @@ pub(crate) fn validate_proxy_token(
     let claims = match signer.verify_proxy_token(token) {
         Some(claims) => claims,
         None => {
-            let token_preview = token.get(..30).unwrap_or(token);
-            tracing::error!(
-                "validate_proxy_token: verify_proxy_token failed for token starting with: {}...",
-                token_preview
+            tracing::warn!(
+                reason = "verification_failed",
+                operation = expected_operation,
+                "Proxy token rejected"
             );
             return false;
         }
     };
 
     if claims.token_type != "proxy" {
-        tracing::error!(
-            "validate_proxy_token: token_type mismatch: {} != proxy",
-            claims.token_type
+        tracing::warn!(
+            reason = "token_type_mismatch",
+            operation = expected_operation,
+            "Proxy token rejected"
         );
         return false;
     }
@@ -97,28 +98,28 @@ pub(crate) fn validate_proxy_token(
         .split_whitespace()
         .any(|scope| scope == expected_scope.as_str())
     {
-        tracing::error!(
-            "validate_proxy_token: scope mismatch: {} does not contain {}",
-            claims.scope,
-            expected_scope
+        tracing::warn!(
+            reason = "scope_mismatch",
+            operation = expected_operation,
+            "Proxy token rejected"
         );
         return false;
     }
 
     if claims.oid.as_deref() != Some(expected_oid) {
-        tracing::error!(
-            "validate_proxy_token: oid mismatch: {:?} != {}",
-            claims.oid,
-            expected_oid
+        tracing::warn!(
+            reason = "oid_mismatch",
+            operation = expected_operation,
+            "Proxy token rejected"
         );
         return false;
     }
 
     if claims.operation.as_deref() != Some(expected_operation) {
-        tracing::error!(
-            "validate_proxy_token: operation mismatch: {:?} != {}",
-            claims.operation,
-            expected_operation
+        tracing::warn!(
+            reason = "operation_mismatch",
+            operation = expected_operation,
+            "Proxy token rejected"
         );
         return false;
     }

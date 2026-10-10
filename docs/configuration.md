@@ -753,3 +753,9 @@ curl http://localhost:8080/ready
 - [CAS API 参考文档](api/cas-api.md) - CAS 服务器 API 文档
 - [Hub API 参考文档](api/hub-api.md) - Hub API 文档
 - [系统架构文档](architecture.md) - 系统架构说明
+
+### 访问日志与凭据
+
+Hub 和 CAS 的应用访问日志只记录 TCP 对端地址、方法、不含查询字符串的路径、状态码、响应字节数和耗时。不记录查询参数、Referer、Authorization、Cookie 或响应 Location；代理 token 校验失败也不记录 token 或其前缀。短期代理 token 的 query 参数和 LFS action header 仍用于兼容现有下载重定向与客户端。
+
+反向代理、负载均衡器和日志采集器也应避免记录上述凭据载体；应用配置不会自动修改外部代理。滚动升级期间旧实例仍可能记录完整查询参数，所有实例和代理日志配置完成更新后此修复才完整生效。

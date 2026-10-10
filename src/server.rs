@@ -208,7 +208,10 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
     let shutdown_storage = storage.clone();
     let server_result = HttpServer::new(move || {
         App::new()
-            .wrap(Logger::default())
+            .wrap(
+                Logger::new("peer=%a method=%{method}xi path=%U status=%s bytes=%b duration=%T")
+                    .custom_request_replace("method", |req| req.method().to_string()),
+            )
             .wrap(from_fn(metrics_middleware))
             // PayloadConfig bounds non-upload routes (web::Bytes, web::Json).
             // Upload handlers use web::Payload which bypasses this limit and

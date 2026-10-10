@@ -82,3 +82,15 @@ impl Drop for ServerProcess {
         let _ = self.child.wait();
     }
 }
+
+pub fn wait_for_log(dir: &Path, expected: &str) -> String {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let logs = std::fs::read_to_string(dir.join("server.log")).unwrap();
+        if logs.contains(expected) {
+            return logs;
+        }
+        assert!(Instant::now() < deadline, "missing log {expected}: {logs}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
