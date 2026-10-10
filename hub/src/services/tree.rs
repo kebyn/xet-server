@@ -43,6 +43,9 @@ pub(crate) struct TreeListRequest<'a> {
 pub(crate) struct TreeListingPage {
     pub(crate) entries: Vec<TreeListingEntry>,
     pub(crate) next_cursor: Option<String>,
+    /// The commit selected while resolving the request revision. Following a
+    /// generated next link must continue reading this same snapshot.
+    pub(crate) commit_id: String,
 }
 
 pub(crate) struct TreeService {
@@ -98,6 +101,7 @@ impl TreeService {
         Ok(TreeListingPage {
             entries: tree_entries,
             next_cursor: entries.next_after_path.as_deref().map(encode_cursor),
+            commit_id,
         })
     }
 

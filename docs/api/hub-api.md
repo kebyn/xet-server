@@ -477,10 +477,10 @@ EOF
 普通 tree listing 每页最多基于 1000 个有序 snapshot 文件条目生成响应。还有后续数据时，响应包含与 `huggingface_hub` 分页器兼容的 RFC 8288 header：
 
 ```http
-Link: <http://localhost:8080/api/models/my-org/my-model/tree/main?recursive=true&cursor=...>; rel="next"
+Link: <http://localhost:8080/api/models/my-org/my-model/tree/0123456789abcdef?recursive=true&cursor=...>; rel="next"
 ```
 
-`huggingface_hub` 会透明跟随该链接；直接调用 HTTP API 的客户端应持续跟随 `rel="next"`，直到响应不再包含 `Link`。游标无效或重复指定返回 `400 ValidationError`。
+服务端第一次解析 `{rev}` 后，会把该 commit ID 固定到后续 `Link`，因此客户端应直接跟随链接以读取同一快照；手工把 cursor 拼回 `tree/main` 不提供此快照保证。`huggingface_hub` 会透明跟随该链接；直接调用 HTTP API 的客户端应持续跟随 `rel="next"`，直到响应不再包含 `Link`。游标无效或重复指定返回 `400 ValidationError`。
 
 **响应**：
 ```json

@@ -62,7 +62,31 @@ fn parse_cursor_query(req: &HttpRequest) -> Result<Option<String>, String> {
     Ok(cursor)
 }
 
-fn build_next_link(req: &HttpRequest, config: &HubConfig, cursor: &str) -> String {
+fn replace_tree_revision(path: &str, commit_id: &str) -> String {
+    // `splitn` keeps the suffix (including a trailing slash) intact while
+    // locating the route's fixed `tree` segment. Searching for `/tree/` in
+    // the whole string could replace a namespace or repository with that
+    // name instead of the revision segment.
+    let mut segments = path.splitn(7, '/');
+    let prefix_segments: Vec<_> = (0..6).filter_map(|_| segments.next()).collect();
+    if prefix_segments.len() != 6 || prefix_segments[5] != "tree" {
+        return path.to_string();
+    }
+    let Some(revision_and_suffix) = segments.next() else {
+        return path.to_string();
+    };
+    let suffix_start = revision_and_suffix
+        .find('/')
+        .unwrap_or(revision_and_suffix.len());
+    format!(
+        "{}/{}{}",
+        prefix_segments.join("/"),
+        commit_id,
+        &revision_and_suffix[suffix_start..]
+    )
+}
+
+fn build_next_link(req: &HttpRequest, config: &HubConfig, commit_id: &str, cursor: &str) -> String {
     let mut query = url::form_urlencoded::Serializer::new(String::new());
     for (key, value) in url::form_urlencoded::parse(req.query_string().as_bytes()) {
         if key != "cursor" {
@@ -74,7 +98,7 @@ fn build_next_link(req: &HttpRequest, config: &HubConfig, cursor: &str) -> Strin
     format!(
         "{}{}?{}",
         config.server.base_url().trim_end_matches('/'),
-        req.path(),
+        replace_tree_revision(req.path(), commit_id),
         query
     )
 }
@@ -136,7 +160,7 @@ async fn handle_tree(
                 "Hub configuration is unavailable",
             );
         };
-        let next_link = build_next_link(&req, config, &next_cursor);
+        let next_link = build_next_link(&req, config, &page.commit_id, &next_cursor);
         response.insert_header(("Link", format!("<{next_link}>; rel=\"next\"")));
     }
     response.json(tree_entries)
@@ -184,8 +208,23 @@ repo_type_handlers! {
 mod tests {
     use super::*;
     use crate::auth::token_store::TokenStore;
-    use crate::metadata::{FileEntry, Revision, SqliteMetadataStore};
+    use crate::metadata::{FileEntry, FileTreeChange, Revision, SqliteMetadataStore};
     use actix_web::{App, test as actix_test};
+
+    #[test]
+    fn next_link_replaces_only_the_tree_revision_segment() {
+        assert_eq!(
+            replace_tree_revision(
+                "/api/models/tree/tree/tree/main/models/tree/",
+                "0123456789abcdef"
+            ),
+            "/api/models/tree/tree/tree/0123456789abcdef/models/tree/"
+        );
+        assert_eq!(
+            replace_tree_revision("/api/models/ns/repo/tree/main/", "commit"),
+            "/api/models/ns/repo/tree/commit/"
+        );
+    }
 
     async fn setup_test_env_with_files() -> (
         std::sync::Arc<TokenStore>,
@@ -210,7 +249,7 @@ mod tests {
             .create_repo("testuser", "my-model", RepoType::Model, false)
             .await
             .unwrap();
-        let commit_id = "abc123";
+        let commit_id = "abcdef1234567890";
         let revision = Revision {
             commit_id: commit_id.to_string(),
             repo_id: repo.id,
@@ -278,7 +317,7 @@ mod tests {
             .create_repo("owner", "secret", RepoType::Model, true)
             .await
             .unwrap();
-        let commit_id = "abc123";
+        let commit_id = "abcdef1234567890";
         metadata
             .add_revision(Revision {
                 commit_id: commit_id.to_string(),
@@ -332,7 +371,7 @@ mod tests {
             .create_repo("owner", "secret", RepoType::Model, true)
             .await
             .unwrap();
-        let commit_id = "abc123";
+        let commit_id = "abcdef1234567890";
         metadata
             .add_revision(Revision {
                 commit_id: commit_id.to_string(),
@@ -386,7 +425,7 @@ mod tests {
             .create_repo("testuser", "my-model", RepoType::Model, false)
             .await
             .unwrap();
-        let commit_id = "abc123";
+        let commit_id = "abcdef1234567890";
         metadata
             .add_revision(Revision {
                 commit_id: commit_id.to_string(),
@@ -448,7 +487,7 @@ mod tests {
             .create_repo("testuser", "my-model", RepoType::Model, false)
             .await
             .unwrap();
-        let commit_id = "abc123";
+        let commit_id = "abcdef1234567890";
         let revision = Revision {
             commit_id: commit_id.to_string(),
             repo_id: repo.id,
@@ -534,7 +573,7 @@ mod tests {
             .create_repo("testuser", "large-tree", RepoType::Model, false)
             .await
             .unwrap();
-        let commit_id = "abc123";
+        let commit_id = "abcdef1234567890";
         metadata
             .add_revision(Revision {
                 commit_id: commit_id.to_string(),
@@ -566,7 +605,7 @@ mod tests {
         let app = actix_test::init_service(
             App::new()
                 .app_data(web::Data::new(token_store))
-                .app_data(web::Data::new(metadata))
+                .app_data(web::Data::new(metadata.clone()))
                 .app_data(web::Data::new(HubConfig::default()))
                 .route(
                     "/api/models/{ns}/{repo}/tree/{revision}/{path:.*}",
@@ -596,6 +635,7 @@ mod tests {
             .and_then(|value| value.strip_suffix(">; rel=\"next\""))
             .expect("Link header should contain one next relation");
         let next_url = url::Url::parse(next_url).expect("next link should be absolute");
+        assert!(next_url.path().contains("/tree/abcdef1234567890/"));
         let next_query: std::collections::HashMap<_, _> =
             next_url.query_pairs().into_owned().collect();
         assert_eq!(
@@ -604,6 +644,35 @@ mod tests {
         );
         assert_eq!(next_query.get("expand").map(String::as_str), Some("false"));
         assert!(next_query.contains_key("cursor"));
+
+        // Move HEAD after the first page. The generated link must continue to
+        // read the commit selected by the first request.
+        let next_commit = "1234567890abcdef";
+        metadata
+            .commit_changes_atomic(
+                &Revision {
+                    commit_id: next_commit.to_string(),
+                    repo_id: repo.id,
+                    parent: Some(commit_id.to_string()),
+                    message: "remove tail".to_string(),
+                    author: "testuser".to_string(),
+                    created_at: 1001,
+                },
+                &[
+                    FileTreeChange::Delete("files/1000.bin".to_string()),
+                    FileTreeChange::Upsert(FileEntry {
+                        path: "files/2000.bin".to_string(),
+                        repo_id: repo.id,
+                        commit_id: next_commit.to_string(),
+                        size: 1,
+                        cas_hash: "hash-2000".to_string(),
+                        is_lfs: true,
+                    }),
+                ],
+                Some(commit_id),
+            )
+            .await
+            .unwrap();
         let next_uri = match next_url.query() {
             Some(query) => format!("{}?{}", next_url.path(), query),
             None => next_url.path().to_string(),
@@ -631,7 +700,7 @@ mod tests {
             .create_repo("testuser", "large-directory", RepoType::Model, false)
             .await
             .unwrap();
-        let commit_id = "abc123";
+        let commit_id = "abcdef1234567890";
         metadata
             .add_revision(Revision {
                 commit_id: commit_id.to_string(),
@@ -710,7 +779,7 @@ mod tests {
             .create_repo("testuser", "cursor-test", RepoType::Model, false)
             .await
             .unwrap();
-        let commit_id = "abc123";
+        let commit_id = "abcdef1234567890";
         metadata
             .add_revision(Revision {
                 commit_id: commit_id.to_string(),
