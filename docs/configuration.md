@@ -295,7 +295,7 @@ export HUB_CAS_TIMEOUT_SECS=60
 
 **说明**：
 - `HUB_INLINE_THRESHOLD`: 小于此值的文件内联在 commit 中（regular 模式）
-- `HUB_UPLOAD_TEMP_DIR`: 流式上传时的临时文件存储目录，建议使用 SSD
+- `HUB_UPLOAD_TEMP_DIR`: 流式上传时的临时文件存储目录，建议使用 SSD。每个上传文件由 RAII 临时路径守卫持有，正常完成、校验/CAS 失败、请求流错误和 future 取消都会自动清理；强制终止进程后遗留文件不在本轮自动扫描范围内。
 - `HUB_MAX_UPLOAD_SIZE`: 单个文件的最大上传大小限制
 
 **示例**：

@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -11,7 +11,7 @@ use crate::cas_client::{CasClient, CasUploadError};
 
 #[derive(Debug)]
 pub(crate) struct StoredLfsUpload {
-    pub(crate) path: PathBuf,
+    pub(crate) path: tempfile::TempPath,
     pub(crate) size: u64,
     pub(crate) sha256: String,
 }
@@ -20,8 +20,6 @@ pub(crate) struct StoredLfsUpload {
 pub(crate) enum LfsUploadStoreError {
     CreateTempDir(String),
     CreateTempFile(String),
-    PrepareTempFile(String),
-    OpenTempFile(String),
     ReadPayload(String),
     PayloadTooLarge { actual: u64, max: u64 },
     WriteTempFile(String),
@@ -85,24 +83,19 @@ impl LfsUploadService {
             .map_err(LfsUploadServiceError::Store)?;
 
         if stored_upload.sha256 != oid {
-            remove_temp_file(&stored_upload.path).await;
             return Err(LfsUploadServiceError::HashMismatch {
                 computed: stored_upload.sha256,
                 size: stored_upload.size,
             });
         }
 
-        let result = self
-            .cas_client
+        self.cas_client
             .proxy_lfs_upload_from_path(oid, &stored_upload.path, stored_upload.size, token)
             .await
             .map_err(|err| LfsUploadServiceError::Cas {
                 status: err.status,
                 message: err.message,
-            });
-
-        remove_temp_file(&stored_upload.path).await;
-        result
+            })
     }
 }
 
@@ -123,33 +116,23 @@ where
         .prefix("upload-")
         .tempfile_in(temp_dir)
         .map_err(|err| LfsUploadStoreError::CreateTempFile(err.to_string()))?;
-    let (temp_file_handle, temp_path) = temp_file
-        .keep()
-        .map_err(|err| LfsUploadStoreError::PrepareTempFile(err.to_string()))?;
-    drop(temp_file_handle);
-
+    // Keep the path guard alive during reception and CAS forwarding, including
+    // cancellation. Reuse the securely opened handle instead of reopening by path.
+    let (temp_file_handle, temp_path) = temp_file.into_parts();
     let mut hasher = Sha256::new();
-    let mut file_writer = match tokio::fs::File::create(&temp_path).await {
-        Ok(file) => tokio::io::BufWriter::new(file),
-        Err(err) => {
-            remove_temp_file(&temp_path).await;
-            return Err(LfsUploadStoreError::OpenTempFile(err.to_string()));
-        }
-    };
+    let mut file_writer = tokio::io::BufWriter::new(tokio::fs::File::from_std(temp_file_handle));
 
     let mut total_bytes: u64 = 0;
     while let Some(chunk_result) = payload.next().await {
         let chunk = match chunk_result {
             Ok(chunk) => chunk,
             Err(err) => {
-                remove_open_temp_file(file_writer, &temp_path).await;
                 return Err(LfsUploadStoreError::ReadPayload(err.to_string()));
             }
         };
 
         total_bytes += chunk.len() as u64;
         if total_bytes > max_upload_size {
-            remove_open_temp_file(file_writer, &temp_path).await;
             return Err(LfsUploadStoreError::PayloadTooLarge {
                 actual: total_bytes,
                 max: max_upload_size,
@@ -158,13 +141,11 @@ where
 
         hasher.update(&chunk);
         if let Err(err) = file_writer.write_all(&chunk).await {
-            remove_open_temp_file(file_writer, &temp_path).await;
             return Err(LfsUploadStoreError::WriteTempFile(err.to_string()));
         }
     }
 
     if let Err(err) = file_writer.flush().await {
-        remove_open_temp_file(file_writer, &temp_path).await;
         return Err(LfsUploadStoreError::FlushTempFile(err.to_string()));
     }
     drop(file_writer);
@@ -176,28 +157,60 @@ where
     })
 }
 
-async fn remove_temp_file(path: &Path) {
-    let _ = tokio::fs::remove_file(path).await;
-}
-
-async fn remove_open_temp_file(file_writer: tokio::io::BufWriter<tokio::fs::File>, path: &Path) {
-    drop(file_writer);
-    remove_temp_file(path).await;
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::Path;
     use std::sync::{Arc, Mutex};
+    use std::task::{Context, Poll};
 
     use async_trait::async_trait;
     use bytes::Bytes;
-    use futures_util::stream;
+    use futures_util::{Stream, stream};
     use sha2::{Digest, Sha256};
 
     use crate::cas_client::CasUploadError;
 
     use super::{LfsUploadCasClient, LfsUploadService, LfsUploadServiceError};
+
+    struct BlockingCasClient {
+        started: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl LfsUploadCasClient for BlockingCasClient {
+        async fn proxy_lfs_upload_from_path(
+            &self,
+            _oid: &str,
+            _file_path: &Path,
+            _file_size: u64,
+            _token: &str,
+        ) -> Result<(), CasUploadError> {
+            self.started.notify_one();
+            std::future::pending().await
+        }
+    }
+
+    struct BlockingPayload {
+        sent: bool,
+        waiting: Arc<tokio::sync::Notify>,
+    }
+
+    impl Stream for BlockingPayload {
+        type Item = Result<Bytes, std::io::Error>;
+
+        fn poll_next(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Option<Self::Item>> {
+            if !self.sent {
+                self.sent = true;
+                Poll::Ready(Some(Ok(Bytes::from_static(b"partial payload"))))
+            } else {
+                self.waiting.notify_one();
+                Poll::Pending
+            }
+        }
+    }
 
     #[derive(Debug)]
     struct UploadCall {
@@ -379,6 +392,67 @@ mod tests {
             assert_eq!(calls[0].bytes, content.as_ref());
         }
 
+        let mut entries = tokio::fs::read_dir(temp_dir.path()).await.unwrap();
+        assert!(entries.next_entry().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn cancellation_while_waiting_for_cas_drops_temp_path() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let service = LfsUploadService::new(Arc::new(BlockingCasClient {
+            started: started.clone(),
+        }));
+        let temp_path = temp_dir.path().to_path_buf();
+        let content = Bytes::from_static(b"cancel during CAS forwarding");
+        let oid = hex::encode(Sha256::digest(&content));
+        let task = tokio::spawn(async move {
+            service
+                .upload(
+                    &oid,
+                    "proxy_token",
+                    stream::iter(vec![Ok::<_, std::io::Error>(content)]),
+                    &temp_path,
+                    1024,
+                )
+                .await
+        });
+        started.notified().await;
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        let mut entries = tokio::fs::read_dir(temp_dir.path()).await.unwrap();
+        assert!(entries.next_entry().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn cancellation_while_receiving_payload_drops_temp_path() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let waiting = Arc::new(tokio::sync::Notify::new());
+        let service = LfsUploadService::new(Arc::new(MockUploadCasClient {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            error: None,
+        }));
+        let temp_path = temp_dir.path().to_path_buf();
+        let task = tokio::spawn({
+            let waiting = waiting.clone();
+            async move {
+                service
+                    .upload(
+                        &"a".repeat(64),
+                        "proxy_token",
+                        BlockingPayload {
+                            sent: false,
+                            waiting,
+                        },
+                        &temp_path,
+                        1024,
+                    )
+                    .await
+            }
+        });
+        waiting.notified().await;
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
         let mut entries = tokio::fs::read_dir(temp_dir.path()).await.unwrap();
         assert!(entries.next_entry().await.unwrap().is_none());
     }

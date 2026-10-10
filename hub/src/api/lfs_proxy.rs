@@ -163,11 +163,7 @@ fn lfs_upload_store_error_response(err: LfsUploadStoreError, temp_dir: &str) -> 
         LfsUploadStoreError::CreateTempFile(message) => {
             internal_error_response("Failed to create LFS upload temp file", message)
         }
-        LfsUploadStoreError::PrepareTempFile(message) => {
-            internal_error_response("Failed to prepare LFS upload temp file", message)
-        }
-        LfsUploadStoreError::OpenTempFile(message)
-        | LfsUploadStoreError::WriteTempFile(message) => {
+        LfsUploadStoreError::WriteTempFile(message) => {
             internal_error_response("Failed to write LFS upload temp file", message)
         }
         LfsUploadStoreError::ReadPayload(message) => {
