@@ -303,6 +303,11 @@ CAS 对象访问是 content-capability based：持有有效 CAS token 的客户�
 | `XET_S3_ENDPOINT` | S3 端点 URL | - |
 | `XET_UPLOAD_TEMP_DIR` | 上传临时文件目录 | 自动 |
 | `XET_RECONSTRUCTION_TEMP_DIR` | 文件重构及远端 xorb/shard/LFS 有界下载的临时目录 | 自动 |
+| `XET_TEMP_QUOTA_BYTES` | CAS 进程级临时空间总预算 | `8589934592` (8GiB) |
+| `XET_TEMP_MIN_FREE_BYTES` | CAS 临时目录所在文件系统保留空闲空间 | `1073741824` (1GiB) |
+| `XET_CONVERSION_CONCURRENCY` | 转换并发数 | `1` |
+| `XET_CONVERSION_QUEUE_CAPACITY` | 转换等待队列容量 | `128` |
+| `XET_CONVERSION_SHUTDOWN_GRACE_SECS` | 转换关闭宽限期（秒） | `30` |
 | `XET_VERIFY_DOWNLOAD_INTEGRITY` | 启用下载完整性校验 | `false` |
 
 > **⚠️ 重要：S3 Lifecycle Rules 配置**
@@ -368,6 +373,8 @@ CAS 对象访问是 content-capability based：持有有效 CAS token 的客户�
 | `HUB_INLINE_THRESHOLD` | 内联文件阈值（字节） | `1048576` (1MB) |
 | `HUB_UPLOAD_TEMP_DIR` | 上传临时文件目录 | `./data/hub-uploads` |
 | `HUB_MAX_UPLOAD_SIZE` | 最大上传文件大小（字节） | `536870912` (512MB) |
+| `HUB_TEMP_QUOTA_BYTES` | Hub 进程级临时空间总预算 | `2147483648` (2GiB) |
+| `HUB_TEMP_MIN_FREE_BYTES` | Hub 临时目录所在文件系统保留空闲空间 | `1073741824` (1GiB) |
 | `HUB_MAX_DOWNLOAD_SIZE` | CAS 下载大小限制（字节） | `536870912` (512MB) |
 
 **安全相关**：

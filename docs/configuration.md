@@ -62,6 +62,8 @@ export XET_INDEX_REBUILD_STRICT=true
 | `XET_S3_ENDPOINT` | S3 端点 URL | - | 否 |
 | `XET_UPLOAD_TEMP_DIR` | 流式上传临时文件目录 | 自动 | 否 |
 | `XET_RECONSTRUCTION_TEMP_DIR` | 文件重构及远端 xorb/shard/LFS 有界下载的临时目录 | `{OS_temp}/xet-reconstruction` | 否 |
+| `XET_TEMP_QUOTA_BYTES` | CAS 进程级临时空间预算（上传、转换、重建和远端下载共享） | `8589934592` (8GiB) | 否 |
+| `XET_TEMP_MIN_FREE_BYTES` | 临时目录所在文件系统保留的空闲空间 | `1073741824` (1GiB) | 否 |
 
 **说明**：
 - `XET_LOCAL_PATH` 在 `XET_STORAGE_BACKEND=local` 时必需
@@ -71,6 +73,8 @@ export XET_INDEX_REBUILD_STRICT=true
   - 本地存储：`{XET_LOCAL_PATH}/.tmp`（同一文件系统，支持原子重命名）
   - S3 存储：`/var/tmp/xet-uploads`（不被系统重启清理）
 - `XET_RECONSTRUCTION_TEMP_DIR`：文件重构、远端 shard 校验以及 S3/其他远端后端的 xorb/LFS HTTP 下载共用。远端对象会先流式写入自动清理的临时文件，再发送给客户端，内存不会随对象大小增长。该目录必须预留至少一个最大并发对象所需的空间；高并发部署应按并发下载数扩容，并建议使用 SSD
+- `XET_TEMP_QUOTA_BYTES` 是单个 CAS 进程的逻辑预算；同一进程的上传、转换、重建输出和远端缓存会共同计费。配额或保留空闲空间不足时请求返回 `503` 和 `Retry-After: 5`。
+- CAS 启动时会为受管临时目录创建进程独占锁；目录已被另一 CAS 进程使用时启动失败。该预算不提供跨进程硬隔离，多进程共享卷时请分别分配预算并保留余量。
 
 **示例**：
 ```bash
@@ -124,6 +128,9 @@ export CAS_SIGNING_KID=hub-key-1
 | `XET_DELETE_RAW_AFTER_CONVERSION` | 转换成功后删除原始 blob（节省存储空间） | `true` | 否 |
 | `XET_MIN_CONVERSION_SIZE` | 最小转换文件大小（字节），小于此值的文件保持原始格式 | `65536` (64KB) | 否 |
 | `XET_MAX_CONVERSION_SIZE` | 最大转换文件大小（字节），大于此值的文件保持原始格式以防止 OOM | `536870912` (512MB) | 否 |
+| `XET_CONVERSION_CONCURRENCY` | 单进程同时执行的转换数 | `1` | 否 |
+| `XET_CONVERSION_QUEUE_CAPACITY` | 转换等待队列容量 | `128` | 否 |
+| `XET_CONVERSION_SHUTDOWN_GRACE_SECS` | 关闭时运行中转换的正常完成宽限期 | `30` | 否 |
 
 **说明**：
 - 转换管道自动将上传的 LFS blob 转换为 xorb+shard 格式，实现全局 chunk 级去重
@@ -292,11 +299,14 @@ export HUB_CAS_TIMEOUT_SECS=60
 | `HUB_INLINE_THRESHOLD` | 内联文件阈值（字节） | `1048576` (1MB) | 否 |
 | `HUB_UPLOAD_TEMP_DIR` | 上传临时文件目录 | `./data/hub-uploads` | 否 |
 | `HUB_MAX_UPLOAD_SIZE` | 最大上传文件大小（字节） | `536870912` (512MB) | 否 |
+| `HUB_TEMP_QUOTA_BYTES` | Hub 进程级临时上传预算 | `2147483648` (2GiB) | 否 |
+| `HUB_TEMP_MIN_FREE_BYTES` | Hub 临时目录所在文件系统保留的空闲空间 | `1073741824` (1GiB) | 否 |
 
 **说明**：
 - `HUB_INLINE_THRESHOLD`: 小于此值的文件内联在 commit 中（regular 模式）
 - `HUB_UPLOAD_TEMP_DIR`: 流式上传时的临时文件存储目录，建议使用 SSD。每个上传文件由 RAII 临时路径守卫持有，正常完成、校验/CAS 失败、请求流错误和 future 取消都会自动清理；强制终止进程后遗留文件不在本轮自动扫描范围内。
 - `HUB_MAX_UPLOAD_SIZE`: 单个文件的最大上传大小限制
+- Hub 临时额度不足返回 `503` 和 `Retry-After: 5`；单文件大小超过 `HUB_MAX_UPLOAD_SIZE` 仍返回 `413`。
 
 **示例**：
 ```bash
