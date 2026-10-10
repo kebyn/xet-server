@@ -171,6 +171,81 @@ async fn real_deps_with_timeout(
 }
 
 #[actix_web::test]
+async fn commit_routes_only_write_main_without_side_effects_on_rejection() {
+    let (cas_url, uploads) = start_mock_cas().await;
+    let (mut deps, token_store, _) = real_deps(&cas_url).await;
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    let metadata = Arc::new(SqliteMetadataStore::with_pool(pool.clone()).await.unwrap());
+    deps.metadata = metadata.clone();
+    let token = token_store
+        .create_token("owner", "test", "write")
+        .await
+        .unwrap();
+    let app = test::init_service(build_app(deps)).await;
+
+    for (route, repo_type) in [
+        ("models", RepoType::Model),
+        ("datasets", RepoType::Dataset),
+        ("spaces", RepoType::Space),
+    ] {
+        let repo = metadata
+            .create_repo("owner", "repo", repo_type, false)
+            .await
+            .unwrap();
+        let initial = test::TestRequest::post()
+            .uri(&format!("/api/{route}/owner/repo/commit/main"))
+            .peer_addr(peer())
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .set_payload("{\"key\":\"header\",\"value\":{\"summary\":\"initial\"}}\n{\"key\":\"file\",\"value\":{\"path\":\"a\",\"content\":\"YQ==\"}}")
+            .to_request();
+        let response = test::call_service(&app, initial).await;
+        assert_eq!(response.status(), 200);
+        let body: serde_json::Value = test::read_body_json(response).await;
+        let head = body["commitOid"].as_str().unwrap();
+        let count_before: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM revisions WHERE repo_id = ?")
+                .bind(repo.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let calls_before = uploads.lock().unwrap().len();
+
+        for revision in ["feature", head, "Main"] {
+            let body = format!(
+                "{{\"key\":\"header\",\"value\":{{\"summary\":\"rejected\",\"parentRevision\":\"{head}\"}}}}\n{{\"key\":\"file\",\"value\":{{\"path\":\"b\",\"content\":\"Yg==\"}}}}"
+            );
+            let request = test::TestRequest::post()
+                .uri(&format!("/api/{route}/owner/repo/commit/{revision}"))
+                .peer_addr(peer())
+                .insert_header(("Authorization", format!("Bearer {token}")))
+                .set_payload(body)
+                .to_request();
+            let response = test::call_service(&app, request).await;
+            assert_eq!(response.status(), 400);
+            let error: serde_json::Value = test::read_body_json(response).await;
+            assert_eq!(error["error_type"], "ValidationError");
+            assert!(error["error"].as_str().unwrap().contains("'main'"));
+            assert_eq!(
+                metadata.get_head(repo.id).await.unwrap().as_deref(),
+                Some(head)
+            );
+            let count_after: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM revisions WHERE repo_id = ?")
+                    .bind(repo.id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(count_after, count_before);
+            assert_eq!(uploads.lock().unwrap().len(), calls_before);
+        }
+    }
+}
+
+#[actix_web::test]
 async fn commit_with_inline_file_returns_200_on_real_app_assembly() {
     let (cas_url, uploads) = start_mock_cas().await;
     let (deps, token_store, metadata) = real_deps(&cas_url).await;

@@ -287,6 +287,9 @@ Detailed reference: [Hub API Reference](docs/api/hub-api.md)
 - The commit API `header` must be the first non-empty NDJSON operation and may
   appear only once; subsequent file/LFS/delete operations keep request order.
   When the same path appears more than once, the later operation wins.
+- Commit writes accept only the exact `main` revision. Reads may use `main` or
+  an existing commit ID; branch names, commit IDs, and case variants are
+  rejected by the write endpoint with `400 ValidationError`.
 - Every commit is a full file-tree snapshot: SQLite copies the parent commit's
   unmodified entries, applies this delta in order, and updates HEAD — all inside
   a single write transaction, without loading the full parent tree into Hub

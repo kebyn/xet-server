@@ -352,6 +352,7 @@ Content-Type: application/x-ndjson
 
 Commit API 的 NDJSON 有以下顺序和快照语义：
 
+- 写入端点的 `{rev}` 必须精确为 `main`；其他分支名、commit ID 和大小写变体都会返回 `400 ValidationError`。读取 tree/resolve 时仍可使用 `main` 或已有 commit ID。
 - `header` 必须是第一个非空 operation，且整个请求中必须恰好出现一次；空行会被忽略。
 - `file`、`lfsFile` 和 `deletedEntry` 按请求中的原始顺序执行。同一路径出现多次时，后面的 operation 覆盖前面的结果。
 - 每个 commit 保存完整文件树快照：先复制当前 HEAD 的所有父条目，再按顺序应用本次修改和删除；请求中未提及的父条目会保留到新 commit。

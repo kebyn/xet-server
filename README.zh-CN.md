@@ -278,6 +278,7 @@ CAS 对象访问是 content-capability based：持有有效 CAS token 的客户�
 ### 协议与运行保证
 
 - Commit API 的 `header` 必须是第一个非空 NDJSON operation 且只能出现一次；后续 file/LFS/delete operation 保持请求顺序。同一路径以后出现的 operation 为准。
+- Commit 写入端点只接受精确的 `main` revision。读取 tree/resolve 仍可使用 `main` 或已有 commit ID；其他分支名、commit ID 和大小写变体会由写入端点返回 `400 ValidationError`。
 - 每个 commit 是完整文件树 snapshot：SQLite 在同一写事务中复制父 commit 未修改条目、按顺序应用本次 delta 并更新 HEAD，不在 Hub 内存中加载完整父树；非首个 commit 必须提交与当前 HEAD 一致的 `parentRevision`。
 - Commit API 的 LFS `oid` 是不带 `sha256:` 前缀的 64 字符十六进制值。Hub 通过 CAS `HEAD /internal/blob/{oid}` 的必需 `X-Blob-Size` 校验声明大小；对象不存在或大小不一致返回 422。
 - Shard 从本地文件或远端临时文件有界解析，不保留整份原始字节副本；启动重建流式枚举 key，最多 10 个 shard 一批。S3 列表固定 1000 项一页并校验 continuation token 进度。S3 multipart 以唯一 upload ID 跟踪并在错误、取消和 shutdown 时 best-effort abort，bucket lifecycle rule 仍是进程崩溃时的最终兜底。

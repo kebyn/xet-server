@@ -103,6 +103,12 @@ impl CommitService {
             .await
             .map_err(map_metadata_load_error)?;
 
+        if request.revision != "main" {
+            return Err(CommitServiceError::Validation(
+                "Commits currently support only the 'main' revision".to_string(),
+            ));
+        }
+
         let ParsedCommit { header, operations } = parse_commit_body(request.body)?;
 
         let current_head = self
@@ -440,6 +446,7 @@ fn map_metadata_load_error(err: MetadataError) -> CommitServiceError {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use async_trait::async_trait;
     use ed25519_dalek::SigningKey;
@@ -454,7 +461,17 @@ mod tests {
 
     use super::{CommitRequest, CommitService, CommitServiceError, parse_commit_body};
 
-    struct MockCasClient;
+    struct MockCasClient {
+        upload_calls: Arc<AtomicUsize>,
+    }
+
+    impl MockCasClient {
+        fn new() -> Self {
+            Self {
+                upload_calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+    }
 
     #[async_trait]
     impl CasClientTrait for MockCasClient {
@@ -468,6 +485,7 @@ mod tests {
             _data: bytes::Bytes,
             token: &str,
         ) -> Result<(), CasUploadError> {
+            self.upload_calls.fetch_add(1, Ordering::SeqCst);
             assert!(token.starts_with("xet_"));
             Ok(())
         }
@@ -654,7 +672,8 @@ mod tests {
             .create_repo("owner", "repo", RepoType::Model, false)
             .await
             .unwrap();
-        let service = CommitService::new(metadata.clone(), Arc::new(MockCasClient), signer());
+        let service =
+            CommitService::new(metadata.clone(), Arc::new(MockCasClient::new()), signer());
 
         let body = "{\"key\":\"header\",\"value\":{\"summary\":\"Add config\",\"parentRevision\":null}}\n\
                     {\"key\":\"file\",\"value\":{\"path\":\"config.json\",\"content\":\"e30=\"}}";
@@ -682,6 +701,49 @@ mod tests {
             metadata.get_head(repo.id).await.unwrap(),
             Some(result.commit_oid)
         );
+    }
+
+    #[tokio::test]
+    async fn commit_rejects_non_main_revision_before_head_or_cas_work() {
+        let metadata = Arc::new(SqliteMetadataStore::in_memory().await.unwrap());
+        let repo = metadata
+            .create_repo("owner", "repo", RepoType::Model, false)
+            .await
+            .unwrap();
+        let cas = Arc::new(MockCasClient::new());
+        let service = CommitService::new(metadata.clone(), cas.clone(), signer());
+        let body = "{\"key\":\"header\",\"value\":{\"summary\":\"add\",\"parentRevision\":null}}\n\
+                    {\"key\":\"file\",\"value\":{\"path\":\"a.txt\",\"content\":\"YQ==\"}}";
+
+        for revision in ["feature", "0123456789abcdef", "Main"] {
+            let error = service
+                .commit(CommitRequest {
+                    username: "owner",
+                    namespace: "owner",
+                    repo_name: "repo",
+                    revision,
+                    repo_type: RepoType::Model,
+                    body,
+                })
+                .await
+                .expect_err("only main is writable");
+            assert_eq!(
+                error,
+                CommitServiceError::Validation(
+                    "Commits currently support only the 'main' revision".to_string()
+                )
+            );
+        }
+
+        assert_eq!(metadata.get_head(repo.id).await.unwrap(), None);
+        assert!(
+            metadata
+                .get_commit_log(repo.id, None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(cas.upload_calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -722,7 +784,8 @@ mod tests {
             .create_repo("owner", "ordered", RepoType::Model, false)
             .await
             .unwrap();
-        let service = CommitService::new(metadata.clone(), Arc::new(MockCasClient), signer());
+        let service =
+            CommitService::new(metadata.clone(), Arc::new(MockCasClient::new()), signer());
 
         let initial = service
             .commit(CommitRequest {
@@ -823,7 +886,7 @@ mod tests {
             ),
         ] {
             let metadata: Arc<dyn MetadataStore> = Arc::new(FaultMetadataStore { failure });
-            let service = CommitService::new(metadata, Arc::new(MockCasClient), signer());
+            let service = CommitService::new(metadata, Arc::new(MockCasClient::new()), signer());
             let parent_json = parent
                 .map(|value| format!("\"{}\"", value))
                 .unwrap_or_else(|| "null".to_string());
@@ -857,7 +920,7 @@ mod tests {
             .create_repo("owner", "oversized", RepoType::Model, false)
             .await
             .unwrap();
-        let service = CommitService::new(metadata, Arc::new(MockCasClient), signer());
+        let service = CommitService::new(metadata, Arc::new(MockCasClient::new()), signer());
         let body = format!(
             "{{\"key\":\"header\",\"value\":{{\"summary\":\"oversized\",\"parentRevision\":null}}}}\n\
              {{\"key\":\"lfsFile\",\"value\":{{\"path\":\"huge.bin\",\"oid\":\"{}\",\"size\":{}}}}}",
