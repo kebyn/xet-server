@@ -14,6 +14,8 @@ pub(crate) enum InjectedFailure {
     Transient,
     /// The object is absent (must NOT be retried).
     Missing,
+    /// Panic in the worker to exercise join error propagation.
+    Panic,
 }
 
 /// Storage wrapper that fails `get_path` and `download_to_path` for a target
@@ -67,6 +69,7 @@ impl FlakyStorage {
                     StorageError::internal(format!("injected transient failure for {key}"))
                 }
                 InjectedFailure::Missing => StorageError::NotFound(key.to_string()),
+                InjectedFailure::Panic => panic!("injected storage task panic"),
             });
         }
         None

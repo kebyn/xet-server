@@ -34,7 +34,8 @@ CAS Server 是 Xet Server 的核心存储引擎，负责内容寻址存储、文
 - CAS Server 默认端口为 `8081`，以避免与 Hub API 默认端口 `8080` 冲突
 - `XET_PUBLIC_BASE_URL` 在服务器位于反向代理、负载均衡器或 NAT 后时**必须设置**
 - `XET_MAX_BODY_SIZE_MB` 控制流式上传的最大文件大小。非上传路由（JSON 请求等）的 HTTP body 限制为 10MB（硬编码）
-- `XET_INDEX_REBUILD_STRICT=false` 时，CAS 可在索引重建失败后继续启动，但 `/ready` 会返回 `503`，避免流量进入未就绪实例；设置为 `true` 时重建失败会让进程启动失败
+- `XET_INDEX_REBUILD_STRICT=false` 时，CAS 可在索引重建失败后继续启动，但 `/ready` 会返回 `503`、`checks.index="failed"`，`/health` 仍可返回 `200`；设置为 `true` 时重建失败会让进程启动失败。任一 shard 读取重试耗尽、解析、引用对象验证、索引注册或任务失败，以及对象列表读取失败，都使重建失败；有效 shard 会继续处理，空存储返回成功（0 个 shard）。错误对象和原因只写服务端日志，不进入 readiness 响应。
+- 非严格模式不会自动再次重建；修复异常对象后需要重启验证。部署前请先在存储副本上验证重建：此前被跳过的损坏或缺失对象现在会阻止就绪，严格模式会阻止启动。本服务不会自动删除异常对象，请按既定数据恢复流程处理。
 
 **示例**：
 ```bash

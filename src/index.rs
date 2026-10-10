@@ -199,7 +199,8 @@ impl MetadataIndex {
     /// Lists all objects under the `"shards/"` prefix, parses each shard,
     /// and registers its file and chunk mappings in the index.
     ///
-    /// Returns the number of shards successfully indexed.
+    /// Returns the number indexed only when every listed shard succeeds.
+    /// Any unrecovered failure returns a bounded summary; object details stay in logs.
     pub async fn rebuild_from_storage(
         &self,
         storage: Arc<Box<dyn crate::storage::StorageBackend>>,
@@ -211,6 +212,8 @@ impl MetadataIndex {
         // and the number of retained listing entries bounded.
         const BATCH_SIZE: usize = 10;
         let mut total_count = 0;
+        let mut failure_count = 0;
+        let mut listing_failed = false;
 
         loop {
             let mut batch = Vec::with_capacity(BATCH_SIZE);
@@ -218,9 +221,14 @@ impl MetadataIndex {
                 let Some(shard_key) = shard_keys.next().await else {
                     break;
                 };
-                let shard_key =
-                    shard_key.map_err(|error| format!("Failed to list shards: {}", error))?;
-                batch.push(shard_key);
+                match shard_key {
+                    Ok(key) => batch.push(key),
+                    Err(error) => {
+                        tracing::warn!("Failed to list shards during rebuild: {}", error);
+                        listing_failed = true;
+                        break;
+                    }
+                }
             }
             if batch.is_empty() {
                 break;
@@ -230,6 +238,7 @@ impl MetadataIndex {
             for key in batch {
                 let storage_clone = storage.clone();
                 let temp_dir_clone = temp_dir.clone();
+                let task_key = key.clone();
 
                 let handle = tokio::spawn(async move {
                     let shard = match crate::shard_io::parse_shard_from_storage(
@@ -269,35 +278,49 @@ impl MetadataIndex {
                     }
                 });
 
-                handles.push(handle);
+                handles.push((task_key, handle));
             }
 
             // Wait for all tasks in this batch to complete and register results
-            for handle in handles {
+            for (key, handle) in handles {
                 match handle.await {
                     Ok(Some(registration)) => {
                         // Register in index (main task only, no concurrent writes)
                         let shard_id = registration.shard_id.clone();
                         match self.register_verified_shard(registration) {
                             Ok(()) => total_count += 1,
-                            Err(error) => tracing::warn!(
-                                "Skipping shard {} due to an index registration conflict: {}",
-                                shard_id,
-                                error
-                            ),
+                            Err(error) => {
+                                failure_count += 1;
+                                tracing::warn!(
+                                    "Skipping shard {} due to an index registration conflict: {}",
+                                    shard_id,
+                                    error
+                                );
+                            }
                         }
                     }
                     Ok(None) => {
-                        // Shard fetch or parse failed, already logged
+                        // Shard fetch, parse or validation failed, already logged.
+                        failure_count += 1;
                     }
                     Err(e) => {
-                        tracing::warn!("Shard processing task failed: {}", e);
+                        failure_count += 1;
+                        tracing::warn!("Shard processing task failed for {}: {}", key, e);
                     }
                 }
             }
+            if listing_failed {
+                break;
+            }
         }
 
-        Ok(total_count)
+        if failure_count > 0 || listing_failed {
+            Err(format!(
+                "Index rebuild incomplete: {total_count} shards indexed, {failure_count} shards failed, listing failed: {listing_failed}"
+            ))
+        } else {
+            Ok(total_count)
+        }
     }
 }
 
@@ -395,6 +418,7 @@ mod tests {
 
     struct StreamingListOnlyStorage {
         inner: LocalStorage,
+        fail_listing: bool,
     }
 
     #[async_trait]
@@ -426,7 +450,15 @@ mod tests {
         }
 
         fn list_objects_stream<'a>(&'a self, prefix: &'a str) -> ObjectKeyStream<'a> {
-            self.inner.list_objects_stream(prefix)
+            if self.fail_listing {
+                Box::pin(self.inner.list_objects_stream(prefix).take(1).chain(
+                    futures_util::stream::once(async {
+                        Err(StorageError::internal("injected list failure"))
+                    }),
+                ))
+            } else {
+                self.inner.list_objects_stream(prefix)
+            }
         }
 
         async fn get_size(&self, key: &str) -> StorageResult<u64> {
@@ -669,7 +701,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_rebuild_from_storage_skips_shard_when_referenced_xorb_missing() {
+    async fn test_rebuild_from_storage_fails_when_referenced_xorb_missing() {
         let raw = b"rebuild should not trust shard declarations without xorb validation";
         let (shard_data, file_hash) = build_one_chunk_shard(raw);
 
@@ -689,9 +721,12 @@ mod tests {
         let count = index
             .rebuild_from_storage(storage, rebuild_temp_dir.path().to_path_buf())
             .await
-            .unwrap();
+            .unwrap_err();
 
-        assert_eq!(count, 0);
+        assert_eq!(
+            count,
+            "Index rebuild incomplete: 0 shards indexed, 1 shards failed, listing failed: false"
+        );
         assert!(index.get_shards_for_file(&file_hash).is_none());
     }
 
@@ -707,16 +742,21 @@ mod tests {
             .put(&format!("shards/{shard_id}"), Bytes::from(shard_data))
             .await
             .unwrap();
-        let storage: Arc<Box<dyn StorageBackend>> =
-            Arc::new(Box::new(StreamingListOnlyStorage { inner: local }));
+        let storage: Arc<Box<dyn StorageBackend>> = Arc::new(Box::new(StreamingListOnlyStorage {
+            inner: local,
+            fail_listing: false,
+        }));
 
         let index = MetadataIndex::new();
         let count = index
             .rebuild_from_storage(storage, rebuild_temp_dir.path().to_path_buf())
             .await
-            .unwrap();
+            .unwrap_err();
 
-        assert_eq!(count, 0);
+        assert_eq!(
+            count,
+            "Index rebuild incomplete: 0 shards indexed, 1 shards failed, listing failed: false"
+        );
         assert!(index.get_shards_for_file(&file_hash).is_none());
     }
 
@@ -813,9 +853,12 @@ mod tests {
         let count = index
             .rebuild_from_storage(storage, rebuild_temp_dir.path().to_path_buf())
             .await
-            .unwrap();
+            .unwrap_err();
 
-        assert_eq!(count, 0);
+        assert_eq!(
+            count,
+            "Index rebuild incomplete: 0 shards indexed, 1 shards failed, listing failed: false"
+        );
         assert_eq!(
             attempts.load(std::sync::atomic::Ordering::SeqCst),
             1,
@@ -850,13 +893,134 @@ mod tests {
         let count = index
             .rebuild_from_storage(storage, rebuild_temp_dir.path().to_path_buf())
             .await
-            .unwrap();
+            .unwrap_err();
 
-        assert_eq!(count, 0);
+        assert_eq!(
+            count,
+            "Index rebuild incomplete: 0 shards indexed, 1 shards failed, listing failed: false"
+        );
         assert_eq!(
             attempts.load(std::sync::atomic::Ordering::SeqCst),
             1,
             "missing objects must not consume the retry budget"
         );
+    }
+    #[tokio::test]
+    async fn rebuild_empty_storage_is_ready() {
+        let dir = tempdir().unwrap();
+        let storage: Arc<Box<dyn StorageBackend>> = Arc::new(Box::new(
+            LocalStorage::new(dir.path().to_str().unwrap()).unwrap(),
+        ));
+        assert_eq!(
+            MetadataIndex::new()
+                .rebuild_from_storage(storage, dir.path().join("temp"))
+                .await
+                .unwrap(),
+            0
+        );
+    }
+
+    async fn store_valid_shard(local: &LocalStorage, raw: &[u8]) -> (String, MerkleHash) {
+        let (shard, xorb, xorb_hash, file_hash) = build_one_chunk_shard_parts(raw);
+        let key = format!("shards/{}", compute_data_hash(&shard).to_hex());
+        local.put(&key, Bytes::from(shard)).await.unwrap();
+        local
+            .put(&format!("xorbs/{xorb_hash}"), Bytes::from(xorb))
+            .await
+            .unwrap();
+        (key, file_hash)
+    }
+
+    #[tokio::test]
+    async fn rebuild_reports_mixed_failure_and_keeps_valid_shards() {
+        let dir = tempdir().unwrap();
+        let local = LocalStorage::new(dir.path().to_str().unwrap()).unwrap();
+        let (_, file_hash) = store_valid_shard(&local, b"valid shard survives").await;
+        local
+            .put("shards/corrupt", Bytes::from_static(b"not a shard"))
+            .await
+            .unwrap();
+        let index = MetadataIndex::new();
+        let error = index
+            .rebuild_from_storage(Arc::new(Box::new(local)), dir.path().join("temp"))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error,
+            "Index rebuild incomplete: 1 shards indexed, 1 shards failed, listing failed: false"
+        );
+        assert!(index.get_file_refs(&file_hash).is_some());
+    }
+
+    #[tokio::test]
+    async fn rebuild_propagates_registration_failure() {
+        let dir = tempdir().unwrap();
+        let local = LocalStorage::new(dir.path().to_str().unwrap()).unwrap();
+        let (_, file_hash) = store_valid_shard(&local, b"registration conflict").await;
+        let index = MetadataIndex::new();
+        index
+            .register_verified_shard(VerifiedShardRegistration {
+                shard_id: "existing".to_string(),
+                files: vec![VerifiedFileMapping {
+                    file_hash,
+                    file_index: 0,
+                    file_size: 999,
+                }],
+                chunks: vec![],
+            })
+            .unwrap();
+        let error = index
+            .rebuild_from_storage(Arc::new(Box::new(local)), dir.path().join("temp"))
+            .await
+            .unwrap_err();
+        assert!(error.contains("0 shards indexed, 1 shards failed"));
+        assert_eq!(index.get_file_size(&file_hash), Some(999));
+    }
+
+    #[tokio::test]
+    async fn rebuild_propagates_exhausted_retries_and_task_panics() {
+        use crate::storage::flaky::{FlakyStorage, InjectedFailure};
+        for (failure, expected_attempts) in [
+            (
+                InjectedFailure::Transient,
+                crate::storage::TRANSIENT_STORAGE_RETRY_DELAYS.len() + 1,
+            ),
+            (InjectedFailure::Panic, 1),
+        ] {
+            let dir = tempdir().unwrap();
+            let local = LocalStorage::new(dir.path().to_str().unwrap()).unwrap();
+            let (key, _) = store_valid_shard(&local, b"failing task").await;
+            let (flaky, attempts) = FlakyStorage::new(local, key, failure, usize::MAX);
+            let error = MetadataIndex::new()
+                .rebuild_from_storage(Arc::new(Box::new(flaky)), dir.path().join("temp"))
+                .await
+                .unwrap_err();
+            assert!(error.contains("0 shards indexed, 1 shards failed"));
+            assert_eq!(
+                attempts.load(std::sync::atomic::Ordering::SeqCst),
+                expected_attempts
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn rebuild_reports_listing_failure_after_processing_pending_batch() {
+        let dir = tempdir().unwrap();
+        let local = LocalStorage::new(dir.path().to_str().unwrap()).unwrap();
+        let (_, file_hash) = store_valid_shard(&local, b"listed before failure").await;
+        let storage = StreamingListOnlyStorage {
+            inner: local,
+            fail_listing: true,
+        };
+        let index = MetadataIndex::new();
+        let error = index
+            .rebuild_from_storage(Arc::new(Box::new(storage)), dir.path().join("temp"))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error,
+            "Index rebuild incomplete: 1 shards indexed, 0 shards failed, listing failed: true"
+        );
+        assert!(index.get_file_refs(&file_hash).is_some());
     }
 }
