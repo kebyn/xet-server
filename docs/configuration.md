@@ -61,7 +61,7 @@ export XET_INDEX_REBUILD_STRICT=true
 | `XET_S3_REGION` | S3 区域 | `us-east-1` | 否 |
 | `XET_S3_ENDPOINT` | S3 端点 URL | - | 否 |
 | `XET_UPLOAD_TEMP_DIR` | 流式上传临时文件目录 | 自动 | 否 |
-| `XET_RECONSTRUCTION_TEMP_DIR` | 文件重构及远端 xorb/shard/LFS 有界下载的临时目录 | `{OS_temp}/xet-reconstruction` | 否 |
+| `XET_RECONSTRUCTION_TEMP_DIR` | 文件重构及远端 xorb/shard/LFS 有界下载的临时目录 | local: `{XET_LOCAL_PATH}/.reconstruction`; remote: `{OS_temp}/xet-reconstruction` | 否 |
 | `XET_TEMP_QUOTA_BYTES` | CAS 进程级临时空间预算（上传、转换、重建和远端下载共享） | `8589934592` (8GiB) | 否 |
 | `XET_TEMP_MIN_FREE_BYTES` | 临时目录所在文件系统保留的空闲空间 | `1073741824` (1GiB) | 否 |
 

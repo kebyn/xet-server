@@ -302,7 +302,7 @@ CAS 对象访问是 content-capability based：持有有效 CAS token 的客户�
 | `XET_S3_REGION` | S3 区域 | - |
 | `XET_S3_ENDPOINT` | S3 端点 URL | - |
 | `XET_UPLOAD_TEMP_DIR` | 上传临时文件目录 | 自动 |
-| `XET_RECONSTRUCTION_TEMP_DIR` | 文件重构及远端 xorb/shard/LFS 有界下载的临时目录 | 自动 |
+| `XET_RECONSTRUCTION_TEMP_DIR` | 文件重构及远端 xorb/shard/LFS 有界下载的临时目录 | local: `{XET_LOCAL_PATH}/.reconstruction`；remote: 自动 |
 | `XET_TEMP_QUOTA_BYTES` | CAS 进程级临时空间总预算 | `8589934592` (8GiB) |
 | `XET_TEMP_MIN_FREE_BYTES` | CAS 临时目录所在文件系统保留空闲空间 | `1073741824` (1GiB) |
 | `XET_CONVERSION_CONCURRENCY` | 转换并发数 | `1` |

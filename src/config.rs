@@ -152,6 +152,8 @@ impl StorageConfig {
     pub fn resolve_reconstruction_temp_dir(&self) -> PathBuf {
         if let Some(dir) = &self.reconstruction_temp_dir {
             PathBuf::from(dir)
+        } else if let Some(local_path) = &self.local_path {
+            PathBuf::from(local_path).join(".reconstruction")
         } else {
             std::env::temp_dir().join("xet-reconstruction")
         }

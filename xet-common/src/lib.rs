@@ -220,18 +220,35 @@ pub struct TempResourceManager {
 /// intentionally separate from quota accounting and is removed on clean drop.
 #[derive(Debug)]
 pub struct TempDirectoryLock {
+    #[cfg(not(unix))]
     path: PathBuf,
+    #[cfg(unix)]
+    file: Option<nix::fcntl::Flock<std::fs::File>>,
+    #[cfg(not(unix))]
+    file: Option<std::fs::File>,
 }
 
 pub fn acquire_temp_directory_lock(directory: &Path) -> std::io::Result<TempDirectoryLock> {
     std::fs::create_dir_all(directory)?;
     let path = directory.join(".xet-temp.lock");
-    let mut file = OpenOptions::new()
+    let file = OpenOptions::new()
+        .read(true)
         .write(true)
-        .create_new(true)
+        .create(true)
+        .truncate(false)
         .open(&path)?;
+    #[cfg(unix)]
+    let mut file = nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusiveNonblock)
+        .map_err(|(_, error)| std::io::Error::other(error))?;
+    #[cfg(not(unix))]
+    let mut file = file;
+    file.set_len(0)?;
     writeln!(file, "{}", std::process::id())?;
-    Ok(TempDirectoryLock { path })
+    Ok(TempDirectoryLock {
+        #[cfg(not(unix))]
+        path,
+        file: Some(file),
+    })
 }
 
 /// Remove residual files owned by the current temp-file manager and return the
@@ -280,6 +297,8 @@ pub fn cleanup_temp_directory(directory: &Path) -> std::io::Result<u64> {
 
 impl Drop for TempDirectoryLock {
     fn drop(&mut self) {
+        self.file.take();
+        #[cfg(not(unix))]
         let _ = std::fs::remove_file(&self.path);
     }
 }
