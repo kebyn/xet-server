@@ -58,6 +58,8 @@ fn create_test_config_with_temp_dir(temp_dir: &str) -> TestContext {
             upload_temp_dir: Some(temp_dir.to_string()),
             reconstruction_temp_dir: None,
             verify_download_integrity: false,
+            temp_quota_bytes: 8 * 1024 * 1024 * 1024,
+            temp_min_free_bytes: 1024 * 1024 * 1024,
         },
         auth: auth_config,
         conversion: xet_server::config::ConversionConfig::default(),

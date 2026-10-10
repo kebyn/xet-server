@@ -2,6 +2,7 @@ pub mod converting_oids;
 
 use std::sync::Arc;
 use tracing::{info, warn};
+use xet_common::{TempQuotaError, TempQuotaLedger, TempReservation, TempResourceManager};
 
 use crate::chunking::{ChunkConfig, StreamingChunker};
 use crate::config::ConversionConfig;
@@ -12,7 +13,7 @@ use crate::index::MetadataIndex;
 use crate::storage::StorageBackend;
 use crate::types::MerkleHash;
 
-pub use converting_oids::ConvertingOids;
+pub use converting_oids::{ConversionScheduler, ConvertingOids, EnqueueResult};
 
 /// Block size for streaming reads during conversion (1 MB).
 /// Source-read buffering is bounded to this plus the current chunk; total
@@ -24,11 +25,12 @@ const CONVERSION_BLOCK_SIZE: usize = 1024 * 1024;
 /// Uses spawn_blocking for file deletion to avoid blocking the tokio runtime.
 struct PathGuard {
     path: std::path::PathBuf,
+    reservation: Option<TempReservation>,
 }
 
 impl PathGuard {
-    fn new(path: std::path::PathBuf) -> Self {
-        Self { path }
+    fn new(path: std::path::PathBuf, reservation: Option<TempReservation>) -> Self {
+        Self { path, reservation }
     }
 }
 
@@ -38,10 +40,12 @@ impl Drop for PathGuard {
         // std::fs::remove_file is a blocking syscall that can block the async runtime.
         // spawn_blocking moves this to a dedicated thread pool for blocking operations.
         let path = self.path.clone();
+        let reservation = self.reservation.take();
         drop(tokio::task::spawn_blocking(move || {
             if let Err(e) = std::fs::remove_file(&path) {
                 tracing::warn!("Failed to cleanup temp file {}: {}", path.display(), e);
             }
+            drop(reservation);
         }));
         // Note: We don't await the spawn_blocking result because Drop is synchronous.
         // The cleanup will happen eventually in the blocking thread pool.
@@ -97,6 +101,7 @@ pub struct ConversionPipeline {
     storage: Arc<Box<dyn StorageBackend>>,
     index: Arc<MetadataIndex>,
     config: ConversionConfig,
+    temp_ledger: TempQuotaLedger,
 }
 
 impl ConversionPipeline {
@@ -105,10 +110,22 @@ impl ConversionPipeline {
         index: Arc<MetadataIndex>,
         config: ConversionConfig,
     ) -> Self {
+        let temp_ledger = TempQuotaLedger::new(8 * 1024 * 1024 * 1024, 1024 * 1024 * 1024)
+            .expect("conversion default temporary quota is valid");
+        Self::new_with_temp_ledger(storage, index, config, temp_ledger)
+    }
+
+    pub fn new_with_temp_ledger(
+        storage: Arc<Box<dyn StorageBackend>>,
+        index: Arc<MetadataIndex>,
+        config: ConversionConfig,
+        temp_ledger: TempQuotaLedger,
+    ) -> Self {
         Self {
             storage,
             index,
             config,
+            temp_ledger,
         }
     }
 
@@ -126,6 +143,28 @@ impl ConversionPipeline {
         }
 
         let object_key = format!("lfs/objects/{}", oid);
+
+        // Check remote object bounds before staging it locally. Local backends
+        // can stat their path without a download and are checked immediately
+        // after opening below.
+        if self
+            .storage
+            .get_path(&object_key)
+            .await
+            .ok()
+            .flatten()
+            .is_none()
+        {
+            let remote_size = self.storage.get_size(&object_key).await.map_err(|e| {
+                ConversionError::StorageError(format!("Failed to stat blob: {}", e))
+            })?;
+            if remote_size < self.config.min_conversion_size {
+                return Err(ConversionError::TooSmall(remote_size));
+            }
+            if remote_size > self.config.max_conversion_size {
+                return Err(ConversionError::TooLarge(remote_size));
+            }
+        }
 
         // 1. Open raw blob for streaming reads.
         // Prefer get_path() (local storage: zero-copy file access).
@@ -419,12 +458,16 @@ impl ConversionPipeline {
             return Ok((path, None));
         }
 
-        // Fall back to downloading to a temp file
+        // Fall back to downloading to a temp file. Conversion source files use
+        // the configured reconstruction directory, so all remote staging is
+        // accounted for by the same temporary-space policy as reconstruction.
         // Use download_to_path for streaming download (avoids loading entire
         // blob into RAM). Previously used storage.get() + tokio::fs::write() which
         // buffered the entire blob in memory before writing.
         // Use app-specific directory instead of system /tmp for security.
-        let temp_dir = std::env::temp_dir().join("xet-conversion");
+        let temp_dir = std::env::var("XET_RECONSTRUCTION_TEMP_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir().join("xet-reconstruction"));
         tokio::fs::create_dir_all(&temp_dir).await.map_err(|e| {
             ConversionError::StorageError(format!("Failed to create temp dir: {}", e))
         })?;
@@ -445,6 +488,20 @@ impl ConversionPipeline {
         );
         let temp_path = temp_dir.join(format!("blob-{}.tmp", unique_id));
 
+        let expected_size =
+            self.storage.get_size(object_key).await.map_err(|e| {
+                ConversionError::StorageError(format!("Failed to stat blob: {}", e))
+            })?;
+        let manager = TempResourceManager::with_ledger(&temp_dir, self.temp_ledger.clone());
+        let mut reservation = manager.reserve(expected_size).map_err(|error| {
+            ConversionError::StorageError(match error {
+                TempQuotaError::QuotaExhausted | TempQuotaError::InsufficientFreeSpace => {
+                    "temporary storage unavailable".to_string()
+                }
+                TempQuotaError::Overflow => "temporary quota arithmetic overflow".to_string(),
+            })
+        })?;
+
         // Use download_to_path for streaming download.
         // S3 backend overrides this with ByteStream::write_to_path (bounded memory).
         // Default implementation falls back to get() + write() with a warning.
@@ -458,8 +515,12 @@ impl ConversionPipeline {
             ConversionError::StorageError(format!("Failed to download blob to temp file: {}", e))
         })?;
 
+        reservation
+            .commit_written(expected_size)
+            .map_err(|e| ConversionError::StorageError(e.to_string()))?;
+
         // Return a RAII guard that will delete the temp file when dropped
-        let guard = PathGuard::new(temp_path.clone());
+        let guard = PathGuard::new(temp_path.clone(), Some(reservation));
 
         Ok((temp_path, Some(guard)))
     }

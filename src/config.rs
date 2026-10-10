@@ -120,6 +120,12 @@ pub struct StorageConfig {
     /// to verify the content matches the OID. This catches storage corruption (bit rot)
     /// but adds CPU overhead. Disable for maximum performance on trusted storage.
     pub verify_download_integrity: bool,
+    /// Process-local temporary space budget shared by all managed directories.
+    #[serde(default = "default_cas_temp_quota_bytes")]
+    pub temp_quota_bytes: u64,
+    /// Minimum free filesystem space retained while reserving temporary bytes.
+    #[serde(default = "default_temp_min_free_bytes")]
+    pub temp_min_free_bytes: u64,
 }
 
 impl StorageConfig {
@@ -308,6 +314,31 @@ pub struct ConversionConfig {
     /// Files larger than this stay as raw blobs permanently to bound conversion
     /// latency, temporary disk usage, and xorb/shard generation work.
     pub max_conversion_size: u64,
+    /// Maximum number of conversions running in one CAS process.
+    #[serde(default = "default_conversion_concurrency")]
+    pub concurrency: usize,
+    /// Number of conversion OIDs waiting for a worker.
+    #[serde(default = "default_conversion_queue_capacity")]
+    pub queue_capacity: usize,
+    /// Grace period for running conversions during shutdown.
+    #[serde(default = "default_conversion_shutdown_grace_secs")]
+    pub shutdown_grace_secs: u64,
+}
+
+fn default_cas_temp_quota_bytes() -> u64 {
+    8 * 1024 * 1024 * 1024
+}
+fn default_temp_min_free_bytes() -> u64 {
+    1024 * 1024 * 1024
+}
+fn default_conversion_concurrency() -> usize {
+    1
+}
+fn default_conversion_queue_capacity() -> usize {
+    128
+}
+fn default_conversion_shutdown_grace_secs() -> u64 {
+    30
 }
 
 impl Default for ConversionConfig {
@@ -318,6 +349,9 @@ impl Default for ConversionConfig {
             delete_raw_after_conversion: true,
             min_conversion_size: 65536, // 64KB — skip tiny files (1KB conversions waste CPU/IO for near-zero dedup value)
             max_conversion_size: 512 * 1024 * 1024, // 512MB — match Hub max_upload_size
+            concurrency: 1,
+            queue_capacity: 128,
+            shutdown_grace_secs: 30,
         }
     }
 }
@@ -354,6 +388,8 @@ impl Default for ServerConfig {
                 upload_temp_dir: None,
                 reconstruction_temp_dir: None,
                 verify_download_integrity: false, // Disabled by default for performance
+                temp_quota_bytes: 8 * 1024 * 1024 * 1024,
+                temp_min_free_bytes: 1024 * 1024 * 1024,
             },
             auth: AuthConfig {
                 // Use /etc/xet instead of /tmp for better security
@@ -492,6 +528,12 @@ impl ServerConfig {
         {
             return Err("XET_RECONSTRUCTION_TEMP_DIR must not be empty".to_string());
         }
+        if self.storage.temp_quota_bytes == 0 {
+            return Err("XET_TEMP_QUOTA_BYTES must be > 0".to_string());
+        }
+        if self.storage.temp_min_free_bytes == 0 {
+            return Err("XET_TEMP_MIN_FREE_BYTES must be > 0".to_string());
+        }
 
         self.auth.validate()?;
 
@@ -506,6 +548,15 @@ impl ServerConfig {
         }
         if self.conversion.max_conversion_size == 0 {
             return Err("XET_MAX_CONVERSION_SIZE must be > 0".to_string());
+        }
+        if self.conversion.concurrency == 0 {
+            return Err("XET_CONVERSION_CONCURRENCY must be > 0".to_string());
+        }
+        if self.conversion.queue_capacity == 0 {
+            return Err("XET_CONVERSION_QUEUE_CAPACITY must be > 0".to_string());
+        }
+        if self.conversion.shutdown_grace_secs == 0 {
+            return Err("XET_CONVERSION_SHUTDOWN_GRACE_SECS must be > 0".to_string());
         }
         // Validate min_conversion_size <= max_conversion_size
         if self.conversion.min_conversion_size > self.conversion.max_conversion_size {
@@ -538,6 +589,11 @@ impl ServerConfig {
         let reconstruction_temp_dir = std::env::var("XET_RECONSTRUCTION_TEMP_DIR").ok();
         let verify_download_integrity =
             Self::parse_bool_env("XET_VERIFY_DOWNLOAD_INTEGRITY", false)?;
+        let temp_quota_bytes = parse_env("XET_TEMP_QUOTA_BYTES", 8 * 1024 * 1024 * 1024u64)?;
+        let temp_min_free_bytes = parse_env("XET_TEMP_MIN_FREE_BYTES", 1024 * 1024 * 1024u64)?;
+        if temp_quota_bytes == 0 || temp_min_free_bytes == 0 {
+            return Err("XET_TEMP_QUOTA_BYTES and XET_TEMP_MIN_FREE_BYTES must be > 0".to_string());
+        }
 
         // CAS-specific auth configuration
         // Use /etc/xet instead of /tmp for better security
@@ -576,6 +632,10 @@ impl ServerConfig {
         let delete_raw = Self::parse_bool_env("XET_DELETE_RAW_AFTER_CONVERSION", true)?;
         let min_conversion_size = parse_env("XET_MIN_CONVERSION_SIZE", 65536)?;
         let max_conversion_size = parse_env("XET_MAX_CONVERSION_SIZE", 512 * 1024 * 1024)?;
+        let conversion_concurrency = parse_env("XET_CONVERSION_CONCURRENCY", 1usize)?;
+        let conversion_queue_capacity = parse_env("XET_CONVERSION_QUEUE_CAPACITY", 128usize)?;
+        let conversion_shutdown_grace_secs =
+            parse_env("XET_CONVERSION_SHUTDOWN_GRACE_SECS", 30u64)?;
 
         let config = Self {
             server: ServerSettings {
@@ -595,6 +655,8 @@ impl ServerConfig {
                 upload_temp_dir,
                 reconstruction_temp_dir,
                 verify_download_integrity,
+                temp_quota_bytes,
+                temp_min_free_bytes,
             },
             auth: AuthConfig {
                 public_key_path,
@@ -609,6 +671,9 @@ impl ServerConfig {
                 delete_raw_after_conversion: delete_raw,
                 min_conversion_size,
                 max_conversion_size,
+                concurrency: conversion_concurrency,
+                queue_capacity: conversion_queue_capacity,
+                shutdown_grace_secs: conversion_shutdown_grace_secs,
             },
         };
         config.validate()?;

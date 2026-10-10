@@ -16,7 +16,7 @@ use tracing::{error, info};
 use crate::api::auth::AuthVerifier;
 use crate::api::guard::{AuthNeed, LfsOperation, require_auth};
 use crate::config::{ConversionConfig, ServerConfig};
-use crate::conversion::ConvertingOids;
+use crate::conversion::{ConvertingOids, EnqueueResult};
 #[cfg(test)]
 use crate::format::compression::decompress;
 #[cfg(test)]
@@ -90,6 +90,7 @@ pub async fn upload_lfs_object(
     storage: web::Data<Box<dyn StorageBackend>>,
     auth: web::Data<AuthVerifier>,
     config: web::Data<ServerConfig>,
+    temp_quota: Option<web::Data<xet_common::TempQuotaLedger>>,
     req: actix_web::HttpRequest,
 ) -> HttpResponse {
     let oid = path.into_inner();
@@ -122,17 +123,33 @@ pub async fn upload_lfs_object(
     );
     if let Err(e) = crate::util::disk::ensure_dir_and_check_space(&temp_dir, check_bytes).await {
         error!("Insufficient disk space: {}", e);
-        return HttpResponse::InsufficientStorage().json(serde_json::json!({
-            "error": "Insufficient storage"
-        }));
+        return HttpResponse::ServiceUnavailable()
+            .insert_header((actix_web::http::header::RETRY_AFTER, "5"))
+            .json(serde_json::json!({"error": "Temporary storage unavailable"}));
     }
 
     // Stream payload to temp file with incremental BLAKE3 hashing.
     // Memory usage is bounded to O(chunk_size) regardless of file size.
-    let mut temp_file = match TempFile::create(&temp_dir).await {
+    let temp_file_result = match temp_quota {
+        Some(ledger) => TempFile::create_with_ledger(&temp_dir, ledger.get_ref().clone()).await,
+        None => {
+            TempFile::create_with_quota(
+                &temp_dir,
+                config.storage.temp_quota_bytes,
+                config.storage.temp_min_free_bytes,
+            )
+            .await
+        }
+    };
+    let mut temp_file = match temp_file_result {
         Ok(tf) => tf,
         Err(e) => {
             error!("Failed to create temp file: {}", e);
+            if matches!(e, crate::storage::StorageError::Quota) {
+                return HttpResponse::ServiceUnavailable()
+                    .insert_header((actix_web::http::header::RETRY_AFTER, "5"))
+                    .json(serde_json::json!({"error": "Temporary storage unavailable"}));
+            }
             return HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": crate::api::INTERNAL_ERROR_MESSAGE
             }));
@@ -265,55 +282,14 @@ pub async fn download_lfs_object(
             // Raw blob exists — serve it and trigger lazy conversion in background
             match serve_raw_blob(&oid, storage.clone(), config.clone()).await {
                 RawBlobResult::Served(response) => {
-                    if conversion_config.enabled && converting.try_acquire(&oid) {
-                        let pipeline = crate::conversion::ConversionPipeline::new(
-                            storage.clone().into_inner(),
-                            index.clone().into_inner(),
-                            conversion_config.get_ref().clone(),
-                        );
-                        let converting_clone = converting.clone();
-                        let oid_clone = oid.clone();
-                        tokio::spawn(async move {
-                            // Use scope guard to ensure OID lock is always released,
-                            // even if convert() panics. Previously, a panic would skip the
-                            // release() call, permanently locking the OID until server restart.
-                            struct OidGuard {
-                                converting: Arc<ConvertingOids>,
-                                oid: String,
-                            }
-                            impl Drop for OidGuard {
-                                fn drop(&mut self) {
-                                    self.converting.release(&self.oid);
-                                }
-                            }
-                            let _guard = OidGuard {
-                                converting: converting_clone.get_ref().clone(),
-                                oid: oid_clone.clone(),
-                            };
-
-                            match pipeline.convert(&oid_clone).await {
-                                Ok(result) => {
-                                    tracing::info!(
-                                        "Lazy converted {}: {} chunks, {} deduped, {} → {} bytes",
-                                        oid_clone,
-                                        result.num_chunks,
-                                        result.num_deduped_chunks,
-                                        result.raw_size,
-                                        result.xorb_size
-                                    );
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "Lazy conversion failed for {}: {} (raw blob preserved)",
-                                        oid_clone,
-                                        e
-                                    );
-                                }
-                            }
-                            // _guard.drop() releases the OID lock, even on panic
-                        });
+                    if conversion_config.enabled
+                        && let Some(result) = converting.try_enqueue(&oid)
+                    {
+                        if !matches!(result, EnqueueResult::Accepted) {
+                            tracing::debug!(oid = %oid, ?result, "lazy conversion was not enqueued");
+                        }
+                        return response;
                     }
-
                     return response;
                 }
                 RawBlobResult::Missing => {}

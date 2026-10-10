@@ -34,6 +34,11 @@ pub struct Metrics {
 
     /// 请求延迟计数
     pub request_latency_count: AtomicU64,
+
+    pub conversion_queued: AtomicU64,
+    pub conversion_running: AtomicU64,
+    pub conversion_enqueue_rejected: AtomicU64,
+    pub conversion_failures: AtomicU64,
 }
 
 impl Metrics {
@@ -55,6 +60,10 @@ impl Metrics {
             active_requests: AtomicU64::new(0),
             request_latency_us: AtomicU64::new(0),
             request_latency_count: AtomicU64::new(0),
+            conversion_queued: AtomicU64::new(0),
+            conversion_running: AtomicU64::new(0),
+            conversion_enqueue_rejected: AtomicU64::new(0),
+            conversion_failures: AtomicU64::new(0),
         }
     }
 
@@ -188,6 +197,27 @@ impl Metrics {
         output.push_str(&format!(
             "request_latency_count {}\n",
             self.request_latency_count.load(Ordering::Relaxed)
+        ));
+
+        output.push_str("# HELP conversion_queued Current conversions waiting for workers\n# TYPE conversion_queued gauge\n");
+        output.push_str(&format!(
+            "conversion_queued {}\n",
+            self.conversion_queued.load(Ordering::Relaxed)
+        ));
+        output.push_str("# HELP conversion_running Current conversions executing\n# TYPE conversion_running gauge\n");
+        output.push_str(&format!(
+            "conversion_running {}\n",
+            self.conversion_running.load(Ordering::Relaxed)
+        ));
+        output.push_str("# HELP conversion_enqueue_rejected_total Conversion enqueue rejections\n# TYPE conversion_enqueue_rejected_total counter\n");
+        output.push_str(&format!(
+            "conversion_enqueue_rejected_total {}\n",
+            self.conversion_enqueue_rejected.load(Ordering::Relaxed)
+        ));
+        output.push_str("# HELP conversion_failures_total Conversion failures\n# TYPE conversion_failures_total counter\n");
+        output.push_str(&format!(
+            "conversion_failures_total {}\n",
+            self.conversion_failures.load(Ordering::Relaxed)
         ));
 
         output

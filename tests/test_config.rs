@@ -61,6 +61,8 @@ fn test_config_s3_settings() {
             upload_temp_dir: None,
             reconstruction_temp_dir: None,
             verify_download_integrity: false,
+            temp_quota_bytes: 8 * 1024 * 1024 * 1024,
+            temp_min_free_bytes: 1024 * 1024 * 1024,
         },
         ..Default::default()
     };

@@ -9,12 +9,14 @@ use actix_web::{
 use parking_lot::RwLock;
 use std::sync::Arc;
 
-use xet_common::rate_limit_period;
+use xet_common::{
+    TempQuotaLedger, acquire_temp_directory_lock, cleanup_temp_directory, rate_limit_period,
+};
 
 use crate::api::auth::AuthVerifier;
 use crate::api::guard::{AuthNeed, require_auth};
 use crate::config::ServerConfig;
-use crate::conversion::ConvertingOids;
+use crate::conversion::{ConversionPipeline, ConversionScheduler, ConvertingOids};
 use crate::middleware::metrics_middleware;
 use crate::storage::{StorageBackend, create_storage};
 
@@ -111,10 +113,11 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
     // exist — without this, the very first upload on a fresh deployment would
     // fail with 507 because the temp dir is otherwise only created lazily by
     // TempFile::create (after the check).
-    for temp_dir in [
+    let managed_temp_dirs = [
         config.storage.resolve_upload_temp_dir(),
         config.storage.resolve_reconstruction_temp_dir(),
-    ] {
+    ];
+    for temp_dir in managed_temp_dirs.iter() {
         tokio::fs::create_dir_all(&temp_dir).await.map_err(|e| {
             std::io::Error::other(format!(
                 "Failed to create temp dir {}: {}",
@@ -122,6 +125,47 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
                 e
             ))
         })?;
+    }
+    let mut temp_locks = Vec::new();
+    let mut locked_paths = std::collections::HashSet::new();
+    for temp_dir in managed_temp_dirs {
+        if !locked_paths.insert(temp_dir.clone()) {
+            continue;
+        }
+        temp_locks.push(acquire_temp_directory_lock(&temp_dir).map_err(|error| {
+            std::io::Error::other(format!("Failed to lock temporary directory: {}", error))
+        })?);
+    }
+    let temp_quota_ledger = TempQuotaLedger::new(
+        config.storage.temp_quota_bytes,
+        config.storage.temp_min_free_bytes,
+    )
+    .map_err(|error| std::io::Error::other(format!("Invalid temporary quota: {}", error)))?;
+    let mut reconciled_paths = std::collections::HashSet::new();
+    for temp_dir in [
+        config.storage.resolve_upload_temp_dir(),
+        config.storage.resolve_reconstruction_temp_dir(),
+    ] {
+        if !reconciled_paths.insert(temp_dir.clone()) {
+            continue;
+        }
+        let retained = cleanup_temp_directory(&temp_dir).map_err(|error| {
+            std::io::Error::other(format!("Failed to inspect temporary directory: {}", error))
+        })?;
+        if retained > 0 {
+            temp_quota_ledger
+                .account_existing(retained)
+                .map_err(|error| {
+                    std::io::Error::other(format!(
+                        "Residual temporary files exceed quota: {}",
+                        error
+                    ))
+                })?;
+            tracing::warn!(
+                bytes = retained,
+                "retained residual temporary files consume quota"
+            );
+        }
     }
 
     let index = Arc::new(crate::index::MetadataIndex::new());
@@ -152,10 +196,25 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
 
     // Concurrent conversion tracker (in-memory, resets on restart)
     let converting = Arc::new(ConvertingOids::new());
+    let pipeline = Arc::new(ConversionPipeline::new_with_temp_ledger(
+        storage.clone(),
+        index.clone(),
+        config.conversion.clone(),
+        temp_quota_ledger.clone(),
+    ));
+    let scheduler = ConversionScheduler::new(
+        pipeline,
+        config.conversion.concurrency,
+        config.conversion.queue_capacity,
+    )
+    .map_err(std::io::Error::other)?;
+    converting.set_scheduler(scheduler.clone());
 
     let bind_addr = format!("{}:{}", config.server.host, config.server.port);
 
     tracing::info!("Starting Xet Storage server on {}", bind_addr);
+    let conversion_shutdown_grace =
+        std::time::Duration::from_secs(config.conversion.shutdown_grace_secs);
 
     // Warn if CAS is bound to localhost only — common gotcha for distributed deployments
     if config.server.host == "127.0.0.1" || config.server.host == "localhost" {
@@ -226,6 +285,7 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
             .app_data(web::Data::from(index.clone()))
             .app_data(web::Data::new(converting.clone()))
             .app_data(web::Data::new(config.clone()))
+            .app_data(web::Data::new(temp_quota_ledger.clone()))
             .app_data(web::Data::new(config.conversion.clone()))
             .app_data(web::Data::new(readiness.clone()))
             // =============================================================
@@ -297,6 +357,8 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
     .bind(&bind_addr)?
     .run()
     .await;
+
+    scheduler.shutdown(conversion_shutdown_grace).await;
 
     if let Err(shutdown_error) = shutdown_storage.shutdown().await {
         tracing::error!(
