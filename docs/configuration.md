@@ -759,3 +759,7 @@ curl http://localhost:8080/ready
 Hub 和 CAS 的应用访问日志只记录 TCP 对端地址、方法、不含查询字符串的路径、状态码、响应字节数和耗时。不记录查询参数、Referer、Authorization、Cookie 或响应 Location；代理 token 校验失败也不记录 token 或其前缀。短期代理 token 的 query 参数和 LFS action header 仍用于兼容现有下载重定向与客户端。
 
 反向代理、负载均衡器和日志采集器也应避免记录上述凭据载体；应用配置不会自动修改外部代理。滚动升级期间旧实例仍可能记录完整查询参数，所有实例和代理日志配置完成更新后此修复才完整生效。
+
+### 依赖审计例外
+
+`.cargo/audit.toml` 暂时只保留 `RUSTSEC-2026-0258` 的 `h2 0.3.27` 例外。两个生产监听器使用普通 `.bind()`，只接受 HTTP/1.x；项目未启用 H2C、TLS HTTP/2 或其它 h2 路径。CI 会读取未忽略的 `cargo audit --json` 报告，仅允许该版本；依赖图出现其它受影响版本时会失败并要求重新评估。启用 HTTP/2 或调整 actix/http 依赖时必须先移除或重新审查该例外。

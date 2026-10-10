@@ -42,6 +42,8 @@ jobs:
         run: cargo install cargo-audit --version 0.22.2 --locked
       - name: Audit dependencies
         run: cargo audit
+      - name: Check audited exception versions
+        run: python3 scripts/check-audit-exemptions.py --lockfile Cargo.lock
 
   msrv:
     name: Verify declared MSRV
