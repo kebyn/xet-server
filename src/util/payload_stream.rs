@@ -20,6 +20,8 @@ pub enum StreamPayloadError {
     Write(String),
     /// fsync of the temp file failed.
     Sync(String),
+    /// The process temporary-space budget or free-space reserve was exhausted.
+    Quota,
 }
 
 impl StreamPayloadError {
@@ -35,6 +37,9 @@ impl StreamPayloadError {
                     max_bytes / 1024 / 1024
                 )
             })),
+            Self::Quota => HttpResponse::ServiceUnavailable()
+                .insert_header((actix_web::http::header::RETRY_AFTER, "5"))
+                .json(serde_json::json!({"error": "Temporary storage unavailable"})),
             Self::Write(_) | Self::Sync(_) => {
                 HttpResponse::InternalServerError().json(serde_json::json!({
                     "error": crate::api::INTERNAL_ERROR_MESSAGE
@@ -69,7 +74,10 @@ pub async fn stream_payload_to_temp(
             }
         };
 
-        total_bytes += chunk.len() as u64;
+        total_bytes = match total_bytes.checked_add(chunk.len() as u64) {
+            Some(total) => total,
+            None => return Err(StreamPayloadError::Quota),
+        };
         if total_bytes > max_bytes {
             return Err(StreamPayloadError::TooLarge(max_bytes));
         }
@@ -77,7 +85,11 @@ pub async fn stream_payload_to_temp(
         on_chunk(&chunk);
         if let Err(e) = temp_file.write_all(&chunk).await {
             error!("Failed to write to temp file: {}", e);
-            return Err(StreamPayloadError::Write(e.to_string()));
+            return Err(if matches!(e, crate::storage::StorageError::Quota) {
+                StreamPayloadError::Quota
+            } else {
+                StreamPayloadError::Write(e.to_string())
+            });
         }
     }
 

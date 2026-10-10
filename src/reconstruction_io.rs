@@ -276,6 +276,9 @@ fn map_storage_error(key: &str, error: StorageError) -> ReconstructionError {
             ReconstructionError::Storage(format!("{}: {}", key, message))
         }
         StorageError::InvalidArgument(e) => ReconstructionError::Storage(format!("{}: {}", key, e)),
+        StorageError::Quota => {
+            ReconstructionError::TempIo("temporary storage unavailable".to_string())
+        }
     }
 }
 

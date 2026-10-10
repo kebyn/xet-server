@@ -8,12 +8,14 @@ use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 
 use crate::cas_client::{CasClient, CasUploadError};
+use xet_common::{TempQuotaError, TempReservation, TempResourceManager};
 
 #[derive(Debug)]
 pub(crate) struct StoredLfsUpload {
     pub(crate) path: tempfile::TempPath,
     pub(crate) size: u64,
     pub(crate) sha256: String,
+    pub(crate) _reservation: Option<TempReservation>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -24,6 +26,7 @@ pub(crate) enum LfsUploadStoreError {
     PayloadTooLarge { actual: u64, max: u64 },
     WriteTempFile(String),
     FlushTempFile(String),
+    Quota,
 }
 
 #[async_trait]
@@ -59,11 +62,26 @@ pub(crate) enum LfsUploadServiceError {
 
 pub(crate) struct LfsUploadService {
     cas_client: Arc<dyn LfsUploadCasClient>,
+    temp_manager: Option<TempResourceManager>,
 }
 
 impl LfsUploadService {
+    #[allow(dead_code)]
     pub(crate) fn new(cas_client: Arc<dyn LfsUploadCasClient>) -> Self {
-        Self { cas_client }
+        Self {
+            cas_client,
+            temp_manager: None,
+        }
+    }
+
+    pub(crate) fn with_temp_manager(
+        cas_client: Arc<dyn LfsUploadCasClient>,
+        temp_manager: TempResourceManager,
+    ) -> Self {
+        Self {
+            cas_client,
+            temp_manager: Some(temp_manager),
+        }
     }
 
     pub(crate) async fn upload<S, E>(
@@ -78,9 +96,14 @@ impl LfsUploadService {
         S: Stream<Item = Result<Bytes, E>> + Unpin,
         E: std::fmt::Display,
     {
-        let stored_upload = write_payload_to_temp_file(payload, temp_dir, max_upload_size)
-            .await
-            .map_err(LfsUploadServiceError::Store)?;
+        let stored_upload = write_payload_to_temp_file_inner(
+            payload,
+            temp_dir,
+            max_upload_size,
+            self.temp_manager.as_ref(),
+        )
+        .await
+        .map_err(LfsUploadServiceError::Store)?;
 
         if stored_upload.sha256 != oid {
             return Err(LfsUploadServiceError::HashMismatch {
@@ -99,10 +122,24 @@ impl LfsUploadService {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) async fn write_payload_to_temp_file<S, E>(
+    payload: S,
+    temp_dir: &Path,
+    max_upload_size: u64,
+) -> Result<StoredLfsUpload, LfsUploadStoreError>
+where
+    S: Stream<Item = Result<Bytes, E>> + Unpin,
+    E: std::fmt::Display,
+{
+    write_payload_to_temp_file_inner(payload, temp_dir, max_upload_size, None).await
+}
+
+async fn write_payload_to_temp_file_inner<S, E>(
     mut payload: S,
     temp_dir: &Path,
     max_upload_size: u64,
+    manager: Option<&TempResourceManager>,
 ) -> Result<StoredLfsUpload, LfsUploadStoreError>
 where
     S: Stream<Item = Result<Bytes, E>> + Unpin,
@@ -123,6 +160,10 @@ where
     let mut file_writer = tokio::io::BufWriter::new(tokio::fs::File::from_std(temp_file_handle));
 
     let mut total_bytes: u64 = 0;
+    let mut reservation = match manager {
+        Some(manager) => Some(manager.reserve(0).map_err(|_| LfsUploadStoreError::Quota)?),
+        None => None,
+    };
     while let Some(chunk_result) = payload.next().await {
         let chunk = match chunk_result {
             Ok(chunk) => chunk,
@@ -131,7 +172,9 @@ where
             }
         };
 
-        total_bytes += chunk.len() as u64;
+        total_bytes = total_bytes
+            .checked_add(chunk.len() as u64)
+            .ok_or(LfsUploadStoreError::Quota)?;
         if total_bytes > max_upload_size {
             return Err(LfsUploadStoreError::PayloadTooLarge {
                 actual: total_bytes,
@@ -139,9 +182,24 @@ where
             });
         }
 
+        if let Some(reservation) = &mut reservation {
+            reservation
+                .reserve_additional(chunk.len() as u64)
+                .map_err(|error| match error {
+                    TempQuotaError::QuotaExhausted
+                    | TempQuotaError::InsufficientFreeSpace
+                    | TempQuotaError::Overflow => LfsUploadStoreError::Quota,
+                })?;
+        }
+
         hasher.update(&chunk);
         if let Err(err) = file_writer.write_all(&chunk).await {
             return Err(LfsUploadStoreError::WriteTempFile(err.to_string()));
+        }
+        if let Some(reservation) = &mut reservation {
+            reservation
+                .commit_written(chunk.len() as u64)
+                .map_err(|_| LfsUploadStoreError::Quota)?;
         }
     }
 
@@ -154,6 +212,7 @@ where
         path: temp_path,
         size: total_bytes,
         sha256: hex::encode(hasher.finalize()),
+        _reservation: reservation,
     })
 }
 

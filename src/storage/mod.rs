@@ -26,6 +26,9 @@ pub enum StorageError {
 
     #[error("Invalid argument: {0}")]
     InvalidArgument(String),
+
+    #[error("Temporary storage quota exhausted")]
+    Quota,
 }
 
 impl StorageError {

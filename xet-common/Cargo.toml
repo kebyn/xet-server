@@ -6,3 +6,5 @@ rust-version = "1.94.1"
 
 [dependencies]
 url = "2.5"
+nix = { version = "0.29", features = ["fs"] }
+thiserror = "2.0"

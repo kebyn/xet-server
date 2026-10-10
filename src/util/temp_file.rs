@@ -8,6 +8,7 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
 use crate::storage::{StorageError, StorageResult};
+use xet_common::{TempQuotaError, TempQuotaLedger, TempReservation, TempResourceManager};
 
 /// A temporary file that auto-cleans on drop.
 ///
@@ -21,6 +22,7 @@ use crate::storage::{StorageError, StorageResult};
 pub struct TempFile {
     path: PathBuf,
     file: Option<fs::File>,
+    reservation: Option<TempReservation>,
 }
 
 impl TempFile {
@@ -50,6 +52,54 @@ impl TempFile {
         Ok(Self {
             path,
             file: Some(file),
+            reservation: None,
+        })
+    }
+
+    /// Create a temporary file whose writes are charged to a process-local
+    /// quota. The reservation grows with each received chunk, so callers do
+    /// not need a trustworthy Content-Length header.
+    pub async fn create_with_quota(
+        temp_dir: &Path,
+        quota_bytes: u64,
+        min_free_bytes: u64,
+    ) -> StorageResult<Self> {
+        let manager = TempResourceManager::new(temp_dir, quota_bytes, min_free_bytes)
+            .map_err(|_| StorageError::Quota)?;
+        Self::create_with_manager(temp_dir, manager).await
+    }
+
+    pub async fn create_with_ledger(
+        temp_dir: &Path,
+        ledger: TempQuotaLedger,
+    ) -> StorageResult<Self> {
+        let manager = TempResourceManager::with_ledger(temp_dir, ledger);
+        Self::create_with_manager(temp_dir, manager).await
+    }
+
+    async fn create_with_manager(
+        temp_dir: &Path,
+        manager: TempResourceManager,
+    ) -> StorageResult<Self> {
+        fs::create_dir_all(temp_dir).await.map_err(|e| {
+            StorageError::internal_with_source(
+                format!("Failed to create temp dir {}", temp_dir.display()),
+                e,
+            )
+        })?;
+        let unique_id = uuid::Uuid::new_v4().to_string();
+        let path = temp_dir.join(format!("upload-{}.tmp", unique_id));
+        let reservation = manager.reserve(0).map_err(|_| StorageError::Quota)?;
+        let file = fs::File::create(&path).await.map_err(|e| {
+            StorageError::internal_with_source(
+                format!("Failed to create temp file {}", path.display()),
+                e,
+            )
+        })?;
+        Ok(Self {
+            path,
+            file: Some(file),
+            reservation: Some(reservation),
         })
     }
 
@@ -60,13 +110,29 @@ impl TempFile {
 
     /// Write data to the temp file.
     pub async fn write_all(&mut self, data: &[u8]) -> StorageResult<()> {
+        if let Some(reservation) = &mut self.reservation {
+            reservation
+                .reserve_additional(data.len() as u64)
+                .map_err(|error| match error {
+                    TempQuotaError::QuotaExhausted | TempQuotaError::InsufficientFreeSpace => {
+                        StorageError::Quota
+                    }
+                    TempQuotaError::Overflow => StorageError::Quota,
+                })?;
+        }
         let file = self
             .file
             .as_mut()
             .ok_or_else(|| StorageError::internal("TempFile already closed for storage"))?;
         file.write_all(data)
             .await
-            .map_err(|e| StorageError::internal_with_source("Failed to write to temp file", e))
+            .map_err(|e| StorageError::internal_with_source("Failed to write to temp file", e))?;
+        if let Some(reservation) = &mut self.reservation {
+            reservation
+                .commit_written(data.len() as u64)
+                .map_err(|_| StorageError::Quota)?;
+        }
+        Ok(())
     }
 
     /// Flush and fsync the temp file to disk.

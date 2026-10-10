@@ -143,6 +143,19 @@ pub struct StorageSettings {
     /// Maximum upload size in bytes. Defaults to 512MB.
     /// Configure via HUB_MAX_UPLOAD_SIZE environment variable.
     pub max_upload_size: u64,
+    /// Process-local temporary space budget for Hub uploads.
+    #[serde(default = "default_hub_temp_quota_bytes")]
+    pub temp_quota_bytes: u64,
+    /// Minimum free filesystem space retained while reserving temp bytes.
+    #[serde(default = "default_temp_min_free_bytes")]
+    pub temp_min_free_bytes: u64,
+}
+
+fn default_hub_temp_quota_bytes() -> u64 {
+    2 * 1024 * 1024 * 1024
+}
+fn default_temp_min_free_bytes() -> u64 {
+    1024 * 1024 * 1024
 }
 
 impl Default for StorageSettings {
@@ -151,6 +164,8 @@ impl Default for StorageSettings {
             inline_threshold_bytes: 1024 * 1024,               // 1MB
             upload_temp_dir: "./data/hub-uploads".to_string(), // Use app-specific dir instead of /tmp
             max_upload_size: 512 * 1024 * 1024,                // 512MB
+            temp_quota_bytes: 2 * 1024 * 1024 * 1024,
+            temp_min_free_bytes: 1024 * 1024 * 1024,
         }
     }
 }
@@ -255,6 +270,12 @@ impl HubConfig {
                     .to_string(),
             );
         }
+        if self.storage.temp_quota_bytes == 0 {
+            return Err("HUB_TEMP_QUOTA_BYTES must be > 0".to_string());
+        }
+        if self.storage.temp_min_free_bytes == 0 {
+            return Err("HUB_TEMP_MIN_FREE_BYTES must be > 0".to_string());
+        }
         if self.storage.inline_threshold_bytes > self.storage.max_upload_size {
             return Err(format!(
                 "HUB_INLINE_THRESHOLD ({}) must be <= HUB_MAX_UPLOAD_SIZE ({})",
@@ -339,6 +360,8 @@ impl HubConfig {
                 upload_temp_dir: env::var("HUB_UPLOAD_TEMP_DIR")
                     .unwrap_or_else(|_| "./data/hub-uploads".to_string()), // Use app-specific dir instead of /tmp
                 max_upload_size: parse_env("HUB_MAX_UPLOAD_SIZE", 512 * 1024 * 1024)?,
+                temp_quota_bytes: parse_env("HUB_TEMP_QUOTA_BYTES", 2 * 1024 * 1024 * 1024u64)?,
+                temp_min_free_bytes: parse_env("HUB_TEMP_MIN_FREE_BYTES", 1024 * 1024 * 1024u64)?,
             },
         };
 
@@ -449,6 +472,12 @@ impl HubConfig {
         }
         if let Some(size) = Self::parse_optional_env("HUB_MAX_UPLOAD_SIZE")? {
             config.storage.max_upload_size = size;
+        }
+        if let Some(size) = Self::parse_optional_env("HUB_TEMP_QUOTA_BYTES")? {
+            config.storage.temp_quota_bytes = size;
+        }
+        if let Some(size) = Self::parse_optional_env("HUB_TEMP_MIN_FREE_BYTES")? {
+            config.storage.temp_min_free_bytes = size;
         }
 
         config.validate()?;

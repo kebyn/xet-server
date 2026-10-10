@@ -19,6 +19,7 @@ use crate::services::lfs_upload::{
 use actix_web::{HttpRequest, HttpResponse, web};
 use futures_util::{StreamExt, TryStreamExt};
 use std::sync::Arc;
+use xet_common::TempResourceManager;
 
 /// Handle Git LFS batch request
 ///
@@ -183,6 +184,9 @@ fn lfs_upload_store_error_response(err: LfsUploadStoreError, temp_dir: &str) -> 
         LfsUploadStoreError::FlushTempFile(message) => {
             internal_error_response("Failed to flush LFS upload temp file", message)
         }
+        LfsUploadStoreError::Quota => HttpResponse::ServiceUnavailable()
+            .insert_header((actix_web::http::header::RETRY_AFTER, "5"))
+            .json(serde_json::json!({"error": "Temporary storage unavailable", "error_type": "ServiceUnavailable"})),
     }
 }
 
@@ -247,6 +251,7 @@ pub async fn lfs_upload(
     config: web::Data<crate::config::HubConfig>,
     xet_signer: web::Data<std::sync::Arc<XetSigner>>,
     cas_client: web::Data<std::sync::Arc<CasClient>>,
+    temp_quota: Option<web::Data<xet_common::TempQuotaLedger>>,
 ) -> HttpResponse {
     // Extract token
     let token = match extract_proxy_token(&req) {
@@ -267,7 +272,22 @@ pub async fn lfs_upload(
 
     let temp_dir = std::path::Path::new(&config.storage.upload_temp_dir);
     let upload_cas_client: Arc<dyn LfsUploadCasClient> = cas_client.get_ref().clone();
-    let service = LfsUploadService::new(upload_cas_client);
+    let manager = match temp_quota {
+        Some(ledger) => TempResourceManager::with_ledger(temp_dir, ledger.get_ref().clone()),
+        None => match TempResourceManager::new(
+            temp_dir,
+            config.storage.temp_quota_bytes,
+            config.storage.temp_min_free_bytes,
+        ) {
+            Ok(manager) => manager,
+            Err(_) => {
+                return HttpResponse::ServiceUnavailable()
+                    .insert_header((actix_web::http::header::RETRY_AFTER, "5"))
+                    .json(serde_json::json!({"error": "Temporary storage unavailable"}));
+            }
+        },
+    };
+    let service = LfsUploadService::with_temp_manager(upload_cas_client, manager);
     // CAS accepts the same OID/operation-bound proxy token that Hub just validated.
     match service
         .upload(

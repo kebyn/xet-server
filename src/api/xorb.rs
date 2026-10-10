@@ -29,6 +29,7 @@ pub async fn upload_xorb(
     storage: web::Data<Box<dyn StorageBackend>>,
     auth: web::Data<AuthVerifier>,
     config: web::Data<ServerConfig>,
+    temp_quota: Option<web::Data<xet_common::TempQuotaLedger>>,
     req: actix_web::HttpRequest,
 ) -> HttpResponse {
     let (prefix, hash_str) = path.into_inner();
@@ -66,16 +67,32 @@ pub async fn upload_xorb(
     );
     if let Err(e) = crate::util::disk::ensure_dir_and_check_space(&temp_dir, check_bytes).await {
         error!("Insufficient disk space: {}", e);
-        return HttpResponse::InsufficientStorage().json(serde_json::json!({
-            "error": "Insufficient storage"
-        }));
+        return HttpResponse::ServiceUnavailable()
+            .insert_header((actix_web::http::header::RETRY_AFTER, "5"))
+            .json(serde_json::json!({"error": "Temporary storage unavailable"}));
     }
 
     // Stream payload to temp file with incremental BLAKE3 hashing
-    let mut temp_file = match TempFile::create(&temp_dir).await {
+    let temp_file_result = match temp_quota {
+        Some(ledger) => TempFile::create_with_ledger(&temp_dir, ledger.get_ref().clone()).await,
+        None => {
+            TempFile::create_with_quota(
+                &temp_dir,
+                config.storage.temp_quota_bytes,
+                config.storage.temp_min_free_bytes,
+            )
+            .await
+        }
+    };
+    let mut temp_file = match temp_file_result {
         Ok(tf) => tf,
         Err(e) => {
             error!("Failed to create temp file: {}", e);
+            if matches!(e, StorageError::Quota) {
+                return HttpResponse::ServiceUnavailable()
+                    .insert_header((actix_web::http::header::RETRY_AFTER, "5"))
+                    .json(serde_json::json!({"error": "Temporary storage unavailable"}));
+            }
             return HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": crate::api::INTERNAL_ERROR_MESSAGE
             }));

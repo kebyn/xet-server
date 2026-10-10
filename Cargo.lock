@@ -4050,6 +4050,8 @@ dependencies = [
 name = "xet-common"
 version = "0.1.0"
 dependencies = [
+ "nix",
+ "thiserror",
  "url",
 ]
 

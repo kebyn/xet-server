@@ -4,7 +4,7 @@ use actix_web::dev::{ServiceFactory, ServiceRequest, ServiceResponse};
 use actix_web::{App, Error, HttpResponse, HttpServer, middleware::Logger, web};
 use std::{sync::Arc, time::Duration};
 
-use xet_common::rate_limit_period;
+use xet_common::{TempQuotaLedger, acquire_temp_directory_lock, rate_limit_period};
 
 use crate::auth::token_store::TokenStore;
 use crate::auth::xet_signer::XetSigner;
@@ -93,6 +93,13 @@ pub fn build_app(
         // Large LFS files use streaming upload via Git LFS protocol.
         .app_data(web::PayloadConfig::default().limit(50 * 1024 * 1024)) // 50MB
         .app_data(web::Data::new(deps.config.clone()))
+        .app_data(web::Data::new(
+            TempQuotaLedger::new(
+                deps.config.storage.temp_quota_bytes,
+                deps.config.storage.temp_min_free_bytes,
+            )
+            .expect("validated Hub temporary quota"),
+        ))
         .app_data(web::Data::new(deps.token_store.clone()))
         .app_data(web::Data::new(deps.metadata.clone()))
         .app_data(web::Data::new(deps.signer.clone()))
@@ -352,6 +359,11 @@ pub fn build_app(
 }
 
 pub async fn start_server(config: HubConfig) -> std::io::Result<()> {
+    let _temp_dir_lock =
+        acquire_temp_directory_lock(std::path::Path::new(&config.storage.upload_temp_dir))
+            .map_err(|error| {
+                std::io::Error::other(format!("Failed to lock Hub temp directory: {}", error))
+            })?;
     // Create one shared SQLite pool for both TokenStore and MetadataStore.
     // SQLite only supports one writer at a time; sharing the configured pool keeps
     // total DB connections bounded across both stores.
